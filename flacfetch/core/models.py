@@ -47,7 +47,6 @@ class Quality:
                 return s_rate < o_rate
                 
             # 4. Media preference: WEB > CD > Vinyl (Opinionated default)
-            # Higher value = better? No, let's define explicit ranking
             media_rank = {
                 MediaSource.WEB: 3,
                 MediaSource.CD: 2,
@@ -91,6 +90,40 @@ class Release:
     info_hash: Optional[str] = None # For torrents
     size_bytes: Optional[int] = None
     
-    def __str__(self) -> str:
-        return f"[{self.source_name}] {self.artist} - {self.title} ({self.quality})"
+    # Extra Metadata
+    year: Optional[int] = None
+    edition_info: Optional[str] = None # e.g. "Deluxe Edition", "Remaster 2020"
+    label: Optional[str] = None
+    catalogue_number: Optional[str] = None
+    
+    @property
+    def formatted_size(self) -> str:
+        if self.size_bytes is None:
+            return "?"
+        
+        size = float(self.size_bytes)
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if size < 1024.0:
+                return f"{size:.1f} {unit}"
+            size /= 1024.0
+        return f"{size:.1f} TB"
 
+    def __str__(self) -> str:
+        parts = [f"[{self.source_name}]"]
+        parts.append(f"{self.artist} - {self.title}")
+        
+        meta = []
+        if self.year:
+            meta.append(str(self.year))
+        if self.edition_info:
+            meta.append(self.edition_info)
+        
+        if meta:
+            parts.append(f"[{', '.join(meta)}]")
+            
+        parts.append(f"({self.quality})")
+        
+        if self.size_bytes:
+            parts.append(f"- {self.formatted_size}")
+            
+        return " ".join(parts)

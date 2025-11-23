@@ -25,7 +25,7 @@ class RedactedProvider(Provider):
             "searchstr": f"{query.artist} {query.title}",
         }
         
-        logger.debug(f"Searching Redacted: {params['searchstr']}")
+        logger.debug(f"Searching Redacted with params: {params}")
         
         try:
             resp = self.session.get(url, params=params, timeout=10)
@@ -45,27 +45,56 @@ class RedactedProvider(Provider):
                 
             releases = []
             results = data.get("response", {}).get("results", [])
-            logger.debug(f"Found {len(results)} groups in Redacted")
+            logger.debug(f"Found {len(results)} groups in Redacted response")
             
             for group in results:
                 artist = group["artist"]
                 group_name = group["groupName"]
+                group_year = group.get("groupYear")
                 
-                # Check strict matching if needed, but for now take all
-                
-                for torrent in group.get("torrents", []):
+                torrents = group.get("torrents", [])
+                logger.debug(f"Processing group '{group_name}' ({group_year}) with {len(torrents)} torrents")
+
+                for torrent in torrents:
                     quality = self._parse_quality(torrent)
                     dl_url = f"{self.BASE_URL}/ajax.php?action=download&id={torrent['torrentId']}"
                     
-                    releases.append(Release(
+                    # Construct edition info
+                    edition_parts = []
+                    remaster_title = torrent.get("remasterTitle")
+                    remaster_year = torrent.get("remasterYear")
+                    remaster_record_label = torrent.get("remasterRecordLabel")
+                    remaster_catalogue_number = torrent.get("remasterCatalogueNumber")
+                    
+                    if torrent.get("remastered"):
+                        if remaster_title:
+                            edition_parts.append(remaster_title)
+                        if remaster_year:
+                            edition_parts.append(f"{remaster_year}")
+                    
+                    edition_info = " ".join(edition_parts) if edition_parts else None
+                    
+                    # Use remaster info or group info
+                    label = remaster_record_label or group.get("groupRecordLabel")
+                    cat_num = remaster_catalogue_number or group.get("groupCatalogueNumber")
+                    year = remaster_year if (torrent.get("remastered") and remaster_year) else group_year
+
+                    r = Release(
                         title=group_name,
                         artist=artist,
                         quality=quality,
                         source_name=self.name,
                         download_url=dl_url,
-                        size_bytes=torrent.get("size")
-                    ))
+                        size_bytes=torrent.get("size"),
+                        year=year,
+                        edition_info=edition_info,
+                        label=label,
+                        catalogue_number=cat_num
+                    )
+                    releases.append(r)
+                    logger.debug(f"Parsed release: {r}")
                     
+            logger.info(f"Total releases parsed from Redacted: {len(releases)}")
             return releases
         except requests.RequestException as e:
             logger.error(f"Connection error to Redacted: {e}")
@@ -81,6 +110,7 @@ class RedactedProvider(Provider):
             logger.info(f"Fetching artifact from {release.download_url}")
             resp = self.session.get(release.download_url, timeout=10)
             if resp.status_code == 200:
+                logger.debug(f"Artifact fetched successfully ({len(resp.content)} bytes)")
                 return resp.content
             else:
                 logger.error(f"Failed to fetch artifact: Status {resp.status_code}")
