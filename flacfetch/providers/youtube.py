@@ -29,7 +29,8 @@ class YoutubeProvider(Provider):
                     for entry in info['entries']:
                         if not entry: continue
                         title = entry.get('title', 'Unknown')
-                        url = entry.get('url') or entry.get('webpage_url')
+                        # Prefer webpage_url (the watch page) over direct stream url
+                        url = entry.get('webpage_url') or entry.get('url')
                         
                         # Extract Metadata
                         channel = entry.get('uploader') or entry.get('channel')

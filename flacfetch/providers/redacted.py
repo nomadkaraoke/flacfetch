@@ -173,7 +173,8 @@ class RedactedProvider(Provider):
                     seeders=torrent.get("seeders", 0),
                     target_file=target_file,
                     target_file_size=target_size,
-                    match_score=match_score
+                    match_score=match_score,
+                    track_pattern=track_title # Ensure pattern is passed for highlighting
                 )
                 releases.append(r)
                 
