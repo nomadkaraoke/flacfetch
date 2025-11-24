@@ -2,6 +2,7 @@
 api_docs
 *.webm
 *.mp4
+libtorrent_build_work
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

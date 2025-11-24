@@ -1,26 +1,30 @@
 # flacfetch
 
-**flacfetch** is a Python tool designed to search for and download high-quality audio files from various sources. It is optimized for finding specific tracks (songs) across both private trackers and public sources.
+**flacfetch** is a Python tool designed to search for and download high-quality audio files from various sources. It is optimized for finding specific tracks (songs) across both private trackers and public sources, with intelligent prioritization of "Official" and "Original" releases.
 
 ## Features
 
 -   **Precise Track Search**:
     -   **Private BitTorrent Trackers**: Redacted (API integration). Uses advanced file list filtering to find specific songs within album torrents, downloading only the required track.
     -   **Public Sources**: YouTube (via `yt-dlp`).
+-   **Smart Prioritization**:
+    -   **Official Sources**: Automatically prioritizes "Topic" channels and "Official Audio" on YouTube.
+    -   **Quality Heuristics**: 
+        -   **Redacted**: Prioritizes Lossless (FLAC) and healthy torrents (Seeders). Matches filename exactly to your query.
+        -   **YouTube**: Prioritizes newer uploads (Opus codec) over legacy uploads (AAC). Color-codes upload years to help you spot modern, high-quality streams (Green: 2020+, Yellow: 2015-2019, Red: <2015).
 -   **Flexible Interaction**:
-    -   **Interactive Mode**: Present search results to the user for manual selection. Supports shell input for CLI and callbacks/hooks for library usage.
-    -   **Automatic Mode**: Automatically select the highest quality available based on a predefined hierarchy (e.g., 24-bit FLAC WEB > 16-bit FLAC CD > Lossy).
+    -   **Interactive Mode**: Present search results to the user for manual selection with rich, color-coded metadata (Seeders, Views, Duration).
+    -   **Automatic Mode**: Automatically select the highest ranked release.
 -   **Smart Downloading**:
-    -   **Selective BitTorrent**: Uses `libtorrent` to download *only* the specific file matching your search query from larger album torrents.
-    -   **Direct Downloads**: Handles HTTP downloads for public sources.
--   **Quality Prioritization**: Intelligent sorting and selection logic to ensure the best audio fidelity.
+    -   **Selective BitTorrent**: Uses `libtorrent` to download *only* the specific file matching your search query from larger album torrents (saving bandwidth).
+    -   **Direct Downloads**: Handles HTTP/Stream downloads for public sources.
 
 ## Requirements
 
 -   Python 3.8+
 -   `requests`
 -   `yt-dlp`
--   **libtorrent** (Python bindings) - *Required for BitTorrent downloads*
+-   **libtorrent** (Python bindings) - *Required for BitTorrent downloads* (Optional if only using YouTube)
 
 ### Installing libtorrent
 
@@ -89,9 +93,9 @@ if best:
     manager.download(best, output_path="./downloads")
 ```
 
-## Architecture
+## Architecture & Design
 
-See [PLAN.md](PLAN.md) for detailed architecture and implementation notes.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed architecture, design choices, and implementation learnings.
 
 ## Legal Disclaimer
 
