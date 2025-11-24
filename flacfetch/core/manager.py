@@ -36,11 +36,12 @@ class FetchManager:
     def _sort_releases(self, releases: List[Release]) -> List[Release]:
         # Sorting Logic:
         # 1. Match Score (Redacted only, mostly)
-        # 2. Official/Topic (YouTube)
-        # 3. Release Type (Redacted)
-        # 4. Seeders (Redacted)
-        # 5. Quality (Bitrate/Lossless)
-        # 6. Year (Context dependent)
+        # 2. Channel Match (YouTube artist matching)
+        # 3. Official/Topic (YouTube)
+        # 4. Release Type (Redacted)
+        # 5. Seeders (Redacted) / Views (YouTube)
+        # 6. Quality (Bitrate/Lossless)
+        # 7. Year (Context dependent)
         
         def release_type_score(r: Release) -> int:
             if not r.release_type: return 0
@@ -54,6 +55,28 @@ class FetchManager:
                 "Remix": 1
             }
             return priority.get(r.release_type, 0)
+        
+        def channel_match_score(r: Release) -> int:
+            """Score based on how well the channel name matches the artist name (YouTube only)"""
+            if r.source_name != "YouTube":
+                return 0
+            if not r.channel or not r.artist:
+                return 0
+            
+            channel_lower = r.channel.lower()
+            artist_lower = r.artist.lower()
+            
+            # Exact match (highest priority)
+            if channel_lower == artist_lower:
+                return 100
+            # Artist name in channel (e.g., "salute - Topic")
+            elif artist_lower in channel_lower:
+                return 80
+            # Channel in artist name
+            elif channel_lower in artist_lower:
+                return 60
+            # No match
+            return 0
 
         def is_official_score(r: Release) -> int:
             if r.source_name != "YouTube":
@@ -89,12 +112,13 @@ class FetchManager:
             return -r.year
 
         return sorted(releases, key=lambda r: (
-            r.match_score,          # 1. Name Match
-            is_official_score(r),   # 2. Official (YouTube)
-            release_type_score(r),  # 3. Type (Redacted)
-            (r.seeders or 0),       # 4. Seeders
-            r.quality,              # 5. Quality
-            year_score(r)           # 6. Year
+            r.match_score,             # 1. Name Match
+            channel_match_score(r),    # 2. Channel Match (YouTube)
+            is_official_score(r),      # 3. Official (YouTube)
+            release_type_score(r),     # 4. Type (Redacted)
+            (r.seeders or r.view_count or 0),  # 5. Seeders/Views
+            r.quality,                 # 6. Quality
+            year_score(r)              # 7. Year
         ), reverse=True)
 
     def select_best(self, releases: List[Release]) -> Optional[Release]:

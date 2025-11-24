@@ -52,7 +52,13 @@ class CLIHandler(InteractionHandler):
                 print(f"{Colors.RED}Please enter a number.{Colors.RESET}")
 
     def _print_release(self, idx: int, r: Release):
-        # 1. Source Name
+        # 1. Format indicator (lossless vs lossy)
+        if r.quality.is_lossless():
+            format_indicator = f"{Colors.GREEN}[LOSSLESS]{Colors.RESET}"
+        else:
+            format_indicator = f"{Colors.DIM}[lossy]{Colors.RESET}"
+        
+        # 2. Source Name
         source_tag = f"[{Colors.CYAN}{r.source_name}{Colors.RESET}]"
         
         # Title/Artist Display
@@ -77,7 +83,7 @@ class CLIHandler(InteractionHandler):
             title_str = f"{Colors.BOLD}{r.title}{Colors.RESET}"
             main_info = f"{subject_str} - {title_str}"
         
-        header = f"{idx}. {source_tag} {main_info}"
+        header = f"{idx}. {format_indicator} {source_tag} {main_info}"
         
         # Metadata
         meta_parts = []
@@ -164,32 +170,128 @@ class CLIHandler(InteractionHandler):
             stats_parts.append(f"Views: {v_color}{r.formatted_views}{Colors.RESET}")
             
         stats_str = f" - {', '.join(stats_parts)}" if stats_parts else ""
-            
-        print(f"{header}{meta_str}{qual_str}{stats_str}")
         
-        # Target File (Redacted) with highlighting
+        # Target File (Redacted) with highlighting - moved to end of line
+        file_str = ""
         if r.target_file:
             fname = r.target_file
+            
+            # Strip track numbers (e.g., "12. " or "1.12 - " or "05 - ")
+            fname = re.sub(r'^\d+[\.\-\s]+', '', fname)
+            
             if r.track_pattern:
                 # Highlight match
                 pattern = re.escape(r.track_pattern)
                 fname = re.sub(f"({pattern})", f"{Colors.YELLOW}\\1{Colors.RESET}", fname, flags=re.IGNORECASE)
             
-            print(f"   -> File: {fname}")
+            file_str = f', "{fname}"'
+            
+        print(f"{header}{meta_str}{qual_str}{stats_str}{file_str}")
 
 def main():
-    parser = argparse.ArgumentParser(description="flacfetch - Audio Downloader")
-    parser.add_argument("query", nargs="*", help="Search query (e.g. 'Artist - Title')")
-    parser.add_argument("-a", "--artist", help="Artist name")
-    parser.add_argument("-t", "--title", "--track", dest="title", help="Track/Song title")
-    parser.add_argument("--auto", action="store_true", help="Auto select best quality")
-    parser.add_argument("--redacted-key", help="Redacted API Key (or set REDACTED_API_KEY env var)")
-    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
-    parser.add_argument("--limit", type=int, default=20, help="Limit number of API result groups to process (default 20)")
-    parser.add_argument("-o", "--output", help="Output directory (default: current directory)")
-    parser.add_argument("--rename", "--auto-rename", action="store_true", dest="auto_rename", 
-                       help="Automatically rename output file to 'ARTIST - TITLE.ext'")
-    parser.add_argument("--filename", help="Specify exact output filename (with or without extension)")
+    # Custom formatter with wider width to prevent awkward wrapping
+    class WideHelpFormatter(argparse.RawDescriptionHelpFormatter):
+        def __init__(self, prog, max_help_position=35, width=100):
+            super().__init__(prog, max_help_position=max_help_position, width=width)
+    
+    parser = argparse.ArgumentParser(
+        prog="flacfetch",
+        description="""
+flacfetch - High-Quality Audio Downloader
+
+Search and download music from multiple sources including Redacted (lossless FLAC)
+and YouTube. Intelligently matches tracks and presents quality options.
+        """.strip(),
+        epilog="""
+Examples:
+  flacfetch "Artist" "Title"
+      Search with positional args
+      
+  flacfetch -a "Artist" -t "Title"
+      Search with explicit flags
+      
+  flacfetch "Artist" "Title" --auto
+      Auto-select best quality
+      
+  flacfetch -a "Artist" -t "Title" -o ~/Music --rename
+      Download to ~/Music with auto-rename
+      
+  flacfetch -t "Title"
+      Search YouTube only (no artist required)
+
+Environment Variables:
+  REDACTED_API_KEY        API key for Redacted (lossless FLAC source)
+        """.strip(),
+        formatter_class=WideHelpFormatter
+    )
+    
+    # Positional arguments
+    parser.add_argument(
+        "query", 
+        nargs="*", 
+        help="Artist and title as two separate args: 'Artist' 'Title'"
+    )
+    
+    # Search options
+    search_group = parser.add_argument_group("Search Options")
+    search_group.add_argument(
+        "-a", "--artist", 
+        metavar="NAME",
+        help="Artist name (enables Redacted if API key set)"
+    )
+    search_group.add_argument(
+        "-t", "--title", 
+        dest="title",
+        metavar="NAME",
+        help="Track/song title (required)"
+    )
+    search_group.add_argument(
+        "--auto", 
+        action="store_true", 
+        help="Auto-select best quality without prompting"
+    )
+    search_group.add_argument(
+        "--limit", 
+        type=int, 
+        default=20,
+        metavar="N",
+        help="Limit Redacted result groups (default: 20)"
+    )
+    
+    # Output options
+    output_group = parser.add_argument_group("Output Options")
+    output_group.add_argument(
+        "-o", "--output", 
+        metavar="DIR",
+        help="Output directory (default: current dir)"
+    )
+    output_group.add_argument(
+        "--rename", 
+        action="store_true", 
+        dest="auto_rename",
+        help="Auto-rename to 'ARTIST - TITLE.ext'"
+    )
+    output_group.add_argument(
+        "--filename", 
+        metavar="NAME",
+        help="Exact output filename (extension optional)"
+    )
+    
+    # Provider options
+    provider_group = parser.add_argument_group("Provider Options")
+    provider_group.add_argument(
+        "--redacted-key", 
+        metavar="KEY",
+        help="Redacted API key (or use REDACTED_API_KEY env var)"
+    )
+    
+    # General options
+    general_group = parser.add_argument_group("General Options")
+    general_group.add_argument(
+        "-v", "--verbose", 
+        action="store_true", 
+        help="Enable verbose logging"
+    )
     
     args = parser.parse_args()
     
@@ -198,17 +300,27 @@ def main():
     artist = args.artist
     title = args.title
     
+    # Parse positional arguments
     if not (artist and title) and args.query:
-        query_str = " ".join(args.query)
-        if " - " in query_str:
-            parts = query_str.split(" - ", 1)
-            if not artist: artist = parts[0].strip()
-            if not title: title = parts[1].strip()
-        else:
-            if not title: title = query_str
+        if len(args.query) == 2:
+            # Two positional args: treat as artist and title
+            if not artist: artist = args.query[0].strip()
+            if not title: title = args.query[1].strip()
+        elif len(args.query) == 1:
+            # Single positional arg: treat as title only
+            if not title: title = args.query[0].strip()
+        elif len(args.query) > 2:
+            # Multiple args: join all as title
+            if not title: title = " ".join(args.query).strip()
     
+    # Validate required arguments
     if not title:
-        print(f"{Colors.RED}Error: Track title is required.{Colors.RESET}")
+        print(f"\n{Colors.RED}✗ Error: Track title is required{Colors.RESET}\n")
+        print(f"{Colors.BOLD}Usage examples:{Colors.RESET}")
+        print(f'  {Colors.CYAN}flacfetch "Artist" "Title"{Colors.RESET}')
+        print(f'  {Colors.CYAN}flacfetch -a "Artist" -t "Title"{Colors.RESET}')
+        print(f'  {Colors.CYAN}flacfetch -t "Title"{Colors.RESET} (YouTube only)\n')
+        print(f"Run {Colors.CYAN}flacfetch --help{Colors.RESET} for more information.")
         sys.exit(1)
         
     manager = FetchManager()
@@ -233,25 +345,40 @@ def main():
                 print("Info: Redacted provider skipped (requires Artist name).")
     
     if not manager.providers:
-        print("No providers configured.")
+        print(f"\n{Colors.RED}✗ Error: No providers configured{Colors.RESET}")
+        print(f"\n{Colors.BOLD}Tip:{Colors.RESET} Set REDACTED_API_KEY environment variable to enable lossless FLAC downloads.")
         sys.exit(1)
-            
-    print(f"Searching for: {Colors.BOLD}{artist or 'Unknown'} - {title}{Colors.RESET} ...")
+    
+    # Show configured providers
+    provider_names = [p.name for p in manager.providers]
+    provider_str = ", ".join(f"{Colors.CYAN}{p}{Colors.RESET}" for p in provider_names)
+    print(f"\n{Colors.BOLD}Searching:{Colors.RESET} {Colors.GREEN}{artist or 'Unknown Artist'}{Colors.RESET} - {Colors.GREEN}{title}{Colors.RESET}")
+    print(f"{Colors.BOLD}Providers:{Colors.RESET} {provider_str}\n")
+    
     q = TrackQuery(artist=artist or "", title=title)
     releases = manager.search(q)
     
     if not releases:
-        print("No results found.")
+        print(f"{Colors.YELLOW}No results found.{Colors.RESET}")
+        print(f"\n{Colors.BOLD}Suggestions:{Colors.RESET}")
+        print(f"  • Try a different spelling or search term")
+        print(f"  • Check that your artist/title are correct")
+        if not artist:
+            print(f"  • Provide an artist name for better Redacted results")
+        if "Redacted" not in provider_names and not args.redacted_key:
+            print(f"  • Set REDACTED_API_KEY to search lossless FLAC sources")
         sys.exit(0)
     
     selected = None
     if args.auto:
         selected = manager.select_best(releases)
+        print(f"\n{Colors.BOLD}Auto-selected:{Colors.RESET} {selected.title} ({selected.quality})")
     else:
         selected = manager.select_interactive(releases, CLIHandler(artist))
         
     if selected:
-        print(f"\nSelected: {selected.title} ({selected.quality})")
+        if not args.auto:
+            print(f"\n{Colors.BOLD}Selected:{Colors.RESET} {selected.title} ({selected.quality})")
         
         # Determine output directory
         output_dir = args.output or "."
@@ -300,7 +427,7 @@ def main():
             print(f"{Colors.RED}{'='*60}{Colors.RESET}\n")
             sys.exit(1)
     else:
-        print("No selection made.")
+        print(f"\n{Colors.YELLOW}No selection made. Exiting.{Colors.RESET}")
 
 if __name__ == "__main__":
     main()
