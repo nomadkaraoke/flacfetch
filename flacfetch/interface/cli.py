@@ -2,7 +2,7 @@ import argparse
 import os
 import sys
 import re
-from typing import List, Optional
+from typing import Optional
 from ..core.models import Release, TrackQuery
 from ..core.interfaces import InteractionHandler
 from ..core.manager import FetchManager
@@ -35,7 +35,7 @@ class CLIHandler(InteractionHandler):
     def __init__(self, target_artist: Optional[str] = None):
         self.target_artist = target_artist
 
-    def select_release(self, releases: List[Release]) -> Optional[Release]:
+    def select_release(self, releases: list[Release]) -> Optional[Release]:
         print(f"\nFound {len(releases)} releases:\n")
         for idx, r in enumerate(releases):
             self._print_release(idx + 1, r)

@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Intelligent fallback: automatically tries lower priority providers if higher ones return no results
 
 ### Changed
+- **BREAKING**: Dropped Python 3.8 and 3.9 support, minimum version is now Python 3.10
+- Modernized type hints to use built-in generic types (`list`, `dict`, `set`, `tuple` instead of `typing.List`, etc.)
 - Updated CLI help text to mention both Redacted and OPS trackers
 - Updated README to document OPS support and provider priority system
 - FetchManager now searches providers in priority order with configurable fallback behavior

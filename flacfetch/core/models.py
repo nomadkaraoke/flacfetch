@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Optional, List, Any
+from typing import Optional, Any
 
 class AudioFormat(Enum):
     FLAC = auto()

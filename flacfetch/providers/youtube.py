@@ -1,5 +1,5 @@
 import yt_dlp # type: ignore
-from typing import List, Optional
+from typing import Optional
 from ..core.interfaces import Provider
 from ..core.models import TrackQuery, Release, Quality, AudioFormat, MediaSource
 
@@ -8,7 +8,7 @@ class YoutubeProvider(Provider):
     def name(self) -> str:
         return "YouTube"
 
-    def search(self, query: TrackQuery) -> List[Release]:
+    def search(self, query: TrackQuery) -> list[Release]:
         # Search for 5 results
         # Adding "topic" often helps find the auto-generated "Topic" channel results which are high quality audio
         search_query = f"ytsearch5:{query.artist} {query.title} topic"

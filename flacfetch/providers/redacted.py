@@ -4,7 +4,7 @@ import itertools
 import os
 import html
 from pathlib import Path
-from typing import List, Optional, Any, Dict, Set, Tuple
+from typing import Optional, Any
 from ..core.interfaces import Provider
 from ..core.models import TrackQuery, Release, Quality, AudioFormat, MediaSource
 from ..core.log import get_logger
@@ -34,7 +34,7 @@ class RedactedProvider(Provider):
     def name(self) -> str:
         return "Redacted"
 
-    def search(self, query: TrackQuery) -> List[Release]:
+    def search(self, query: TrackQuery) -> list[Release]:
         url = f"{self.BASE_URL}/ajax.php"
         params = {
             "action": "browse",
@@ -65,7 +65,7 @@ class RedactedProvider(Provider):
             browse_results = data.get("response", {}).get("results", [])
             logger.debug(f"Found {len(browse_results)} groups in Redacted response")
             
-            group_ids: Set[int] = set()
+            group_ids: set[int] = set()
             for group in browse_results:
                 gid = group.get("groupId")
                 if gid:
@@ -106,7 +106,7 @@ class RedactedProvider(Provider):
             logger.exception(f"Unexpected error in RedactedProvider: {e}")
             return []
 
-    def _fetch_group_details(self, group_id: int, track_title: str) -> List[Release]:
+    def _fetch_group_details(self, group_id: int, track_title: str) -> list[Release]:
         url = f"{self.BASE_URL}/ajax.php"
         params = {"action": "torrentgroup", "id": group_id}
         
@@ -311,7 +311,7 @@ class RedactedProvider(Provider):
             logger.error(f"Error fetching artifact: {e}")
         return None
 
-    def _find_best_target_file(self, file_list_str: str, track_title: str) -> Tuple[Optional[str], Optional[int], float]:
+    def _find_best_target_file(self, file_list_str: str, track_title: str) -> tuple[Optional[str], Optional[int], float]:
         if not file_list_str:
             return None, None, 0.0
             
@@ -350,7 +350,7 @@ class RedactedProvider(Provider):
             
         return None, None, 0.0
 
-    def _parse_quality(self, torrent_data: Dict[str, Any]) -> Quality:
+    def _parse_quality(self, torrent_data: dict[str, Any]) -> Quality:
         format_str = torrent_data.get("format", "").upper()
         encoding = torrent_data.get("encoding", "")
         media_str = torrent_data.get("media", "").upper()

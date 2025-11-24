@@ -1,4 +1,4 @@
-from typing import List, Optional, Type
+from typing import Optional
 from .models import TrackQuery, Release
 from .interfaces import Provider, Downloader, InteractionHandler
 from .log import get_logger
@@ -7,16 +7,16 @@ logger = get_logger("FetchManager")
 
 class FetchManager:
     def __init__(self):
-        self.providers: List[Provider] = []
+        self.providers: list[Provider] = []
         self._downloader_map: dict[str, Downloader] = {}
         self._default_downloader: Optional[Downloader] = None
-        self._provider_priority: Optional[List[str]] = None
+        self._provider_priority: Optional[list[str]] = None
         self._use_fallback_search: bool = True  # Search lower priority providers if higher ones fail
     
     def add_provider(self, provider: Provider):
         self.providers.append(provider)
     
-    def set_provider_priority(self, priority_list: List[str]):
+    def set_provider_priority(self, priority_list: list[str]):
         """Set provider search priority by name.
         
         Args:
@@ -40,7 +40,7 @@ class FetchManager:
     def set_default_downloader(self, downloader: Downloader):
         self._default_downloader = downloader
 
-    def search(self, query: TrackQuery) -> List[Release]:
+    def search(self, query: TrackQuery) -> list[Release]:
         all_releases = []
         
         # Get providers in priority order
@@ -78,7 +78,7 @@ class FetchManager:
                 
         return all_releases
     
-    def _get_ordered_providers(self) -> List[Provider]:
+    def _get_ordered_providers(self) -> list[Provider]:
         """Get providers ordered by priority (if set), otherwise in registration order."""
         if not self._provider_priority:
             return self.providers
@@ -99,7 +99,7 @@ class FetchManager:
         
         return ordered
 
-    def _sort_releases(self, releases: List[Release]) -> List[Release]:
+    def _sort_releases(self, releases: list[Release]) -> list[Release]:
         # Sorting Logic:
         # 1. Match Score (Redacted only, mostly)
         # 2. Channel Match (YouTube artist matching)
@@ -187,13 +187,13 @@ class FetchManager:
             year_score(r)              # 7. Year
         ), reverse=True)
 
-    def select_best(self, releases: List[Release]) -> Optional[Release]:
+    def select_best(self, releases: list[Release]) -> Optional[Release]:
         if not releases:
             return None
         sorted_releases = self._sort_releases(releases)
         return sorted_releases[0]
 
-    def select_interactive(self, releases: List[Release], handler: InteractionHandler) -> Optional[Release]:
+    def select_interactive(self, releases: list[Release], handler: InteractionHandler) -> Optional[Release]:
         if not releases:
             return None
         sorted_releases = self._sort_releases(releases)

@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import Optional
 from .models import TrackQuery, Release
 
 class Provider(ABC):
@@ -9,7 +9,7 @@ class Provider(ABC):
         pass
 
     @abstractmethod
-    def search(self, query: TrackQuery) -> List[Release]:
+    def search(self, query: TrackQuery) -> list[Release]:
         pass
 
     def fetch_artifact(self, release: Release) -> Optional[bytes]:
@@ -44,7 +44,7 @@ class Downloader(ABC):
 
 class InteractionHandler(ABC):
     @abstractmethod
-    def select_release(self, releases: List[Release]) -> Optional[Release]:
+    def select_release(self, releases: list[Release]) -> Optional[Release]:
         """
         Prompt the user (or use logic) to select one release from the list.
         Returns None if selection is cancelled.
