@@ -7,6 +7,7 @@ class AudioFormat(Enum):
     MP3 = auto()
     AAC = auto()
     WAV = auto()
+    OPUS = auto()
     OTHER = auto()
 
 class MediaSource(Enum):
