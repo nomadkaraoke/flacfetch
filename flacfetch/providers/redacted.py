@@ -49,8 +49,6 @@ class RedactedProvider(Provider):
             browse_results = data.get("response", {}).get("results", [])
             logger.debug(f"Found {len(browse_results)} groups in Redacted response")
             
-            # Collect Group IDs to fetch details
-            # We only fetch details if we need the filelist (which we do for precise matching)
             group_ids: Set[int] = set()
             for group in browse_results:
                 gid = group.get("groupId")
@@ -63,7 +61,6 @@ class RedactedProvider(Provider):
             for gid in group_ids:
                 group_releases = self._fetch_group_details(gid, query.title)
                 releases.extend(group_releases)
-                # Be polite with rate limits
                 time.sleep(1.1) 
                     
             logger.info(f"Total matching tracks parsed from Redacted: {len(releases)}")
@@ -97,9 +94,6 @@ class RedactedProvider(Provider):
             group_year = group.get("year")
             release_type_id = group.get("releaseType")
             
-            # Map release type ID to string
-            # 1: Album, 3: Soundtrack, 5: EP, 9: Single, etc.
-            # We can look up mapping or just store ID? Storing string is nicer.
             release_type_map = {
                 1: "Album", 3: "Soundtrack", 5: "EP", 6: "Anthology", 
                 7: "Compilation", 9: "Single", 11: "Live album", 13: "Remix",
@@ -110,16 +104,19 @@ class RedactedProvider(Provider):
 
             releases = []
             for torrent in torrents:
+                # Filter for Lossless only (FLAC/WAV)
+                quality = self._parse_quality(torrent)
+                if not quality.is_lossless():
+                    continue
+
                 file_list_str = torrent.get("fileList", "")
                 target_file, match_score = self._find_best_target_file(file_list_str, track_title)
                 
                 if not target_file:
                     continue
                     
-                quality = self._parse_quality(torrent)
                 dl_url = f"{self.BASE_URL}/ajax.php?action=download&id={torrent['id']}"
                 
-                # Construct edition info
                 edition_parts = []
                 remaster_title = torrent.get("remasterTitle")
                 remaster_year = torrent.get("remasterYear")
@@ -177,7 +174,6 @@ class RedactedProvider(Provider):
         return None
 
     def _find_best_target_file(self, file_list_str: str, track_title: str) -> tuple[Optional[str], float]:
-        # Returns (filename, score)
         if not file_list_str:
             return None, 0.0
             
@@ -192,7 +188,6 @@ class RedactedProvider(Provider):
             else:
                 fname = f_entry
                 
-            # Skip non-audio files
             if not any(fname.lower().endswith(ext) for ext in ['.flac', '.mp3', '.m4a', '.wav']):
                 continue
                 
@@ -201,7 +196,6 @@ class RedactedProvider(Provider):
                 best_score = score
                 best_match = fname
         
-        # Threshold
         if best_score > 0.6:
             return best_match, best_score
             
@@ -212,7 +206,6 @@ class RedactedProvider(Provider):
         encoding = torrent_data.get("encoding", "")
         media_str = torrent_data.get("media", "").upper()
         
-        # Format
         if format_str == "FLAC":
             fmt = AudioFormat.FLAC
         elif format_str == "MP3":
@@ -224,7 +217,6 @@ class RedactedProvider(Provider):
         else:
             fmt = AudioFormat.OTHER
             
-        # Media
         media_map = {
             "WEB": MediaSource.WEB,
             "CD": MediaSource.CD,
@@ -234,7 +226,6 @@ class RedactedProvider(Provider):
         }
         media = media_map.get(media_str, MediaSource.OTHER)
         
-        # Bit depth / Bitrate
         bit_depth = None
         bitrate = None
         
