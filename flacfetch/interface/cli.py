@@ -50,68 +50,41 @@ def main():
     artist = args.artist
     title = args.title
     
-    # If explicit args not fully provided, try positional
     if not (artist and title) and args.query:
         query_str = " ".join(args.query)
-        
         if " - " in query_str:
             parts = query_str.split(" - ", 1)
-            # Only override if not provided explicitly
-            if not artist:
-                artist = parts[0].strip()
-            if not title:
-                title = parts[1].strip()
+            if not artist: artist = parts[0].strip()
+            if not title: title = parts[1].strip()
         else:
-            # Fallback behavior
-            if not artist:
-                # If we have a query string but no separator, and no explicit artist, 
-                # we can't reliably determine artist vs title for Redacted's specific search.
-                # But for general fuzzy search (old behavior) we treated it as "Artist Title" or just query.
-                # However, for the new Redacted filelist search, we NEED specific artist and title.
-                # We'll treat the whole query as title if artist is provided, or log a warning.
-                pass
-            if not title:
-                title = query_str
+            if not title: title = query_str
     
     if not title:
         print("Error: Track title is required. Use 'Artist - Title' or --title argument.")
         sys.exit(1)
         
-    # If artist is still missing, Redacted search might fail or be very broad (not supported by current implementation efficiently)
-    # But YouTube provider can handle just a title string.
-    if not artist:
-        if args.verbose:
-            print("Warning: No artist specified. Results might be inaccurate or limited.")
+    if not artist and args.verbose:
+        print("Warning: No artist specified. Results might be inaccurate or limited.")
         
     manager = FetchManager()
     
     # Configure Providers & Downloaders
-    
-    # YouTube (Always available via yt-dlp)
     manager.add_provider(YoutubeProvider())
     manager.register_downloader("YouTube", YoutubeDownloader())
 
-    # Redacted
     redacted_key = args.redacted_key or os.environ.get("REDACTED_API_KEY")
     if redacted_key:
         if artist:
             manager.add_provider(RedactedProvider(redacted_key))
             if TorrentDownloader:
                 try:
-                    # Instantiate with default settings
                     manager.register_downloader("Redacted", TorrentDownloader())
                 except ImportError:
-                    print("Warning: libtorrent not installed properly. Redacted downloads disabled.")
-            else:
-                print("Warning: libtorrent not installed. Redacted downloads disabled.")
+                    pass
         else:
              if args.verbose:
                 print("Info: Redacted provider skipped (requires Artist name).")
-    else:
-        # Only log info if verbose, or print warning?
-        if args.verbose:
-            print("Info: No Redacted API Key provided. Private tracker search disabled.")
-        
+    
     if not manager.providers:
         print("No providers configured (or missing requirements like Artist name). Exiting.")
         sys.exit(1)

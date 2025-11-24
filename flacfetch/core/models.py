@@ -95,10 +95,12 @@ class Release:
     edition_info: Optional[str] = None # e.g. "Deluxe Edition", "Remaster 2020"
     label: Optional[str] = None
     catalogue_number: Optional[str] = None
+    release_type: Optional[str] = None # e.g. "Album", "Single"
     
     # Selective Download Info
     target_file: Optional[str] = None
     track_pattern: Optional[str] = None # The track title to search for if target_file is not yet resolved
+    match_score: float = 0.0 # 0.0 to 1.0, higher is better match for the track title
     
     @property
     def formatted_size(self) -> str:
@@ -117,6 +119,8 @@ class Release:
         parts.append(f"{self.artist} - {self.title}")
         
         meta = []
+        if self.release_type:
+            meta.append(self.release_type)
         if self.year:
             meta.append(str(self.year))
         if self.edition_info:
@@ -131,6 +135,6 @@ class Release:
             parts.append(f"- {self.formatted_size}")
             
         if self.target_file:
-            parts.append(f"[Target: {self.target_file}]")
+            parts.append(f"\n   -> File: {self.target_file}")
             
         return " ".join(parts)
