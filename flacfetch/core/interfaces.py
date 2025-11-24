@@ -28,7 +28,18 @@ class Provider(ABC):
 
 class Downloader(ABC):
     @abstractmethod
-    def download(self, release: Release, output_path: str) -> None:
+    def download(self, release: Release, output_path: str, output_filename: Optional[str] = None) -> str:
+        """
+        Download a release to the specified output path.
+        
+        Args:
+            release: Release object to download
+            output_path: Directory to save the downloaded file
+            output_filename: Optional specific filename for the output
+        
+        Returns:
+            Path to the downloaded file
+        """
         pass
 
 class InteractionHandler(ABC):

@@ -16,7 +16,7 @@
     -   **Interactive Mode**: Present search results to the user for manual selection with rich, color-coded metadata (Seeders, Views, Duration).
     -   **Automatic Mode**: Automatically select the highest ranked release.
 -   **Smart Downloading**:
-    -   **Selective BitTorrent**: Uses `libtorrent` to download *only* the specific file matching your search query from larger album torrents (saving bandwidth).
+    -   **Selective BitTorrent**: Uses Transmission daemon to download *only* the specific file matching your search query from larger album torrents (saving bandwidth).
     -   **Direct Downloads**: Handles HTTP/Stream downloads for public sources.
 
 ## Requirements
@@ -24,15 +24,18 @@
 -   Python 3.8+
 -   `requests`
 -   `yt-dlp`
--   **libtorrent** (Python bindings) - *Required for BitTorrent downloads* (Optional if only using YouTube)
+-   `transmission-rpc`
+-   **Transmission** (daemon) - *Required for BitTorrent downloads* (Optional if only using YouTube)
 
-### Installing libtorrent
+### Installing Transmission
 
-`libtorrent` is a C++ library with Python bindings. It is recommended to install it via your system package manager.
+Transmission is a lightweight, cross-platform BitTorrent client with RPC support.
 
--   **Ubuntu/Debian**: `sudo apt install python3-libtorrent`
--   **macOS**: `brew install libtorrent-rasterbar` (Ensure bindings are in your PYTHONPATH)
--   **Windows**: Check [libtorrent.org](https://libtorrent.org) or `pip install libtorrent` (unofficial wheels may exist).
+-   **Ubuntu/Debian**: `sudo apt install transmission-daemon`
+-   **macOS**: `brew install transmission-cli`
+-   **Windows**: Download from [transmissionbt.com](https://transmissionbt.com)
+
+flacfetch will automatically start the transmission daemon if it's not running.
 
 ## Installation
 
@@ -59,6 +62,21 @@ flacfetch --artist "Seether" --title "Tonight"
 **Auto-download Highest Quality**
 ```bash
 flacfetch --auto --artist "Seether" --title "Tonight"
+```
+
+**Output Options**
+```bash
+# Specify output directory
+flacfetch --artist "Seether" --title "Tonight" -o ~/Music
+
+# Auto-rename to "ARTIST - TITLE.ext"
+flacfetch --artist "Seether" --title "Tonight" --rename
+
+# Specify exact filename
+flacfetch --artist "Seether" --title "Tonight" --filename "my_song"
+
+# Combine options
+flacfetch --artist "Seether" --title "Tonight" -o ~/Music --rename
 ```
 
 **Verbose Logging**
@@ -89,8 +107,13 @@ results = manager.search(TrackQuery(artist="Seether", title="Tonight"))
 best = manager.select_best(results)
 
 if best:
-    # This will download ONLY the specific track file if it's a torrent
-    manager.download(best, output_path="./downloads")
+    # Download returns the path to the downloaded file
+    file_path = manager.download(
+        best, 
+        output_path="./downloads",
+        output_filename="Seether - Tonight"  # Optional: custom filename
+    )
+    print(f"Downloaded to: {file_path}")
 ```
 
 ## Architecture & Design

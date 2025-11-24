@@ -31,6 +31,9 @@ class Colors:
     ORANGE = "\033[38;5;208m" # Roughly orange
 
 class CLIHandler(InteractionHandler):
+    def __init__(self, target_artist: Optional[str] = None):
+        self.target_artist = target_artist
+
     def select_release(self, releases: List[Release]) -> Optional[Release]:
         print(f"\nFound {len(releases)} releases:\n")
         for idx, r in enumerate(releases):
@@ -55,12 +58,24 @@ class CLIHandler(InteractionHandler):
         # Title/Artist Display
         if r.source_name == "YouTube":
             # Channel: Title
-            channel_str = f"{Colors.ORANGE}{r.channel}{Colors.RESET}" if r.channel else "Unknown"
+            subject = r.channel
+            color = Colors.ORANGE
+            if subject and self.target_artist and subject.lower() == self.target_artist.lower():
+                color = Colors.GREEN
+            
+            subject_str = f"{color}{subject}{Colors.RESET}" if subject else "Unknown"
             title_str = f"{Colors.BOLD}{r.title}{Colors.RESET}"
-            main_info = f"{channel_str}: {title_str}"
+            main_info = f"{subject_str}: {title_str}"
         else:
             # Redacted: Artist - Title
-            main_info = f"{Colors.BOLD}{r.artist} - {r.title}{Colors.RESET}"
+            subject = r.artist
+            color = Colors.ORANGE
+            if subject and self.target_artist and subject.lower() == self.target_artist.lower():
+                color = Colors.GREEN
+                
+            subject_str = f"{color}{subject}{Colors.RESET}" if subject else "Unknown"
+            title_str = f"{Colors.BOLD}{r.title}{Colors.RESET}"
+            main_info = f"{subject_str} - {title_str}"
         
         header = f"{idx}. {source_tag} {main_info}"
         
@@ -171,6 +186,10 @@ def main():
     parser.add_argument("--redacted-key", help="Redacted API Key (or set REDACTED_API_KEY env var)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging")
     parser.add_argument("--limit", type=int, default=20, help="Limit number of API result groups to process (default 20)")
+    parser.add_argument("-o", "--output", help="Output directory (default: current directory)")
+    parser.add_argument("--rename", "--auto-rename", action="store_true", dest="auto_rename", 
+                       help="Automatically rename output file to 'ARTIST - TITLE.ext'")
+    parser.add_argument("--filename", help="Specify exact output filename (with or without extension)")
     
     args = parser.parse_args()
     
@@ -229,17 +248,57 @@ def main():
     if args.auto:
         selected = manager.select_best(releases)
     else:
-        selected = manager.select_interactive(releases, CLIHandler())
+        selected = manager.select_interactive(releases, CLIHandler(artist))
         
     if selected:
         print(f"\nSelected: {selected.title} ({selected.quality})")
+        
+        # Determine output directory
+        output_dir = args.output or "."
+        
+        # Determine output filename if needed
+        output_filename = None
+        if args.filename:
+            output_filename = args.filename
+        elif args.auto_rename and artist and title:
+            # Auto-rename to "ARTIST - TITLE.ext"
+            # Extension will be determined by the downloader
+            output_filename = f"{artist} - {title}"
+        
         try:
-            manager.download(selected, ".")
+            downloaded_file = manager.download(selected, output_dir, output_filename=output_filename)
+            
+            # Friendly summary message
+            print(f"\n{Colors.GREEN}{'='*60}{Colors.RESET}")
+            print(f"{Colors.GREEN}✓ Download Complete!{Colors.RESET}\n")
+            print(f"{Colors.BOLD}Track:{Colors.RESET}     {artist or 'Unknown'} - {title}")
+            print(f"{Colors.BOLD}Source:{Colors.RESET}    {selected.source_name}")
+            print(f"{Colors.BOLD}Quality:{Colors.RESET}   {selected.quality}")
+            if selected.size_bytes:
+                size_mb = selected.size_bytes / (1024 * 1024)
+                print(f"{Colors.BOLD}Size:{Colors.RESET}      {size_mb:.1f} MB")
+            if downloaded_file:
+                # Get relative path if possible
+                try:
+                    rel_path = os.path.relpath(downloaded_file)
+                    if len(rel_path) < len(downloaded_file):
+                        file_display = rel_path
+                    else:
+                        file_display = downloaded_file
+                except:
+                    file_display = downloaded_file
+                print(f"{Colors.BOLD}Saved to:{Colors.RESET}  {Colors.CYAN}{file_display}{Colors.RESET}")
+            print(f"{Colors.GREEN}{'='*60}{Colors.RESET}\n")
+            
         except Exception as e:
             if args.verbose:
                 import traceback
                 traceback.print_exc()
-            print(f"{Colors.RED}Download failed: {e}{Colors.RESET}")
+            print(f"\n{Colors.RED}{'='*60}{Colors.RESET}")
+            print(f"{Colors.RED}✗ Download Failed{Colors.RESET}")
+            print(f"{Colors.RED}Error: {e}{Colors.RESET}")
+            print(f"{Colors.RED}{'='*60}{Colors.RESET}\n")
+            sys.exit(1)
     else:
         print("No selection made.")
 

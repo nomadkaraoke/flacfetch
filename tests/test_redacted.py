@@ -111,3 +111,52 @@ def test_redacted_no_match_filtered():
     releases = provider.search(q)
     
     assert len(releases) == 0
+
+def test_redacted_html_entity_decoding():
+    """Test that HTML entities like &amp; are properly decoded in filenames."""
+    provider = RedactedProvider(api_key="test")
+    provider.session.get = MagicMock()
+    
+    # Response with HTML entities in filename
+    # Use "Luv Stuck" as the track name to get better matching
+    HTML_ENTITY_RESPONSE = {
+        "status": "success",
+        "response": {
+            "group": {
+                "name": "Test Album",
+                "year": 2024,
+                "recordLabel": "Test Label",
+                "catalogueNumber": "TEST001",
+                "releaseType": 1,
+                "musicInfo": {"artists": [{"name": "Salute"}]}
+            },
+            "torrents": [{
+                "id": 1,
+                "format": "FLAC",
+                "encoding": "Lossless",
+                "media": "CD",
+                "size": 10000000,
+                "seeders": 10,
+                "fileList": "05 - Salute &amp; Piri - Luv Stuck.flac{{{1000}}}",
+                "remastered": False
+            }]
+        }
+    }
+    
+    browse_resp = MagicMock()
+    browse_resp.status_code = 200
+    browse_resp.json.return_value = {"status": "success", "response": {"results": [{"groupId": 1}]}}
+    
+    details_resp = MagicMock()
+    details_resp.status_code = 200
+    details_resp.json.return_value = HTML_ENTITY_RESPONSE
+    
+    provider.session.get.side_effect = [browse_resp, details_resp]
+    
+    q = TrackQuery(artist="Salute", title="Luv Stuck")
+    releases = provider.search(q)
+    
+    # Should find the release and decode &amp; to &
+    assert len(releases) == 1
+    assert releases[0].target_file == "05 - Salute & Piri - Luv Stuck.flac"
+    assert "&amp;" not in releases[0].target_file

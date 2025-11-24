@@ -109,7 +109,7 @@ class FetchManager:
         sorted_releases = self._sort_releases(releases)
         return handler.select_release(sorted_releases)
 
-    def download(self, release: Release, output_path: str):
+    def download(self, release: Release, output_path: str, output_filename: Optional[str] = None) -> str:
         downloader = self._downloader_map.get(release.source_name, self._default_downloader)
         if not downloader:
             msg = f"No downloader registered for source: {release.source_name}"
@@ -135,6 +135,15 @@ class FetchManager:
                 
                 logger.debug(f"Saved temporary torrent file to {path}")
                 release.download_url = path 
-        
+            elif provider.name == "Redacted":
+                 # If we failed to fetch the artifact but still proceed, we likely passed a URL to the downloader
+                 # The downloader expects a local path or magnet.
+                 # If download_url is http..., TorrentDownloader will fail.
+                 if release.download_url and release.download_url.startswith("http"):
+                     msg = "Failed to download torrent file from provider. Cannot proceed with download."
+                     logger.error(msg)
+                     raise ValueError(msg)
+
         logger.info(f"Starting download for {release.title}...")
-        downloader.download(release, output_path)
+        downloaded_file = downloader.download(release, output_path, output_filename=output_filename)
+        return downloaded_file

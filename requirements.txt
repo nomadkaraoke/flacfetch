@@ -1,3 +1,4 @@
 requests>=2.28.0
 yt-dlp>=2023.0.0
+transmission-rpc>=7.0.0
 

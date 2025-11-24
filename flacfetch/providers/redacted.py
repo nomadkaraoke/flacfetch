@@ -1,7 +1,10 @@
 import requests
 import time
 import itertools
-from typing import List, Optional, Any, Dict, Set
+import os
+import html
+from pathlib import Path
+from typing import List, Optional, Any, Dict, Set, Tuple
 from ..core.interfaces import Provider
 from ..core.models import TrackQuery, Release, Quality, AudioFormat, MediaSource
 from ..core.log import get_logger
@@ -17,6 +20,15 @@ class RedactedProvider(Provider):
         self.session = requests.Session()
         self.session.headers.update({"Authorization": self.api_key})
         self.search_limit = 20 # Default limit
+        
+        # Setup persistent cache
+        self.cache_dir = Path.home() / ".flacfetch" / "cache" / "redacted"
+        try:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            logger.debug(f"Redacted cache directory: {self.cache_dir}")
+        except Exception as e:
+            logger.warning(f"Could not create cache directory: {e}")
+            self.cache_dir = None
         
     @property
     def name(self) -> str:
@@ -187,19 +199,119 @@ class RedactedProvider(Provider):
     def fetch_artifact(self, release: Release) -> Optional[bytes]:
         if not release.download_url:
             return None
+            
+        # Extract Torrent ID for caching
+        torrent_id = None
         try:
+            if "id=" in release.download_url:
+                torrent_id = release.download_url.split("id=")[1].split("&")[0]
+        except IndexError:
+            pass
+
+        # Check Cache
+        if torrent_id and self.cache_dir:
+            cache_path = self.cache_dir / f"{torrent_id}.torrent"
+            if cache_path.exists():
+                try:
+                    logger.info(f"Found torrent in cache: {cache_path}")
+                    with open(cache_path, "rb") as f:
+                        data = f.read()
+                    if len(data) > 0:
+                        return data
+                except Exception as e:
+                    logger.warning(f"Error reading from cache: {e}")
+
+        try:
+            # Ensure we don't re-download local files
+            if release.download_url.startswith("/") or release.download_url.startswith("file://"):
+                return None
+
             logger.info(f"Fetching artifact from {release.download_url}")
-            resp = self.session.get(release.download_url, timeout=10)
+            
+            # Ensure session has the API key (it should from __init__)
+            # Some users report needing to append &usetoken=1 for download actions if using API key
+            url = release.download_url
+            # Remove usetoken=1 unless explicitly requested (it consumes FL tokens)
+            # if "usetoken=1" not in url:
+            #    url += "&usetoken=1"
+
+            # Redacted sometimes requires 'authkey' or 'passkey' for download actions if not using API key correctly,
+            # but API key should supersede.
+            # Let's ensure we are not getting a redirect that drops headers.
+            
+            # Log Request Details
+            req_headers = self.session.headers.copy()
+            # Mask API Key for logs
+            if "Authorization" in req_headers:
+                req_headers["Authorization"] = req_headers["Authorization"][:4] + "..." + req_headers["Authorization"][-4:]
+            
+            logger.debug(f"Downloading artifact from: {url}")
+            logger.debug(f"Request Headers: {req_headers}")
+
+            resp = self.session.get(url, timeout=10, allow_redirects=False)
+            
+            logger.debug(f"Response Status: {resp.status_code}")
+            logger.debug(f"Response Headers: {dict(resp.headers)}")
+            
+            if resp.status_code != 200:
+                try:
+                    # Try to decode as JSON first if it's an API error
+                    content = resp.json()
+                    logger.debug(f"Response Body (JSON): {content}")
+                    
+                    if content.get("status") == "failure" and "already downloaded" in content.get("error", ""):
+                        logger.error(f"Redacted Limit Reached: {content.get('error')}")
+                        logger.info("Tip: You can download the .torrent file manually from the website and place it in the cache directory:")
+                        if self.cache_dir:
+                            logger.info(f"  {self.cache_dir}/{torrent_id}.torrent")
+                except:
+                    # Fallback to text/raw
+                    logger.debug(f"Response Body (Text/Raw): {resp.text[:500]}")
+
+            if resp.status_code in (301, 302, 303, 307, 308):
+                redirect_url = resp.headers.get("Location")
+                logger.debug(f"Redacted download redirected to: {redirect_url}")
+                if redirect_url:
+                    # If redirect is relative, make absolute
+                    if redirect_url.startswith("/"):
+                        redirect_url = self.BASE_URL + redirect_url
+                    # Follow redirect manually to ensure headers are kept if same domain,
+                    # or just let requests handle it if we didn't set allow_redirects=False.
+                    # Actually, requests keeps headers for same-domain redirects.
+                    # But if it redirects to a CDN, it might drop auth.
+                    resp = self.session.get(redirect_url, timeout=10)
+
             if resp.status_code == 200:
                 logger.debug(f"Artifact fetched successfully ({len(resp.content)} bytes)")
+                if len(resp.content) < 1000:
+                     # Suspiciously small, might be an error page?
+                     logger.warning(f"Artifact seems too small ({len(resp.content)} bytes). Content sample: {resp.content[:100]}")
+                
+                # Save to Cache
+                if torrent_id and self.cache_dir and len(resp.content) > 0:
+                    try:
+                        cache_path = self.cache_dir / f"{torrent_id}.torrent"
+                        with open(cache_path, "wb") as f:
+                            f.write(resp.content)
+                        logger.debug(f"Cached torrent to {cache_path}")
+                    except Exception as e:
+                        logger.warning(f"Failed to cache torrent: {e}")
+                        
                 return resp.content
+            elif resp.status_code == 429:
+                logger.warning("Rate limited while fetching artifact. Retrying in 2s...")
+                time.sleep(2)
+                return self.fetch_artifact(release)
             else:
                 logger.error(f"Failed to fetch artifact: Status {resp.status_code}")
+                # 403 usually means "Account is disabled" or "Not logged in" or "Can't download this torrent"
+                # Check if we need to refresh session or something? 
+                # But usually API key is static.
         except Exception as e:
             logger.error(f"Error fetching artifact: {e}")
         return None
 
-    def _find_best_target_file(self, file_list_str: str, track_title: str) -> tuple[Optional[str], Optional[int], float]:
+    def _find_best_target_file(self, file_list_str: str, track_title: str) -> Tuple[Optional[str], Optional[int], float]:
         if not file_list_str:
             return None, None, 0.0
             
@@ -220,6 +332,9 @@ class RedactedProvider(Provider):
                     size = 0
             else:
                 fname = f_entry
+            
+            # Decode HTML entities (e.g., &amp; -> &)
+            fname = html.unescape(fname)
                 
             if not any(fname.lower().endswith(ext) for ext in ['.flac', '.mp3', '.m4a', '.wav']):
                 continue
