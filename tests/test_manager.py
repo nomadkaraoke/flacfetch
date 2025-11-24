@@ -1,8 +1,8 @@
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, Mock
 
-from flacfetch.core.interfaces import Provider
+from flacfetch.core.interfaces import Provider, Downloader
 from flacfetch.core.manager import FetchManager
-from flacfetch.core.models import AudioFormat, Quality, Release, TrackQuery
+from flacfetch.core.models import AudioFormat, Quality, Release, TrackQuery, MediaSource
 
 
 def test_manager_search():
@@ -196,4 +196,189 @@ def test_provider_fallback_on_empty():
     assert p2.search.called
     assert len(results) == 1
     assert results[0].source_name == "Provider2"
+
+
+class TestSorting:
+    """Test the sorting logic in select_best"""
+
+    def test_sort_by_match_score(self):
+        mgr = FetchManager()
+        r1 = Release(title="T", artist="A", quality=Quality(AudioFormat.FLAC),
+                     source_name="Test", match_score=0.5)
+        r2 = Release(title="T", artist="A", quality=Quality(AudioFormat.FLAC),
+                     source_name="Test", match_score=0.9)
+        
+        best = mgr.select_best([r1, r2])
+        assert best.match_score == 0.9
+
+    def test_sort_by_release_type(self):
+        mgr = FetchManager()
+        r_album = Release(title="T", artist="A", quality=Quality(AudioFormat.FLAC),
+                         source_name="Test", release_type="Album", match_score=1.0)
+        r_single = Release(title="T", artist="A", quality=Quality(AudioFormat.FLAC),
+                          source_name="Test", release_type="Single", match_score=1.0)
+        r_remix = Release(title="T", artist="A", quality=Quality(AudioFormat.FLAC),
+                         source_name="Test", release_type="Remix", match_score=1.0)
+        
+        # Album should be preferred over Single over Remix
+        best = mgr.select_best([r_remix, r_single, r_album])
+        assert best.release_type == "Album"
+
+    def test_sort_by_seeders(self):
+        mgr = FetchManager()
+        r1 = Release(title="T", artist="A", quality=Quality(AudioFormat.FLAC),
+                     source_name="Test", match_score=1.0, seeders=5)
+        r2 = Release(title="T", artist="A", quality=Quality(AudioFormat.FLAC),
+                     source_name="Test", match_score=1.0, seeders=50)
+        
+        best = mgr.select_best([r1, r2])
+        assert best.seeders == 50
+
+    def test_sort_by_view_count(self):
+        mgr = FetchManager()
+        r1 = Release(title="T", artist="A", quality=Quality(AudioFormat.OPUS),
+                     source_name="YouTube", match_score=1.0, view_count=1000)
+        r2 = Release(title="T", artist="A", quality=Quality(AudioFormat.OPUS),
+                     source_name="YouTube", match_score=1.0, view_count=100000)
+        
+        best = mgr.select_best([r1, r2])
+        assert best.view_count == 100000
+
+    def test_sort_by_quality(self):
+        mgr = FetchManager()
+        q_low = Quality(format=AudioFormat.MP3, bitrate=128)
+        q_high = Quality(format=AudioFormat.FLAC, bit_depth=24)
+        
+        r1 = Release(title="T", artist="A", quality=q_low, source_name="Test", match_score=1.0)
+        r2 = Release(title="T", artist="A", quality=q_high, source_name="Test", match_score=1.0)
+        
+        best = mgr.select_best([r1, r2])
+        assert best.quality == q_high
+
+    def test_sort_youtube_channel_exact_match(self):
+        mgr = FetchManager()
+        r_exact = Release(title="T", artist="Artist", quality=Quality(AudioFormat.OPUS),
+                         source_name="YouTube", match_score=1.0, channel="Artist")
+        r_partial = Release(title="T", artist="Artist", quality=Quality(AudioFormat.OPUS),
+                           source_name="YouTube", match_score=1.0, channel="Artist - Topic")
+        r_nomatch = Release(title="T", artist="Artist", quality=Quality(AudioFormat.OPUS),
+                           source_name="YouTube", match_score=1.0, channel="Random Channel")
+        
+        best = mgr.select_best([r_nomatch, r_partial, r_exact])
+        assert best.channel == "Artist"
+
+    def test_sort_youtube_official_topic(self):
+        mgr = FetchManager()
+        r_topic = Release(title="T", artist="A", quality=Quality(AudioFormat.OPUS),
+                         source_name="YouTube", match_score=1.0, channel="Artist - Topic")
+        r_regular = Release(title="T", artist="A", quality=Quality(AudioFormat.OPUS),
+                           source_name="YouTube", match_score=1.0, channel="Regular Channel")
+        
+        best = mgr.select_best([r_regular, r_topic])
+        assert " - Topic" in best.channel
+
+    def test_sort_youtube_official_vevo(self):
+        mgr = FetchManager()
+        r_vevo = Release(title="T", artist="A", quality=Quality(AudioFormat.OPUS),
+                        source_name="YouTube", match_score=1.0, channel="ArtistVEVO")
+        r_regular = Release(title="T", artist="A", quality=Quality(AudioFormat.OPUS),
+                           source_name="YouTube", match_score=1.0, channel="Regular")
+        
+        best = mgr.select_best([r_regular, r_vevo])
+        assert "VEVO" in best.channel
+
+    def test_sort_youtube_official_audio_title(self):
+        mgr = FetchManager()
+        r_official = Release(title="Song (Official Audio)", artist="A",
+                            quality=Quality(AudioFormat.OPUS),
+                            source_name="YouTube", match_score=1.0, channel="Ch")
+        r_regular = Release(title="Song", artist="A", quality=Quality(AudioFormat.OPUS),
+                           source_name="YouTube", match_score=1.0, channel="Ch")
+        
+        best = mgr.select_best([r_regular, r_official])
+        assert "Official Audio" in best.title
+
+    def test_sort_year_redacted_prefers_oldest(self):
+        mgr = FetchManager()
+        r_old = Release(title="T", artist="A", quality=Quality(AudioFormat.FLAC),
+                       source_name="Redacted", match_score=1.0, year=2000)
+        r_new = Release(title="T", artist="A", quality=Quality(AudioFormat.FLAC),
+                       source_name="Redacted", match_score=1.0, year=2020)
+        
+        best = mgr.select_best([r_new, r_old])
+        # For Redacted, older is better (original release)
+        assert best.year == 2000
+
+    def test_sort_year_youtube_prefers_newest(self):
+        mgr = FetchManager()
+        r_old = Release(title="T", artist="A", quality=Quality(AudioFormat.OPUS),
+                       source_name="YouTube", match_score=1.0, year=2000, view_count=1000)
+        r_new = Release(title="T", artist="A", quality=Quality(AudioFormat.OPUS),
+                       source_name="YouTube", match_score=1.0, year=2020, view_count=1000)
+        
+        best = mgr.select_best([r_old, r_new])
+        # For YouTube, newer is better
+        assert best.year == 2020
+
+
+class TestDownloaders:
+    """Test downloader registration and usage"""
+
+    def test_set_default_downloader(self):
+        mgr = FetchManager()
+        mock_dl = Mock(spec=Downloader)
+        
+        mgr.set_default_downloader(mock_dl)
+        assert mgr._default_downloader == mock_dl
+
+    def test_register_provider_downloader(self):
+        mgr = FetchManager()
+        mock_dl = Mock(spec=Downloader)
+        
+        mgr.register_downloader("TestProvider", mock_dl)
+        assert "TestProvider" in mgr._downloader_map
+        assert mgr._downloader_map["TestProvider"] == mock_dl
+
+    def test_download_with_provider_downloader(self):
+        mgr = FetchManager()
+        mock_dl = Mock(spec=Downloader)
+        mock_dl.download.return_value = "/path/to/file.flac"
+        
+        mgr.register_downloader("TestProvider", mock_dl)
+        
+        release = Release(title="T", artist="A", quality=Quality(AudioFormat.FLAC),
+                         source_name="TestProvider", download_url="http://test.com")
+        
+        result = mgr.download(release, "/output")
+        assert result == "/path/to/file.flac"
+        # Check it was called with output_filename keyword arg
+        mock_dl.download.assert_called_once()
+        call_args = mock_dl.download.call_args
+        assert call_args[0][0] == release
+        assert call_args[0][1] == "/output"
+        assert call_args[1]['output_filename'] is None
+
+    def test_download_with_default_downloader(self):
+        mgr = FetchManager()
+        mock_dl = Mock(spec=Downloader)
+        mock_dl.download.return_value = "/path/to/file.flac"
+        
+        mgr.set_default_downloader(mock_dl)
+        
+        release = Release(title="T", artist="A", quality=Quality(AudioFormat.FLAC),
+                         source_name="UnknownProvider", download_url="http://test.com")
+        
+        result = mgr.download(release, "/output")
+        assert result == "/path/to/file.flac"
+        mock_dl.download.assert_called_once()
+
+    def test_download_no_downloader_raises(self):
+        import pytest
+        mgr = FetchManager()
+        
+        release = Release(title="T", artist="A", quality=Quality(AudioFormat.FLAC),
+                         source_name="UnknownProvider", download_url="http://test.com")
+        
+        with pytest.raises(ValueError, match="No downloader registered"):
+            mgr.download(release, "/output")
 

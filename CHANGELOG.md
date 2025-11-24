@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2025-11-24
+
+### Added
+- Comprehensive test suite with 87 tests covering core functionality
+- Tests for provider error handling and edge cases
+- Tests for manager sorting logic (release type, seeders, quality, year, YouTube channel matching)
+- Tests for downloader registration and usage
+- Tests for model formatting and string representations
+- Tests for logging configuration
+- Test coverage improved from 56% to 69%
+
+### Fixed
+- Fixed linting errors (whitespace, bare except, unused variables)
+- Updated ruff ignore rules for code style preferences
+
 ## [0.3.0] - 2025-11-24
 
 ### Added
