@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+import re
 from typing import List, Optional
 from ..core.models import Release, TrackQuery
 from ..core.interfaces import InteractionHandler
@@ -54,7 +55,6 @@ class CLIHandler(InteractionHandler):
         # Title/Artist Display
         if r.source_name == "YouTube":
             # Channel: Title
-            # Channel in Orange/Yellow, Title Bold
             channel_str = f"{Colors.ORANGE}{r.channel}{Colors.RESET}" if r.channel else "Unknown"
             title_str = f"{Colors.BOLD}{r.title}{Colors.RESET}"
             main_info = f"{channel_str}: {title_str}"
@@ -64,29 +64,66 @@ class CLIHandler(InteractionHandler):
         
         header = f"{idx}. {source_tag} {main_info}"
         
-        # Metadata: [Album, 2014 / Label / WEB]
+        # Metadata
         meta_parts = []
-        if r.release_type: meta_parts.append(f"{Colors.MAGENTA}{r.release_type}{Colors.RESET}")
-        if r.year: meta_parts.append(f"{Colors.YELLOW}{r.year}{Colors.RESET}")
-        if r.label: meta_parts.append(r.label)
-        if r.edition_info: meta_parts.append(r.edition_info)
-        meta_parts.append(r.quality.media.name)
+        
+        if r.source_name == "YouTube":
+            # YouTube Metadata: [Duration | URL]
+            if r.formatted_duration:
+                meta_parts.append(r.formatted_duration)
+            
+            if r.year:
+                meta_parts.append(str(r.year))
+                
+            # Shorten URL: https://www.youtube.com/watch?v=ID -> youtu.be/ID
+            if r.download_url:
+                short_url = r.download_url
+                if "youtube.com/watch?v=" in short_url:
+                    vid_id = short_url.split("v=")[1].split("&")[0]
+                    short_url = f"youtu.be/{vid_id}"
+                meta_parts.append(short_url)
+        else:
+            # Redacted Metadata: [Album, 2014 / Label / WEB]
+            if r.release_type: meta_parts.append(f"{Colors.MAGENTA}{r.release_type}{Colors.RESET}")
+            if r.year: meta_parts.append(f"{Colors.YELLOW}{r.year}{Colors.RESET}")
+            if r.label: meta_parts.append(r.label)
+            if r.edition_info: meta_parts.append(r.edition_info)
+            meta_parts.append(r.quality.media.name)
         
         meta_str = f" [{ ' / '.join(meta_parts) }]" if meta_parts else ""
         
-        # Quality: (FLAC 24bit) - Removing redundant media
+        # Quality
         qual_text = str(r.quality)
         media_name = r.quality.media.name
         if qual_text.endswith(media_name):
             qual_text = qual_text[:-len(media_name)].strip()
             
         # Colorize quality
+        # Green: Lossless or High Bitrate (>130)
+        # Yellow: Medium Bitrate (50-130)
+        # Red: Low Bitrate (<50)
+        
+        is_good = False
+        is_ok = False
+        
+        if r.quality.is_lossless():
+            is_good = True
+        elif r.quality.bitrate:
+            if r.quality.bitrate > 130:
+                is_good = True
+            elif r.quality.bitrate >= 50:
+                is_ok = True
+                
         if "24bit" in qual_text:
             qual_str = f" ({Colors.YELLOW}{qual_text}{Colors.RESET})"
-        else:
+        elif is_good:
             qual_str = f" ({Colors.GREEN}{qual_text}{Colors.RESET})"
+        elif is_ok:
+            qual_str = f" ({Colors.YELLOW}{qual_text}{Colors.RESET})"
+        else:
+            qual_str = f" ({Colors.RED}{qual_text}{Colors.RESET})"
         
-        # Stats (Size, Seeders/Views, Duration)
+        # Stats (Size, Seeders/Views)
         stats_parts = []
         
         # Size
@@ -105,21 +142,30 @@ class CLIHandler(InteractionHandler):
                 s_color = Colors.RED
             stats_parts.append(f"Seeders: {s_color}{s}{Colors.RESET}")
             
-        # Views & Duration (YouTube)
+        # Views (YouTube)
         if r.view_count is not None:
-            views_str = r.formatted_views
-            stats_parts.append(f"{Colors.DIM}Views: {views_str}{Colors.RESET}")
-            
-        if r.formatted_duration:
-            stats_parts.append(f"{Colors.DIM}{r.formatted_duration}{Colors.RESET}")
+            v = r.view_count
+            if v > 1_000_000:
+                v_color = Colors.GREEN
+            elif v >= 10_000:
+                v_color = Colors.YELLOW
+            else:
+                v_color = Colors.RED
+            stats_parts.append(f"Views: {v_color}{r.formatted_views}{Colors.RESET}")
             
         stats_str = f" - {', '.join(stats_parts)}" if stats_parts else ""
             
         print(f"{header}{meta_str}{qual_str}{stats_str}")
         
-        # Target File (Redacted)
+        # Target File (Redacted) with highlighting
         if r.target_file:
-            print(f"   {Colors.YELLOW}-> File: {r.target_file}{Colors.RESET}")
+            fname = r.target_file
+            if r.track_pattern:
+                # Highlight match
+                pattern = re.escape(r.track_pattern)
+                fname = re.sub(f"({pattern})", f"{Colors.YELLOW}\\1{Colors.RESET}", fname, flags=re.IGNORECASE)
+            
+            print(f"   -> File: {fname}")
 
 def main():
     parser = argparse.ArgumentParser(description="flacfetch - Audio Downloader")

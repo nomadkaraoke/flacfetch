@@ -10,7 +10,9 @@ class YoutubeProvider(Provider):
 
     def search(self, query: TrackQuery) -> List[Release]:
         # Search for 5 results
-        search_query = f"ytsearch5:{query.artist} {query.title}"
+        # Adding "topic" often helps find the auto-generated "Topic" channel results which are high quality audio
+        search_query = f"ytsearch5:{query.artist} {query.title} topic"
+        
         # Disable extract_flat to get formats and duration
         ydl_opts = {
             'quiet': True,
@@ -33,6 +35,15 @@ class YoutubeProvider(Provider):
                         channel = entry.get('uploader') or entry.get('channel')
                         view_count = entry.get('view_count')
                         duration = entry.get('duration')
+                        
+                        # Extract Year
+                        upload_date = entry.get('upload_date') # YYYYMMDD
+                        year = None
+                        if upload_date and len(upload_date) >= 4:
+                            try:
+                                year = int(upload_date[:4])
+                            except ValueError:
+                                pass
                         
                         # Find best audio format
                         formats = entry.get('formats', [])
@@ -81,7 +92,8 @@ class YoutubeProvider(Provider):
                             size_bytes=size,
                             channel=channel,
                             view_count=view_count,
-                            duration_seconds=duration
+                            duration_seconds=duration,
+                            year=year
                         ))
         except Exception as e:
             # print(f"YouTube search error: {e}")
