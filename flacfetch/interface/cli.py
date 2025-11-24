@@ -15,23 +15,62 @@ try:
 except ImportError:
     TorrentDownloader = None
 
+# ANSI Color Codes
+class Colors:
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    CYAN = "\033[36m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    MAGENTA = "\033[35m"
+    BLUE = "\033[34m"
+    RED = "\033[31m"
+
 class CLIHandler(InteractionHandler):
     def select_release(self, releases: List[Release]) -> Optional[Release]:
-        print(f"\nFound {len(releases)} releases:")
+        print(f"\nFound {len(releases)} releases:\n")
         for idx, r in enumerate(releases):
-            print(f"{idx + 1}. {r}")
+            self._print_release(idx + 1, r)
         
         while True:
-            choice = input("\nSelect a release (1-N, 0 to cancel): ")
+            choice = input(f"\n{Colors.BOLD}Select a release (1-{len(releases)}, 0 to cancel): {Colors.RESET}")
             try:
                 idx = int(choice)
                 if idx == 0:
                     return None
                 if 1 <= idx <= len(releases):
                     return releases[idx - 1]
-                print("Invalid selection.")
+                print(f"{Colors.RED}Invalid selection.{Colors.RESET}")
             except ValueError:
-                print("Please enter a number.")
+                print(f"{Colors.RED}Please enter a number.{Colors.RESET}")
+
+    def _print_release(self, idx: int, r: Release):
+        # 1. [Redacted] Artist - Title
+        header = f"{idx}. [{Colors.CYAN}{r.source_name}{Colors.RESET}] {Colors.BOLD}{r.artist} - {r.title}{Colors.RESET}"
+        
+        # Metadata: [Album, 2014 / Label / WEB]
+        meta_parts = []
+        if r.release_type: meta_parts.append(f"{Colors.MAGENTA}{r.release_type}{Colors.RESET}")
+        if r.year: meta_parts.append(f"{Colors.YELLOW}{r.year}{Colors.RESET}")
+        if r.label: meta_parts.append(r.label)
+        if r.edition_info: meta_parts.append(r.edition_info)
+        meta_parts.append(r.quality.media.name)
+        
+        meta_str = f" [{ ' / '.join(meta_parts) }]" if meta_parts else ""
+        
+        # Quality: (FLAC 24bit)
+        qual_str = f" ({Colors.GREEN}{r.quality}{Colors.RESET})"
+        
+        # Size & Seeders
+        stats = f" - {r.formatted_size}"
+        if r.seeders is not None:
+            stats += f", {Colors.BLUE}Seeders: {r.seeders}{Colors.RESET}"
+            
+        print(f"{header}{meta_str}{qual_str}{stats}")
+        
+        # Target File
+        if r.target_file:
+            print(f"   {Colors.YELLOW}-> File: {r.target_file}{Colors.RESET}")
 
 def main():
     parser = argparse.ArgumentParser(description="flacfetch - Audio Downloader")
@@ -44,7 +83,6 @@ def main():
     
     args = parser.parse_args()
     
-    # Setup logging
     setup_logging(args.verbose)
     
     artist = args.artist
@@ -60,15 +98,11 @@ def main():
             if not title: title = query_str
     
     if not title:
-        print("Error: Track title is required. Use 'Artist - Title' or --title argument.")
+        print(f"{Colors.RED}Error: Track title is required.{Colors.RESET}")
         sys.exit(1)
-        
-    if not artist and args.verbose:
-        print("Warning: No artist specified. Results might be inaccurate or limited.")
         
     manager = FetchManager()
     
-    # Configure Providers & Downloaders
     manager.add_provider(YoutubeProvider())
     manager.register_downloader("YouTube", YoutubeDownloader())
 
@@ -86,10 +120,10 @@ def main():
                 print("Info: Redacted provider skipped (requires Artist name).")
     
     if not manager.providers:
-        print("No providers configured (or missing requirements like Artist name). Exiting.")
+        print("No providers configured.")
         sys.exit(1)
             
-    print(f"Searching for: {artist} - {title} ...")
+    print(f"Searching for: {Colors.BOLD}{artist or 'Unknown'} - {title}{Colors.RESET} ...")
     q = TrackQuery(artist=artist or "", title=title)
     releases = manager.search(q)
     
@@ -104,14 +138,14 @@ def main():
         selected = manager.select_interactive(releases, CLIHandler())
         
     if selected:
-        print(f"\nSelected: {selected}")
+        print(f"\nSelected: {selected.title} ({selected.quality})")
         try:
             manager.download(selected, ".")
         except Exception as e:
             if args.verbose:
                 import traceback
                 traceback.print_exc()
-            print(f"Download failed: {e}")
+            print(f"{Colors.RED}Download failed: {e}{Colors.RESET}")
     else:
         print("No selection made.")
 

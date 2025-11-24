@@ -110,7 +110,7 @@ class RedactedProvider(Provider):
                     continue
 
                 file_list_str = torrent.get("fileList", "")
-                target_file, match_score = self._find_best_target_file(file_list_str, track_title)
+                target_file, target_size, match_score = self._find_best_target_file(file_list_str, track_title)
                 
                 if not target_file:
                     continue
@@ -120,15 +120,17 @@ class RedactedProvider(Provider):
                 edition_parts = []
                 remaster_title = torrent.get("remasterTitle")
                 remaster_year = torrent.get("remasterYear")
+                # remaster_record_label not reliably in torrent info here? 
+                # Docs say it should be. Check keys if issues arise.
                 remaster_record_label = torrent.get("remasterRecordLabel")
                 remaster_catalogue_number = torrent.get("remasterCatalogueNumber")
                 
                 if torrent.get("remastered"):
                     if remaster_title:
                         edition_parts.append(remaster_title)
-                    if remaster_year:
-                        edition_parts.append(f"{remaster_year}")
-                
+                    # Remaster year often IS the release year we care about for sorting (e.g. 2014 release of 2011 album)
+                    # But user might want original year. 
+                    
                 edition_info = " ".join(edition_parts) if edition_parts else None
                 
                 label = remaster_record_label or group.get("recordLabel")
@@ -147,7 +149,9 @@ class RedactedProvider(Provider):
                     label=label,
                     catalogue_number=cat_num,
                     release_type=release_type_str,
+                    seeders=torrent.get("seeders", 0),
                     target_file=target_file,
+                    target_file_size=target_size,
                     match_score=match_score
                 )
                 releases.append(r)
@@ -173,18 +177,27 @@ class RedactedProvider(Provider):
             logger.error(f"Error fetching artifact: {e}")
         return None
 
-    def _find_best_target_file(self, file_list_str: str, track_title: str) -> tuple[Optional[str], float]:
+    def _find_best_target_file(self, file_list_str: str, track_title: str) -> tuple[Optional[str], Optional[int], float]:
+        # Returns (filename, size_bytes, score)
         if not file_list_str:
-            return None, 0.0
+            return None, None, 0.0
             
         files = file_list_str.split("|||")
         
         best_match = None
+        best_size = None
         best_score = 0.0
         
         for f_entry in files:
+            # Format: filename{{{size}}}
+            size = 0
             if "{{{" in f_entry:
-                fname = f_entry.split("{{{")[0]
+                parts = f_entry.split("{{{")
+                fname = parts[0]
+                try:
+                    size = int(parts[1].rstrip("}"))
+                except (ValueError, IndexError):
+                    size = 0
             else:
                 fname = f_entry
                 
@@ -195,17 +208,19 @@ class RedactedProvider(Provider):
             if score > best_score:
                 best_score = score
                 best_match = fname
+                best_size = size
         
         if best_score > 0.6:
-            return best_match, best_score
+            return best_match, best_size, best_score
             
-        return None, 0.0
+        return None, None, 0.0
 
     def _parse_quality(self, torrent_data: Dict[str, Any]) -> Quality:
         format_str = torrent_data.get("format", "").upper()
         encoding = torrent_data.get("encoding", "")
         media_str = torrent_data.get("media", "").upper()
         
+        # Format
         if format_str == "FLAC":
             fmt = AudioFormat.FLAC
         elif format_str == "MP3":
@@ -217,6 +232,7 @@ class RedactedProvider(Provider):
         else:
             fmt = AudioFormat.OTHER
             
+        # Media
         media_map = {
             "WEB": MediaSource.WEB,
             "CD": MediaSource.CD,
@@ -226,6 +242,7 @@ class RedactedProvider(Provider):
         }
         media = media_map.get(media_str, MediaSource.OTHER)
         
+        # Bit depth / Bitrate
         bit_depth = None
         bitrate = None
         
@@ -235,6 +252,7 @@ class RedactedProvider(Provider):
             else:
                 bit_depth = 16
         elif fmt in (AudioFormat.MP3, AudioFormat.AAC):
+            # Parse "320", "V0 (VBR)"
             if "320" in encoding:
                 bitrate = 320
             elif "V0" in encoding:
@@ -242,9 +260,9 @@ class RedactedProvider(Provider):
             elif "V2" in encoding:
                 bitrate = 190
             elif "APS" in encoding:
-                bitrate = 215
+                bitrate = 215 # Approx VBR
             elif "APX" in encoding:
-                bitrate = 245
+                bitrate = 245 # Approx VBR
             elif "192" in encoding:
                 bitrate = 192
             elif "256" in encoding:

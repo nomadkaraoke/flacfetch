@@ -37,12 +37,15 @@ class FetchManager:
         # Sorting Logic:
         # 1. Match Score (Exact match > Partial match)
         # 2. Release Type (Album > Single > EP > Other)
-        # 3. Year (Oldest first for "original")
-        # 4. Quality (Lossless > High Bitrate)
+        # 3. Seeders (Higher is better - reliability/speed)
+        # 4. Year (Oldest first for "original" preference if types match, or Descending?
+        #    - If I want "most normal", usually oldest main album.
+        #    - If I want "newest remaster", newest.
+        #    - Let's go with Oldest as tie-breaker for "Original".
+        # 5. Quality
         
         def release_type_score(r: Release) -> int:
             if not r.release_type: return 0
-            # Higher is better
             priority = {
                 "Album": 10,
                 "Single": 9,
@@ -54,23 +57,12 @@ class FetchManager:
             }
             return priority.get(r.release_type, 0)
 
-        # Sort key: tuple comparisons
         return sorted(releases, key=lambda r: (
-            r.match_score, # Primary: Name match
-            release_type_score(r), # Secondary: Type
-            -(r.year or 9999), # Tertiary: Year (Oldest first -> negative of year ensures ascending order? No. 
-                               # Python sorts ascending. We want oldest first. So smaller year is better.
-                               # But we are sorting `reverse=True`?
-                               # Let's stick to one direction.
-                               # If we use reverse=True (descending):
-                               # Match Score: 1.0 > 0.5 (Correct)
-                               # Release Type: 10 > 1 (Correct)
-                               # Year: We want 2011 > 2014? No, we want 2011 (Oldest) to appear first?
-                               # Actually, usually people want the *Original* release. So oldest.
-                               # If sorting descending, we want 2011 to be "bigger" than 2014.
-                               # So use -2011 > -2014.
-                               -(r.year or 9999),
-            r.quality # Quaternary: Quality (Quality implements __lt__)
+            r.match_score,          # 1. Name Match (High to Low)
+            release_type_score(r),  # 2. Type (Album first)
+            (r.seeders or 0),       # 3. Seeders (High to Low)
+            -(r.year or 9999),      # 4. Year (Oldest first -> Smallest year -> Largest negative)
+            r.quality               # 5. Quality
         ), reverse=True)
 
     def select_best(self, releases: List[Release]) -> Optional[Release]:
@@ -96,7 +88,6 @@ class FetchManager:
         
         if provider:
             if not release.target_file and release.track_pattern:
-                # This shouldn't happen often with RedactedProvider now resolving upfront
                 logger.info(f"Resolving target file for {release.title}...")
                 provider.populate_details(release)
         

@@ -96,43 +96,52 @@ class Release:
     label: Optional[str] = None
     catalogue_number: Optional[str] = None
     release_type: Optional[str] = None # e.g. "Album", "Single"
+    seeders: Optional[int] = None
     
     # Selective Download Info
     target_file: Optional[str] = None
+    target_file_size: Optional[int] = None # Size of the specific file
     track_pattern: Optional[str] = None # The track title to search for if target_file is not yet resolved
     match_score: float = 0.0 # 0.0 to 1.0, higher is better match for the track title
     
     @property
     def formatted_size(self) -> str:
-        if self.size_bytes is None:
+        size = self.target_file_size if self.target_file_size is not None else self.size_bytes
+        if size is None:
             return "?"
         
-        size = float(self.size_bytes)
+        s = float(size)
         for unit in ['B', 'KB', 'MB', 'GB']:
-            if size < 1024.0:
-                return f"{size:.1f} {unit}"
-            size /= 1024.0
-        return f"{size:.1f} TB"
+            if s < 1024.0:
+                return f"{s:.1f} {unit}"
+            s /= 1024.0
+        return f"{s:.1f} TB"
 
     def __str__(self) -> str:
+        # This is the basic string representation, CLI will handle colorization
         parts = [f"[{self.source_name}]"]
         parts.append(f"{self.artist} - {self.title}")
         
-        meta = []
-        if self.release_type:
-            meta.append(self.release_type)
-        if self.year:
-            meta.append(str(self.year))
-        if self.edition_info:
-            meta.append(self.edition_info)
+        # Detailed metadata string similar to Redacted UI
+        # Format: Year / Label / Cat# / Edition / Media
+        meta_components = []
+        if self.year: meta_components.append(str(self.year))
+        if self.label: meta_components.append(self.label)
+        if self.catalogue_number: meta_components.append(self.catalogue_number)
+        if self.edition_info: meta_components.append(self.edition_info)
+        # Media is part of quality usually, but sometimes useful here.
+        # The UI puts Media at the end of this string.
+        meta_components.append(self.quality.media.name)
         
-        if meta:
-            parts.append(f"[{', '.join(meta)}]")
+        if meta_components:
+            parts.append(f"[{' / '.join(meta_components)}]")
             
         parts.append(f"({self.quality})")
         
-        if self.size_bytes:
-            parts.append(f"- {self.formatted_size}")
+        if self.seeders is not None:
+            parts.append(f"Seeders: {self.seeders}")
+            
+        parts.append(f"- {self.formatted_size}")
             
         if self.target_file:
             parts.append(f"\n   -> File: {self.target_file}")
