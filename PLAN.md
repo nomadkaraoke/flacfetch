@@ -9,7 +9,7 @@ The system will be designed using **Clean Architecture** principles to separate 
 1.  **Orchestrator (`FetchManager`)**: The main entry point that coordinates searching, selection, and downloading.
 2.  **Domain Models**:
     -   `TrackQuery`: Input data (Artist, Title).
-    -   `Release`: Represents a finding (Source, Quality, Metadata, Download Link/Magnet).
+    -   `Release`: Represents a finding (Source, Quality, Metadata, Download Link/Magnet, **Target File**).
     -   `Quality`: Value object for audio quality (Format, Bitrate, Source Media) with comparison logic.
 3.  **Interfaces (Abstract Base Classes)**:
     -   `Provider`: Interface for searching (e.g., `RedactedProvider`, `YoutubeProvider`).
@@ -49,7 +49,10 @@ graph TD
 
 ### 2.1 Provider System
 Each provider implements a `search(query: TrackQuery) -> List[Release]` method.
--   **RedactedProvider**: Uses the JSON API (from `Redacted_API_Documentation_Redacted.md`) to search torrents. Maps JSON response to `Release` objects.
+-   **RedactedProvider**: 
+    -   Uses `ajax.php?action=browse` with `artistname` and `filelist` parameters to find torrents containing the specific track.
+    -   Parses the `fileList` field in the response to identify the specific file within the torrent that matches the requested song.
+    -   Prioritizes "Album" releases (Type 1) and original release years when presenting options.
 -   **PublicProviders**: Wrappers around `yt-dlp` or scraping logic for Bandcamp/Soundcloud.
 
 ### 2.2 Quality & Selection Logic
@@ -62,7 +65,7 @@ Each provider implements a `search(query: TrackQuery) -> List[Release]` method.
 
 ### 2.3 Downloader System
 -   **TorrentDownloader**: Uses `libtorrent`.
-    -   *Constraint*: Must masquerade or be compatible with tracker allowlists (specifically checking support for 0.16.3+ features if strictly required, though modern 1.2/2.0 branches are usually standard now).
+    -   **Selective Downloading**: Uses the `target_file` information from the `Release` to set file priorities. All files are set to priority 0 (skip) except the target song file, which is set to priority 7 (high).
     -   Manages session, adds magnet/torrent file, monitors progress, alerts on completion.
 -   **HttpDownloader**: Standard HTTP GET or `yt-dlp` process.
 
@@ -75,12 +78,13 @@ Each provider implements a `search(query: TrackQuery) -> List[Release]` method.
 
 ### Phase 2: Redacted Provider Integration
 -   Implement authentication (API Key support).
--   Implement `RedactedProvider.search` using `ajax.php?action=browse`.
--   Parse results into `Release` objects.
+-   Implement `RedactedProvider.search` using specific `artistname` and `filelist` filtering.
+-   Parse `fileList` string (format: `filename{{{size}}}|||...`) to find target track.
+-   Parse results into `Release` objects, including `target_file` metadata.
 
 ### Phase 3: BitTorrent Integration
 -   Set up `libtorrent` session management.
--   Implement `TorrentDownloader`.
+-   Implement `TorrentDownloader` with selective file downloading support.
 -   Ensure protocol compatibility.
 
 ### Phase 4: Public Providers
@@ -89,7 +93,7 @@ Each provider implements a `search(query: TrackQuery) -> List[Release]` method.
 
 ### Phase 5: CLI & Library API
 -   Build `FetchManager` to tie it all together.
--   Implement `Click` or `Typer` based CLI.
+-   Implement CLI with separated `--artist` and `--title` arguments for precision.
 -   Implement `ConsoleInteractionHandler` (CLI) and `CallbackInteractionHandler` (Library).
 
 ## 4. Testing Strategy
@@ -109,7 +113,5 @@ Each provider implements a `search(query: TrackQuery) -> List[Release]` method.
 -   **Language**: Python 3.10+
 -   **HTTP Client**: `httpx` (async support) or `requests`.
 -   **Torrent**: `python-libtorrent` (via system package or pip).
--   **CLI**: `click` or `typer`.
+-   **CLI**: `argparse` (stdlib).
 -   **Testing**: `pytest`, `pytest-mock`.
--   **Linter/Formatter**: `ruff`, `black`, `mypy`.
-

@@ -1,17 +1,17 @@
 # flacfetch
 
-**flacfetch** is a Python tool designed to search for and download high-quality audio files from various sources. It can be used as a command-line interface (CLI) or as a library within other Python projects.
+**flacfetch** is a Python tool designed to search for and download high-quality audio files from various sources. It is optimized for finding specific tracks (songs) across both private trackers and public sources.
 
 ## Features
 
--   **Multi-Provider Search**: Search for songs (Artist + Title) across multiple platforms:
-    -   **Private BitTorrent Trackers**: Redacted (API integration), Orpheus (planned).
-    -   **Public Sources**: Bandcamp, Soundcloud, YouTube (via `yt-dlp`).
+-   **Precise Track Search**:
+    -   **Private BitTorrent Trackers**: Redacted (API integration). Uses advanced file list filtering to find specific songs within album torrents, downloading only the required track.
+    -   **Public Sources**: YouTube (via `yt-dlp`).
 -   **Flexible Interaction**:
     -   **Interactive Mode**: Present search results to the user for manual selection. Supports shell input for CLI and callbacks/hooks for library usage.
     -   **Automatic Mode**: Automatically select the highest quality available based on a predefined hierarchy (e.g., 24-bit FLAC WEB > 16-bit FLAC CD > Lossy).
--   **Integrated Downloading**:
-    -   **BitTorrent Client**: Built-in support for downloading from private trackers using `libtorrent` (compatible with authorized client lists).
+-   **Smart Downloading**:
+    -   **Selective BitTorrent**: Uses `libtorrent` to download *only* the specific file matching your search query from larger album torrents.
     -   **Direct Downloads**: Handles HTTP downloads for public sources.
 -   **Quality Prioritization**: Intelligent sorting and selection logic to ensure the best audio fidelity.
 
@@ -33,7 +33,7 @@
 ## Installation
 
 ```bash
-git clone https://github.com/yourusername/flacfetch.git
+git clone https://github.com/nomadkaraoke/flacfetch.git
 cd flacfetch
 pip install .
 ```
@@ -42,16 +42,32 @@ pip install .
 
 ### CLI Usage
 
+**Standard Search (Artist - Title)**
 ```bash
-# Interactive search and download
-flacfetch "Daft Punk - Get Lucky"
+flacfetch "Seether - Tonight"
+```
 
-# Auto-download highest quality
-flacfetch --auto "Daft Punk - Get Lucky"
+**Explicit Arguments (Recommended for precision)**
+```bash
+flacfetch --artist "Seether" --title "Tonight"
+```
 
-# With Redacted API Key
-flacfetch "Daft Punk - Get Lucky" --redacted-key YOUR_KEY
-# Or set env var REDACTED_API_KEY
+**Auto-download Highest Quality**
+```bash
+flacfetch --auto --artist "Seether" --title "Tonight"
+```
+
+**Verbose Logging**
+```bash
+flacfetch -v "Seether - Tonight"
+```
+
+**Configuration**
+To use private trackers (Redacted), you must provide an API Key:
+```bash
+export REDACTED_API_KEY="your_api_key_here"
+# OR
+flacfetch "..." --redacted-key "your_key"
 ```
 
 ### Library Usage
@@ -64,10 +80,12 @@ from flacfetch.providers.redacted import RedactedProvider
 manager = FetchManager()
 manager.add_provider(RedactedProvider(api_key="..."))
 
-results = manager.search(TrackQuery(artist="Daft Punk", title="Get Lucky"))
+# Search for a specific track
+results = manager.search(TrackQuery(artist="Seether", title="Tonight"))
 best = manager.select_best(results)
 
 if best:
+    # This will download ONLY the specific track file if it's a torrent
     manager.download(best, output_path="./downloads")
 ```
 

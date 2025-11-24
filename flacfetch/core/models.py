@@ -96,6 +96,9 @@ class Release:
     label: Optional[str] = None
     catalogue_number: Optional[str] = None
     
+    # Selective Download Info
+    target_file: Optional[str] = None
+    
     @property
     def formatted_size(self) -> str:
         if self.size_bytes is None:
@@ -125,5 +128,8 @@ class Release:
         
         if self.size_bytes:
             parts.append(f"- {self.formatted_size}")
+            
+        if self.target_file:
+            parts.append(f"[Target: {self.target_file}]")
             
         return " ".join(parts)

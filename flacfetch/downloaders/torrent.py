@@ -14,8 +14,6 @@ except ImportError:
 class TorrentDownloader(Downloader):
     def __init__(self, session_settings: Optional[Dict[str, Any]] = None):
         if lt is None:
-            # We allow instantiation but download will fail, or raise here?
-            # Better to raise here so Manager knows not to register it.
             pass
         else:
             self.ses = lt.session()
@@ -33,26 +31,57 @@ class TorrentDownloader(Downloader):
             'storage_mode': lt.storage_mode_t(2), # storage_mode_sparse
         }
         
-        handle = None
-        
-        # Check if download_url is a local file path (the .torrent file we fetched)
-        # We assume if it's a file on disk, it's a .torrent file
+        # Check if download_url is a local file path
         if os.path.exists(release.download_url) and os.path.isfile(release.download_url):
             info = lt.torrent_info(release.download_url)
+            
+            # Selective Download Logic
+            if release.target_file:
+                print(f"Target file specified: {release.target_file}")
+                # file_priorities is a list of integers, one per file
+                # 0 = do not download, 1-7 = priority
+                file_priorities = [0] * info.num_files()
+                found = False
+                
+                for i in range(info.num_files()):
+                    f_path = info.files().file_path(i)
+                    # Use suffix match to be safe, or exact match if path known
+                    if release.target_file in f_path:
+                        print(f"Found target file in torrent: {f_path} (Index {i})")
+                        file_priorities[i] = 7
+                        found = True
+                        break
+                
+                if not found:
+                    print(f"Warning: Target file '{release.target_file}' not found in torrent file list. Downloading entire torrent.")
+                    file_priorities = [] # Default behavior
+            else:
+                file_priorities = []
+
+            # Add torrent
             handle = self.ses.add_torrent({'ti': info, 'save_path': output_path})
+            
+            # Apply priorities if set
+            if file_priorities:
+                handle.prioritize_files(file_priorities)
+                
         elif release.download_url.startswith("magnet:"):
              handle = lt.add_magnet_uri(self.ses, release.download_url, params)
+             # Magnet selective download requires metadata first, handled below
         else:
              raise ValueError(f"TorrentDownloader requires a local .torrent file path or magnet link. Got: {release.download_url}")
 
         print(f"Downloading {release.title}...")
         
-        # Wait for metadata if magnet (not usually needed for .torrent files but good practice)
-        if release.download_url.startswith("magnet:"):
+        # Wait for metadata if magnet or just check status
+        if release.download_url.startswith("magnet:") and not handle.has_metadata():
             print("Waiting for metadata...")
             while not handle.has_metadata():
                 time.sleep(1)
-        
+            
+            # TODO: Implement selective download for magnet links once metadata is retrieved
+            # For now, it downloads full magnet
+
         print("Starting download...")
         
         while True:
@@ -68,4 +97,3 @@ class TorrentDownloader(Downloader):
             time.sleep(1)
             
         print(f"\nDownload complete: {release.title}")
-

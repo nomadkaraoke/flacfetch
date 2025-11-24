@@ -20,9 +20,11 @@ class RedactedProvider(Provider):
 
     def search(self, query: TrackQuery) -> List[Release]:
         url = f"{self.BASE_URL}/ajax.php"
+        # Updated search params to use filelist search
         params = {
             "action": "browse",
-            "searchstr": f"{query.artist} {query.title}",
+            "artistname": query.artist,
+            "filelist": query.title
         }
         
         logger.debug(f"Searching Redacted with params: {params}")
@@ -56,6 +58,13 @@ class RedactedProvider(Provider):
                 logger.debug(f"Processing group '{group_name}' ({group_year}) with {len(torrents)} torrents")
 
                 for torrent in torrents:
+                    # Find matching file in fileList
+                    file_list_str = torrent.get("fileList", "")
+                    target_file = self._find_target_file(file_list_str, query.title)
+                    
+                    if not target_file:
+                        continue # Skip this torrent if track not found
+                        
                     quality = self._parse_quality(torrent)
                     dl_url = f"{self.BASE_URL}/ajax.php?action=download&id={torrent['torrentId']}"
                     
@@ -89,12 +98,12 @@ class RedactedProvider(Provider):
                         year=year,
                         edition_info=edition_info,
                         label=label,
-                        catalogue_number=cat_num
+                        catalogue_number=cat_num,
+                        target_file=target_file
                     )
                     releases.append(r)
-                    logger.debug(f"Parsed release: {r}")
                     
-            logger.info(f"Total releases parsed from Redacted: {len(releases)}")
+            logger.info(f"Total matching tracks parsed from Redacted: {len(releases)}")
             return releases
         except requests.RequestException as e:
             logger.error(f"Connection error to Redacted: {e}")
@@ -116,6 +125,30 @@ class RedactedProvider(Provider):
                 logger.error(f"Failed to fetch artifact: Status {resp.status_code}")
         except Exception as e:
             logger.error(f"Error fetching artifact: {e}")
+        return None
+
+    def _find_target_file(self, file_list_str: str, track_title: str) -> Optional[str]:
+        # Format: "filename{{{size}}}|||filename{{{size}}}..."
+        if not file_list_str:
+            return None
+            
+        files = file_list_str.split("|||")
+        track_lower = track_title.lower()
+        
+        # Heuristic: Try to find the file that contains the track title
+        # Ideally we'd want more robust matching (e.g. extension check)
+        for f_entry in files:
+            # remove size part {{{...}}}
+            if "{{{" in f_entry:
+                fname = f_entry.split("{{{")[0]
+            else:
+                fname = f_entry
+                
+            if track_lower in fname.lower():
+                # Check extension roughly (audio files)
+                if any(fname.lower().endswith(ext) for ext in ['.flac', '.mp3', '.m4a', '.wav']):
+                    return fname
+                    
         return None
 
     def _parse_quality(self, torrent_data: Dict[str, Any]) -> Quality:
