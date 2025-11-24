@@ -29,6 +29,11 @@ class YoutubeProvider(Provider):
                         title = entry.get('title', 'Unknown')
                         url = entry.get('url') or entry.get('webpage_url')
                         
+                        # Extract Metadata
+                        channel = entry.get('uploader') or entry.get('channel')
+                        view_count = entry.get('view_count')
+                        duration = entry.get('duration')
+                        
                         # Find best audio format
                         formats = entry.get('formats', [])
                         best_audio = None
@@ -58,7 +63,6 @@ class YoutubeProvider(Provider):
                         
                         # Fallback size estimate if metadata missing but duration exists
                         if not size:
-                             duration = entry.get('duration', 0)
                              if duration:
                                  size = int(duration * (bitrate * 1024 / 8))
 
@@ -74,7 +78,10 @@ class YoutubeProvider(Provider):
                             quality=quality,
                             source_name=self.name,
                             download_url=url,
-                            size_bytes=size
+                            size_bytes=size,
+                            channel=channel,
+                            view_count=view_count,
+                            duration_seconds=duration
                         ))
         except Exception as e:
             # print(f"YouTube search error: {e}")

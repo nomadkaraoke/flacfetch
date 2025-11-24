@@ -99,6 +99,11 @@ class Release:
     release_type: Optional[str] = None # e.g. "Album", "Single"
     seeders: Optional[int] = None
     
+    # YouTube / Streaming Metadata
+    channel: Optional[str] = None
+    view_count: Optional[int] = None
+    duration_seconds: Optional[int] = None
+    
     # Selective Download Info
     target_file: Optional[str] = None
     target_file_size: Optional[int] = None # Size of the specific file
@@ -117,11 +122,33 @@ class Release:
                 return f"{s:.1f} {unit}"
             s /= 1024.0
         return f"{s:.1f} TB"
+    
+    @property
+    def formatted_duration(self) -> Optional[str]:
+        if self.duration_seconds is None:
+            return None
+        m, s = divmod(self.duration_seconds, 60)
+        return f"{m}:{s:02d}"
+    
+    @property
+    def formatted_views(self) -> Optional[str]:
+        if self.view_count is None:
+            return None
+        if self.view_count >= 1_000_000:
+            return f"{self.view_count/1_000_000:.1f}M"
+        if self.view_count >= 1_000:
+            return f"{self.view_count/1_000:.1f}K"
+        return str(self.view_count)
 
     def __str__(self) -> str:
         # This is the basic string representation, CLI will handle colorization
         parts = [f"[{self.source_name}]"]
-        parts.append(f"{self.artist} - {self.title}")
+        
+        # If YouTube, include channel
+        if self.source_name == "YouTube" and self.channel:
+             parts.append(f"{self.channel}: {self.title}")
+        else:
+             parts.append(f"{self.artist} - {self.title}")
         
         # Detailed metadata string similar to Redacted UI
         # Format: Year / Label / Cat# / Edition / Media
@@ -143,6 +170,9 @@ class Release:
             parts.append(f"Seeders: {self.seeders}")
             
         parts.append(f"- {self.formatted_size}")
+        
+        if self.duration_seconds:
+            parts.append(f"({self.formatted_duration})")
             
         if self.target_file:
             parts.append(f"\n   -> File: {self.target_file}")

@@ -19,6 +19,7 @@ except ImportError:
 class Colors:
     RESET = "\033[0m"
     BOLD = "\033[1m"
+    DIM = "\033[2m"
     CYAN = "\033[36m"
     GREEN = "\033[32m"
     YELLOW = "\033[33m"
@@ -26,6 +27,7 @@ class Colors:
     BLUE = "\033[34m"
     RED = "\033[31m"
     BRIGHT_MAGENTA = "\033[95m" # Lighter/Brighter Pink/Purple
+    ORANGE = "\033[38;5;208m" # Roughly orange
 
 class CLIHandler(InteractionHandler):
     def select_release(self, releases: List[Release]) -> Optional[Release]:
@@ -46,8 +48,21 @@ class CLIHandler(InteractionHandler):
                 print(f"{Colors.RED}Please enter a number.{Colors.RESET}")
 
     def _print_release(self, idx: int, r: Release):
-        # 1. [Redacted] Artist - Title
-        header = f"{idx}. [{Colors.CYAN}{r.source_name}{Colors.RESET}] {Colors.BOLD}{r.artist} - {r.title}{Colors.RESET}"
+        # 1. Source Name
+        source_tag = f"[{Colors.CYAN}{r.source_name}{Colors.RESET}]"
+        
+        # Title/Artist Display
+        if r.source_name == "YouTube":
+            # Channel: Title
+            # Channel in Orange/Yellow, Title Bold
+            channel_str = f"{Colors.ORANGE}{r.channel}{Colors.RESET}" if r.channel else "Unknown"
+            title_str = f"{Colors.BOLD}{r.title}{Colors.RESET}"
+            main_info = f"{channel_str}: {title_str}"
+        else:
+            # Redacted: Artist - Title
+            main_info = f"{Colors.BOLD}{r.artist} - {r.title}{Colors.RESET}"
+        
+        header = f"{idx}. {source_tag} {main_info}"
         
         # Metadata: [Album, 2014 / Label / WEB]
         meta_parts = []
@@ -71,20 +86,38 @@ class CLIHandler(InteractionHandler):
         else:
             qual_str = f" ({Colors.GREEN}{qual_text}{Colors.RESET})"
         
-        # Size & Seeders
-        size_str = r.formatted_size
-        if size_str == "?":
-             # Only show ? if verbose or if no other stats? 
-             # Actually keeping it minimal is better if unknown.
-             pass
-             
-        stats = f" - {size_str}"
-        if r.seeders is not None:
-            stats += f", {Colors.BRIGHT_MAGENTA}Seeders: {r.seeders}{Colors.RESET}"
-            
-        print(f"{header}{meta_str}{qual_str}{stats}")
+        # Stats (Size, Seeders/Views, Duration)
+        stats_parts = []
         
-        # Target File
+        # Size
+        size_str = r.formatted_size
+        if size_str != "?":
+            stats_parts.append(size_str)
+            
+        # Seeders (Redacted)
+        if r.seeders is not None:
+            s = r.seeders
+            if s > 50:
+                s_color = Colors.GREEN
+            elif s >= 10:
+                s_color = Colors.YELLOW
+            else:
+                s_color = Colors.RED
+            stats_parts.append(f"Seeders: {s_color}{s}{Colors.RESET}")
+            
+        # Views & Duration (YouTube)
+        if r.view_count is not None:
+            views_str = r.formatted_views
+            stats_parts.append(f"{Colors.DIM}Views: {views_str}{Colors.RESET}")
+            
+        if r.formatted_duration:
+            stats_parts.append(f"{Colors.DIM}{r.formatted_duration}{Colors.RESET}")
+            
+        stats_str = f" - {', '.join(stats_parts)}" if stats_parts else ""
+            
+        print(f"{header}{meta_str}{qual_str}{stats_str}")
+        
+        # Target File (Redacted)
         if r.target_file:
             print(f"   {Colors.YELLOW}-> File: {r.target_file}{Colors.RESET}")
 
