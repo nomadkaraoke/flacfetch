@@ -8,6 +8,7 @@ from ..core.interfaces import InteractionHandler
 from ..core.manager import FetchManager
 from ..core.log import setup_logging
 from ..providers.redacted import RedactedProvider
+from ..providers.ops import OPSProvider
 from ..providers.youtube import YoutubeProvider
 from ..downloaders.youtube import YoutubeDownloader
 
@@ -73,7 +74,7 @@ class CLIHandler(InteractionHandler):
             title_str = f"{Colors.BOLD}{r.title}{Colors.RESET}"
             main_info = f"{subject_str}: {title_str}"
         else:
-            # Redacted: Artist - Title
+            # Torrent trackers (Redacted/OPS): Artist - Title
             subject = r.artist
             color = Colors.ORANGE
             if subject and self.target_artist and subject.lower() == self.target_artist.lower():
@@ -117,7 +118,7 @@ class CLIHandler(InteractionHandler):
                     short_url = "Stream"
                 meta_parts.append(short_url)
         else:
-            # Redacted Metadata: [Album, 2014 / Label / WEB]
+            # Torrent tracker Metadata: [Album, 2014 / Label / WEB]
             if r.release_type: meta_parts.append(f"{Colors.MAGENTA}{r.release_type}{Colors.RESET}")
             if r.year: meta_parts.append(f"{Colors.YELLOW}{r.year}{Colors.RESET}")
             if r.label: meta_parts.append(r.label)
@@ -199,8 +200,9 @@ def main():
         description="""
 flacfetch - High-Quality Audio Downloader
 
-Search and download music from multiple sources including Redacted (lossless FLAC)
-and YouTube. Intelligently matches tracks and presents quality options.
+Search and download music from multiple sources including private torrent trackers
+(Redacted, OPS) for lossless FLAC and YouTube. Intelligently matches tracks and
+presents quality options.
         """.strip(),
         epilog="""
 Examples:
@@ -220,7 +222,9 @@ Examples:
       Search YouTube only (no artist required)
 
 Environment Variables:
-  REDACTED_API_KEY        API key for Redacted (lossless FLAC source)
+  REDACTED_API_KEY             API key for Redacted (lossless FLAC source)
+  OPS_API_KEY                  API key for OPS (lossless FLAC source)
+  FLACFETCH_PROVIDER_PRIORITY  Provider priority (e.g. 'Redacted,OPS,YouTube')
         """.strip(),
         formatter_class=WideHelpFormatter
     )
@@ -237,7 +241,7 @@ Environment Variables:
     search_group.add_argument(
         "-a", "--artist", 
         metavar="NAME",
-        help="Artist name (enables Redacted if API key set)"
+        help="Artist name (enables torrent trackers if API keys set)"
     )
     search_group.add_argument(
         "-t", "--title", 
@@ -255,7 +259,7 @@ Environment Variables:
         type=int, 
         default=20,
         metavar="N",
-        help="Limit Redacted result groups (default: 20)"
+        help="Limit torrent tracker result groups (default: 20)"
     )
     
     # Output options
@@ -283,6 +287,21 @@ Environment Variables:
         "--redacted-key", 
         metavar="KEY",
         help="Redacted API key (or use REDACTED_API_KEY env var)"
+    )
+    provider_group.add_argument(
+        "--ops-key", 
+        metavar="KEY",
+        help="OPS API key (or use OPS_API_KEY env var)"
+    )
+    provider_group.add_argument(
+        "--provider-priority",
+        metavar="NAMES",
+        help="Provider priority (comma-separated, e.g. 'Redacted,OPS,YouTube')"
+    )
+    provider_group.add_argument(
+        "--no-fallback",
+        action="store_true",
+        help="Don't search lower priority providers if higher ones return results"
     )
     
     # General options
@@ -328,6 +347,7 @@ Environment Variables:
     manager.add_provider(YoutubeProvider())
     manager.register_downloader("YouTube", YoutubeDownloader())
 
+    # Register Redacted provider
     redacted_key = args.redacted_key or os.environ.get("REDACTED_API_KEY")
     if redacted_key:
         if artist:
@@ -344,10 +364,46 @@ Environment Variables:
              if args.verbose:
                 print("Info: Redacted provider skipped (requires Artist name).")
     
+    # Register OPS provider
+    ops_key = args.ops_key or os.environ.get("OPS_API_KEY")
+    if ops_key:
+        if artist:
+            ops = OPSProvider(ops_key)
+            ops.search_limit = args.limit
+            manager.add_provider(ops)
+            
+            if TorrentDownloader:
+                try:
+                    manager.register_downloader("OPS", TorrentDownloader())
+                except ImportError:
+                    pass
+        else:
+             if args.verbose:
+                print("Info: OPS provider skipped (requires Artist name).")
+    
     if not manager.providers:
         print(f"\n{Colors.RED}✗ Error: No providers configured{Colors.RESET}")
-        print(f"\n{Colors.BOLD}Tip:{Colors.RESET} Set REDACTED_API_KEY environment variable to enable lossless FLAC downloads.")
+        print(f"\n{Colors.BOLD}Tip:{Colors.RESET} Set REDACTED_API_KEY or OPS_API_KEY environment variable to enable lossless FLAC downloads.")
         sys.exit(1)
+    
+    # Configure provider priority
+    priority_str = args.provider_priority or os.environ.get("FLACFETCH_PROVIDER_PRIORITY")
+    if priority_str:
+        priority_list = [p.strip() for p in priority_str.split(",")]
+        manager.set_provider_priority(priority_list)
+    else:
+        # Default priority: Redacted > OPS > YouTube
+        available_providers = [p.name for p in manager.providers]
+        default_priority = []
+        for name in ["Redacted", "OPS", "YouTube"]:
+            if name in available_providers:
+                default_priority.append(name)
+        if default_priority:
+            manager.set_provider_priority(default_priority)
+    
+    # Configure fallback behavior
+    if args.no_fallback:
+        manager.enable_fallback_search(False)
     
     # Show configured providers
     provider_names = [p.name for p in manager.providers]
@@ -364,9 +420,9 @@ Environment Variables:
         print(f"  • Try a different spelling or search term")
         print(f"  • Check that your artist/title are correct")
         if not artist:
-            print(f"  • Provide an artist name for better Redacted results")
-        if "Redacted" not in provider_names and not args.redacted_key:
-            print(f"  • Set REDACTED_API_KEY to search lossless FLAC sources")
+            print(f"  • Provide an artist name for better torrent tracker results")
+        if "Redacted" not in provider_names and "OPS" not in provider_names and not args.redacted_key and not args.ops_key:
+            print(f"  • Set REDACTED_API_KEY or OPS_API_KEY to search lossless FLAC sources")
         sys.exit(0)
     
     selected = None

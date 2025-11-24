@@ -10,9 +10,29 @@ class FetchManager:
         self.providers: List[Provider] = []
         self._downloader_map: dict[str, Downloader] = {}
         self._default_downloader: Optional[Downloader] = None
+        self._provider_priority: Optional[List[str]] = None
+        self._use_fallback_search: bool = True  # Search lower priority providers if higher ones fail
     
     def add_provider(self, provider: Provider):
         self.providers.append(provider)
+    
+    def set_provider_priority(self, priority_list: List[str]):
+        """Set provider search priority by name.
+        
+        Args:
+            priority_list: List of provider names in priority order (e.g., ['Redacted', 'OPS', 'YouTube'])
+        """
+        self._provider_priority = priority_list
+        logger.info(f"Provider priority set to: {' > '.join(priority_list)}")
+    
+    def enable_fallback_search(self, enabled: bool = True):
+        """Enable/disable searching lower priority providers if higher ones return no results.
+        
+        Args:
+            enabled: If True, search lower priority providers when higher ones fail.
+                    If False, only search the highest priority provider.
+        """
+        self._use_fallback_search = enabled
 
     def register_downloader(self, source_name: str, downloader: Downloader):
         self._downloader_map[source_name] = downloader
@@ -22,16 +42,62 @@ class FetchManager:
 
     def search(self, query: TrackQuery) -> List[Release]:
         all_releases = []
-        for provider in self.providers:
+        
+        # Get providers in priority order
+        providers = self._get_ordered_providers()
+        
+        for idx, provider in enumerate(providers):
             try:
                 logger.info(f"Searching {provider.name} for '{query.artist} - {query.title}'...") 
                 results = provider.search(query)
                 logger.info(f"Found {len(results)} results from {provider.name}")
-                all_releases.extend(results)
+                
+                if results:
+                    all_releases.extend(results)
+                    # If we found results and fallback is disabled, stop searching
+                    if not self._use_fallback_search:
+                        logger.info(f"Found results from {provider.name}, skipping lower priority providers")
+                        break
+                else:
+                    # No results from this provider
+                    if self._use_fallback_search:
+                        logger.info(f"No results from {provider.name}, trying next provider...")
+                    else:
+                        # Fallback disabled and no results - stop here
+                        logger.info(f"No results from {provider.name} and fallback disabled, stopping search")
+                        break
+                    
             except Exception as e:
                 logger.error(f"Error searching {provider.name}: {e}")
-                pass
+                # Continue to next provider on error if fallback enabled
+                if self._use_fallback_search:
+                    logger.info(f"Provider {provider.name} failed, trying next provider...")
+                else:
+                    logger.info(f"Provider {provider.name} failed and fallback disabled, stopping search")
+                    break
+                
         return all_releases
+    
+    def _get_ordered_providers(self) -> List[Provider]:
+        """Get providers ordered by priority (if set), otherwise in registration order."""
+        if not self._provider_priority:
+            return self.providers
+        
+        # Build a map of provider name to provider
+        provider_map = {p.name: p for p in self.providers}
+        
+        # Order providers by priority list
+        ordered = []
+        for name in self._provider_priority:
+            if name in provider_map:
+                ordered.append(provider_map[name])
+        
+        # Add any providers not in priority list at the end
+        for provider in self.providers:
+            if provider not in ordered:
+                ordered.append(provider)
+        
+        return ordered
 
     def _sort_releases(self, releases: List[Release]) -> List[Release]:
         # Sorting Logic:

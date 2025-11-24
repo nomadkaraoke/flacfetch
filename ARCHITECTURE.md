@@ -84,6 +84,5 @@ The `FetchManager` implements a weighted sort key:
 
 ## 4. Future Improvements
 *   **Metadata Tagging**: Auto-tag downloaded files using MusicBrainz/Discogs.
-*   **Orpheus Support**: Add `OrpheusProvider` (similar API to Redacted).
 *   **Spectral Analysis**: Integrate `ffmpeg` or `sox` to verify frequency cutoffs post-download automatically.
 
