@@ -3,6 +3,7 @@ from typing import List, Optional, Any, Dict
 from ..core.interfaces import Provider
 from ..core.models import TrackQuery, Release, Quality, AudioFormat, MediaSource
 from ..core.log import get_logger
+from ..core.matching import calculate_match_score, clean_filename
 
 logger = get_logger("RedactedProvider")
 
@@ -69,14 +70,10 @@ class RedactedProvider(Provider):
                     if file_list_str:
                          target_file = self._find_target_file(file_list_str, query.title)
                          if not target_file:
-                             # If fileList IS present, but track not found, we strictly filter it out
-                             # assuming the search "filelist" param works by GROUP matching, not TORRENT matching.
-                             # But let's be safe: if user searched for "Tonight", and this torrent doesn't have it, skip it.
+                             # Skip if we are certain this torrent doesn't contain the song
                              continue
                     else:
-                        # fileList missing (likely in browse action).
-                        # We cannot determine target_file yet.
-                        # Include release, but mark for lazy resolution.
+                        # fileList missing (lazy load)
                         target_file = None
                         
                     quality = self._parse_quality(torrent)
@@ -134,8 +131,6 @@ class RedactedProvider(Provider):
         if release.target_file:
             return 
             
-        # Extract torrent ID from download URL
-        # URL format: ...?action=download&id=123
         try:
             import urllib.parse
             parsed = urllib.parse.urlparse(release.download_url)
@@ -198,10 +193,10 @@ class RedactedProvider(Provider):
             return None
             
         files = file_list_str.split("|||")
-        track_lower = track_title.lower()
         
-        # Heuristic: Try to find the file that contains the track title
-        # Ideally we'd want more robust matching (e.g. extension check)
+        best_match = None
+        best_score = 0.0
+        
         for f_entry in files:
             # remove size part {{{...}}}
             if "{{{" in f_entry:
@@ -209,11 +204,20 @@ class RedactedProvider(Provider):
             else:
                 fname = f_entry
                 
-            if track_lower in fname.lower():
-                # Check extension roughly (audio files)
-                if any(fname.lower().endswith(ext) for ext in ['.flac', '.mp3', '.m4a', '.wav']):
-                    return fname
-                    
+            # Skip non-audio files
+            if not any(fname.lower().endswith(ext) for ext in ['.flac', '.mp3', '.m4a', '.wav']):
+                continue
+                
+            score = calculate_match_score(track_title, fname)
+            if score > best_score:
+                best_score = score
+                best_match = fname
+        
+        # Only accept matches that are reasonably good matches or contain the full phrase
+        if best_score > 0.6: # Threshold
+            logger.debug(f"Best file match: '{best_match}' (Score: {best_score:.2f}) for '{track_title}'")
+            return best_match
+            
         return None
 
     def _parse_quality(self, torrent_data: Dict[str, Any]) -> Quality:
