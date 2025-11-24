@@ -29,7 +29,15 @@ class YoutubeProvider(Provider):
                     for entry in info['entries']:
                         if not entry: continue
                         title = entry.get('title', 'Unknown')
-                        url = entry.get('url') or entry.get('webpage_url')
+                        
+                        # URL Generation: Prefer webpage_url, fall back to constructed, then direct
+                        url = entry.get('webpage_url')
+                        if not url:
+                            vid_id = entry.get('id')
+                            if vid_id:
+                                url = f"https://youtu.be/{vid_id}"
+                            else:
+                                url = entry.get('url')
                         
                         # Extract Metadata
                         channel = entry.get('uploader') or entry.get('channel')
@@ -50,53 +58,61 @@ class YoutubeProvider(Provider):
                         best_audio = None
                         best_bitrate = 0.0
                         
+                        # Helper to get bitrate safely
+                        def get_fmt_bitrate(f):
+                            if f.get('abr'):
+                                return float(f['abr'])
+                            # Known ITAGs
+                            fid = f.get('format_id')
+                            if fid == '251': return 130.0 # Opus 160k target, usually ~130k avg
+                            if fid == '140': return 128.0 # AAC 128k
+                            if fid == '250': return 70.0
+                            if fid == '249': return 50.0
+                            if fid == '139': return 48.0
+                            if fid == '18': return 96.0 # MP4 360p AAC
+                            if fid == '22': return 192.0 # MP4 720p AAC
+                            return 0.0
+
                         for f in formats:
-                            # Filter for audio-only if possible, or just best audio
-                            # Note: vcodec='none' usually means audio-only stream
-                            if f.get('vcodec') == 'none':
-                                abr = f.get('abr')
+                            # Only consider formats that contain audio
+                            if f.get('acodec') == 'none':
+                                continue
                                 
-                                # If abr is missing, try to calculate from size/duration
-                                if not abr:
-                                    fs = f.get('filesize')
-                                    if fs and duration:
-                                        abr = (fs * 8) / duration / 1000.0
-                                
-                                # If still missing, estimate from format_id (common YouTube ITAGs)
-                                if not abr:
-                                    fid = f.get('format_id')
-                                    if fid == '251': abr = 150 # Opus ~160k
-                                    elif fid == '140': abr = 128 # AAC ~128k
-                                    elif fid == '250': abr = 70
-                                    elif fid == '249': abr = 50
-                                    elif fid == '139': abr = 48
-                                
-                                abr = abr or 0
-                                if abr > best_bitrate:
-                                    best_bitrate = abr
+                            br = get_fmt_bitrate(f)
+                            
+                            # Optimization: Prefer audio-only (vcodec='none') if bitrates are close?
+                            # Actually, let's just find max bitrate.
+                            if br > best_bitrate:
+                                best_bitrate = br
+                                best_audio = f
+                            elif br == best_bitrate and br > 0:
+                                # Tie-breaker: Prefer audio-only container
+                                if f.get('vcodec') == 'none' and best_audio.get('vcodec') != 'none':
                                     best_audio = f
                         
                         # Default values
                         fmt_enum = AudioFormat.AAC
-                        bitrate = 192
+                        bitrate = None
                         size = None
                         
                         if best_audio:
-                            # Determine format
-                            ext = best_audio.get('ext', '')
                             acodec = best_audio.get('acodec', '')
-                            if ext == 'opus' or acodec.startswith('opus'):
+                            ext = best_audio.get('ext', '')
+                            if 'opus' in acodec or ext == 'opus':
                                 fmt_enum = AudioFormat.OPUS
-                            elif ext == 'm4a' or acodec.startswith('mp4a'):
-                                fmt_enum = AudioFormat.AAC
                             
-                            bitrate = int(best_bitrate) if best_bitrate else 192
-                            size = best_audio.get('filesize') or best_audio.get('filesize_approx')
-                        
-                        # Fallback size estimate
-                        if not size:
-                             if duration:
-                                 size = int(duration * (bitrate * 1024 / 8))
+                            if best_bitrate > 0:
+                                bitrate = int(best_bitrate)
+                            
+                            # Filesize logic:
+                            # If audio-only, use filesize.
+                            if best_audio.get('vcodec') == 'none':
+                                size = best_audio.get('filesize') or best_audio.get('filesize_approx')
+                            
+                            # If we still don't have size (because video+audio container or missing meta),
+                            # estimate from bitrate if we have it.
+                            if not size and bitrate and duration:
+                                size = int(duration * (bitrate * 1024 / 8))
 
                         quality = Quality(
                             format=fmt_enum,
