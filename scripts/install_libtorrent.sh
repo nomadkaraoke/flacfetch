@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-
+``
 # Configuration
 LIBTORRENT_VER="1.2.20"
 BOOST_VER="1.84.0"
@@ -105,17 +105,29 @@ echo "[+] Installing..."
 # The build output is deep in bindings/python/bin/...
 # We search for the .so file
 SO_FILE=$(find bindings/python/bin -name "libtorrent.so" | head -n 1)
+# Search for the dylib
+DYLIB_FILE=$(find bin -name "libtorrent-rasterbar.dylib.10.0.0" | head -n 1)
 
 if [ -z "$SO_FILE" ]; then
     echo "[-] Error: Build failed? No .so file found."
     exit 1
 fi
+if [ -z "$DYLIB_FILE" ]; then
+    echo "[-] Error: Build failed? No .dylib file found."
+    exit 1
+fi
 
 echo "    Found module: $SO_FILE"
+echo "    Found dylib:  $DYLIB_FILE"
 
 # Destination in venv
 SITE_PACKAGES=$(cd ../../venv/lib/python3.13/site-packages && pwd)
 cp "$SO_FILE" "$SITE_PACKAGES/libtorrent.so"
+cp "$DYLIB_FILE" "$SITE_PACKAGES/libtorrent-rasterbar.dylib.10.0.0"
+
+# Fix rpath/install_name
+# We tell libtorrent.so to find the dylib in the same directory (@loader_path)
+install_name_tool -change "libtorrent-rasterbar.dylib.10.0.0" "@loader_path/libtorrent-rasterbar.dylib.10.0.0" "$SITE_PACKAGES/libtorrent.so"
 
 echo ""
 echo "=== Success! ==="

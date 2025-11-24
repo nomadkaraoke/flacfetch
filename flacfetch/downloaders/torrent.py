@@ -84,14 +84,46 @@ class TorrentDownloader(Downloader):
 
         print("Starting download...")
         
+        # Alert handling for verbose logging
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            self.ses.set_alert_mask(lt.alert.category_t.all_categories)
+        
         while True:
+            # Poll alerts
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                alerts = self.ses.pop_alerts()
+                for a in alerts:
+                    # Filter out noisy alerts if needed, or log all
+                    # tracker_announce_alert, tracker_reply_alert, tracker_error_alert are useful
+                    if isinstance(a, lt.tracker_error_alert) or isinstance(a, lt.tracker_reply_alert) or isinstance(a, lt.tracker_announce_alert):
+                        print(f"\n[LibTorrent Alert] {a.message()}")
+                    elif isinstance(a, lt.peer_error_alert) or isinstance(a, lt.peer_disconnected_alert):
+                         # Often too noisy, maybe only show connection errors if stuck
+                         pass
+                    elif a.category() & lt.alert.category_t.error_notification:
+                         print(f"\n[LibTorrent Error] {a.message()}")
+            
             s = handle.status()
             if s.state == lt.torrent_status.seeding or s.state == lt.torrent_status.finished:
                 break
                 
-            state_str = ['queued', 'checking', 'downloading metadata', \
-                         'downloading', 'finished', 'seeding', 'allocating']
-            state = state_str[s.state]
+            # State mapping based on libtorrent 1.2.x enum values
+            # 0: queued_for_checking
+            # 1: checking_files
+            # 2: downloading_metadata
+            # 3: downloading
+            # 4: finished
+            # 5: seeding
+            # 6: allocating
+            # 7: checking_resume_data
+            state_str = ['queued_for_checking', 'checking_files', 'downloading_metadata', \
+                         'downloading', 'finished', 'seeding', 'allocating', 'checking_resume_data']
+            
+            if s.state < len(state_str):
+                state = state_str[s.state]
+            else:
+                state = f"unknown state ({s.state})"
+
             print(f'\r{s.progress * 100:.2f}% complete (down: {s.download_rate / 1000:.1f} kB/s up: {s.upload_rate / 1000:.1f} kB/s peers: {s.num_peers}) {state}', end='')
             sys.stdout.flush()
             time.sleep(1)
