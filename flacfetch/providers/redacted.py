@@ -49,6 +49,10 @@ class RedactedProvider(Provider):
             results = data.get("response", {}).get("results", [])
             logger.debug(f"Found {len(results)} groups in Redacted response")
             
+            # Debug log keys of the first torrent in first group to verify structure
+            if results and results[0].get("torrents"):
+                logger.debug(f"Sample torrent keys: {list(results[0]['torrents'][0].keys())}")
+
             for group in results:
                 artist = group["artist"]
                 group_name = group["groupName"]
@@ -58,12 +62,22 @@ class RedactedProvider(Provider):
                 logger.debug(f"Processing group '{group_name}' ({group_year}) with {len(torrents)} torrents")
 
                 for torrent in torrents:
-                    # Find matching file in fileList
+                    # Try to find matching file in fileList if present
                     file_list_str = torrent.get("fileList", "")
-                    target_file = self._find_target_file(file_list_str, query.title)
+                    target_file = None
                     
-                    if not target_file:
-                        continue # Skip this torrent if track not found
+                    if file_list_str:
+                         target_file = self._find_target_file(file_list_str, query.title)
+                         if not target_file:
+                             # If fileList IS present, but track not found, we strictly filter it out
+                             # assuming the search "filelist" param works by GROUP matching, not TORRENT matching.
+                             # But let's be safe: if user searched for "Tonight", and this torrent doesn't have it, skip it.
+                             continue
+                    else:
+                        # fileList missing (likely in browse action).
+                        # We cannot determine target_file yet.
+                        # Include release, but mark for lazy resolution.
+                        target_file = None
                         
                     quality = self._parse_quality(torrent)
                     dl_url = f"{self.BASE_URL}/ajax.php?action=download&id={torrent['torrentId']}"
@@ -99,7 +113,8 @@ class RedactedProvider(Provider):
                         edition_info=edition_info,
                         label=label,
                         catalogue_number=cat_num,
-                        target_file=target_file
+                        target_file=target_file,
+                        track_pattern=query.title # Store so we can resolve later
                     )
                     releases.append(r)
                     
@@ -111,6 +126,56 @@ class RedactedProvider(Provider):
         except Exception as e:
             logger.exception(f"Unexpected error in RedactedProvider: {e}")
             return []
+
+    def populate_details(self, release: Release) -> None:
+        """
+        Fetches detailed torrent info to resolve file list and target file.
+        """
+        if release.target_file:
+            return 
+            
+        # Extract torrent ID from download URL
+        # URL format: ...?action=download&id=123
+        try:
+            import urllib.parse
+            parsed = urllib.parse.urlparse(release.download_url)
+            qs = urllib.parse.parse_qs(parsed.query)
+            torrent_id = qs.get('id', [None])[0]
+            
+            if not torrent_id:
+                logger.warning(f"Could not extract torrent ID from {release.download_url}")
+                return
+                
+            logger.info(f"Fetching details for torrent {torrent_id} to resolve target file...")
+            url = f"{self.BASE_URL}/ajax.php"
+            params = {"action": "torrent", "id": torrent_id}
+            
+            resp = self.session.get(url, params=params, timeout=10)
+            if resp.status_code != 200:
+                logger.error(f"Failed to fetch torrent details: {resp.status_code}")
+                return
+                
+            data = resp.json()
+            if data["status"] != "success":
+                logger.error("Torrent details API failed")
+                return
+                
+            # Response structure: { response: { torrent: { fileList: "..." } } }
+            t_data = data.get("response", {}).get("torrent", {})
+            file_list_str = t_data.get("fileList", "")
+            
+            if file_list_str and release.track_pattern:
+                target = self._find_target_file(file_list_str, release.track_pattern)
+                if target:
+                    release.target_file = target
+                    logger.info(f"Resolved target file: {target}")
+                else:
+                    logger.warning(f"Track pattern '{release.track_pattern}' not found in file list for torrent {torrent_id}")
+            else:
+                logger.warning("No file list found in details")
+                
+        except Exception as e:
+            logger.exception(f"Error populating details: {e}")
 
     def fetch_artifact(self, release: Release) -> Optional[bytes]:
         if not release.download_url:

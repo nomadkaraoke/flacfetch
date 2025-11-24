@@ -55,18 +55,20 @@ class FetchManager:
             logger.error(msg)
             raise ValueError(msg)
         
-        # Check if we need to fetch artifact first (e.g. .torrent file)
-        # Find the provider for this release
+        # Check if provider needs to populate details (lazy resolution of target_file)
         provider = next((p for p in self.providers if p.name == release.source_name), None)
+        if provider:
+            if not release.target_file and release.track_pattern:
+                logger.info(f"Resolving target file for {release.title}...")
+                provider.populate_details(release)
+        
+        # Check if we need to fetch artifact first (e.g. .torrent file)
         if provider:
             logger.info(f"Fetching metadata/artifact for {release.title} from {provider.name}...")
             artifact = provider.fetch_artifact(release)
             if artifact:
                 # If artifact is bytes (e.g. .torrent), we might need to save it to a temp file 
                 # or pass it to downloader. 
-                # For simplicity, let's assume downloader can handle raw data if we extended the interface,
-                # or we save to temp file here.
-                # Let's save to a temp .torrent file if it looks like one.
                 import tempfile
                 import os
                 
@@ -77,14 +79,6 @@ class FetchManager:
                     tmp.write(artifact)
                 
                 logger.debug(f"Saved temporary torrent file to {path}")
-                # Update release or pass path to downloader?
-                # Downloader.download takes release and output_path.
-                # We can hack release.download_url to be the file path for the torrent downloader
-                # strictly for this operation.
-                # Better: Downloader interface should take optional 'meta_file_path'
-                
-                # For now, let's assume the specific TorrentDownloader knows how to handle a local file path in download_url
-                # if it starts with file:// or just absolute path.
                 release.download_url = path 
         
         logger.info(f"Starting download for {release.title}...")

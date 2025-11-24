@@ -19,6 +19,13 @@ class Provider(ABC):
         """
         return None
 
+    def populate_details(self, release: Release) -> None:
+        """
+        Populate additional details for the release (e.g. file list) that were not available during search.
+        This modifies the release object in-place.
+        """
+        pass
+
 class Downloader(ABC):
     @abstractmethod
     def download(self, release: Release, output_path: str) -> None:
@@ -32,4 +39,3 @@ class InteractionHandler(ABC):
         Returns None if selection is cancelled.
         """
         pass
-

@@ -98,6 +98,7 @@ class Release:
     
     # Selective Download Info
     target_file: Optional[str] = None
+    track_pattern: Optional[str] = None # The track title to search for if target_file is not yet resolved
     
     @property
     def formatted_size(self) -> str:
