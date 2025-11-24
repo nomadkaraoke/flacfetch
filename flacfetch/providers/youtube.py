@@ -11,10 +11,12 @@ class YoutubeProvider(Provider):
     def search(self, query: TrackQuery) -> List[Release]:
         # Search for 5 results
         search_query = f"ytsearch5:{query.artist} {query.title}"
+        # Disable extract_flat to get formats and duration, allowing size estimation
         ydl_opts = {
             'quiet': True,
-            'extract_flat': True, # Don't fetch full details for speed
+            'extract_flat': False, 
             'ignoreerrors': True,
+            'no_warnings': True,
         }
         
         releases = []
@@ -26,11 +28,19 @@ class YoutubeProvider(Provider):
                         if not entry: continue
                         title = entry.get('title', 'Unknown')
                         url = entry.get('url') or entry.get('webpage_url')
+                        duration = entry.get('duration', 0)
                         
-                        # YouTube is generally lossy
+                        # Estimate size: 192kbps * duration
+                        # 192 kbps = 24 KB/s
+                        estimated_size = int(duration * 24 * 1024) if duration else None
+                        
+                        # YouTube usually serves Opus (WebM) or AAC (M4A). 
+                        # Best audio is often Opus ~160kbps or AAC ~128kbps (high varies).
+                        # Labeling as "AAC/Opus" or just "Web Audio"
+                        
                         quality = Quality(
-                            format=AudioFormat.AAC, 
-                            bitrate=192, # Optimistic estimate
+                            format=AudioFormat.AAC, # Generic container label for CLI
+                            bitrate=192, # Average high quality estimate
                             media=MediaSource.WEB
                         )
                         
@@ -39,11 +49,11 @@ class YoutubeProvider(Provider):
                             artist=query.artist, 
                             quality=quality,
                             source_name=self.name,
-                            download_url=url
+                            download_url=url,
+                            size_bytes=estimated_size
                         ))
         except Exception as e:
             # print(f"YouTube search error: {e}")
             pass
             
         return releases
-

@@ -60,18 +60,25 @@ class CLIHandler(InteractionHandler):
         meta_str = f" [{ ' / '.join(meta_parts) }]" if meta_parts else ""
         
         # Quality: (FLAC 24bit) - Removing redundant media
-        # quality.__str__ returns e.g. "FLAC 24bit WEB".
-        # We want just "FLAC 24bit" if WEB/CD is already in metadata.
         qual_text = str(r.quality)
-        # Strip media if present at end
         media_name = r.quality.media.name
         if qual_text.endswith(media_name):
             qual_text = qual_text[:-len(media_name)].strip()
             
-        qual_str = f" ({Colors.GREEN}{qual_text}{Colors.RESET})"
+        # Colorize quality
+        if "24bit" in qual_text:
+            qual_str = f" ({Colors.YELLOW}{qual_text}{Colors.RESET})"
+        else:
+            qual_str = f" ({Colors.GREEN}{qual_text}{Colors.RESET})"
         
         # Size & Seeders
-        stats = f" - {r.formatted_size}"
+        size_str = r.formatted_size
+        if size_str == "?":
+             # Only show ? if verbose or if no other stats? 
+             # Actually keeping it minimal is better if unknown.
+             pass
+             
+        stats = f" - {size_str}"
         if r.seeders is not None:
             stats += f", {Colors.BRIGHT_MAGENTA}Seeders: {r.seeders}{Colors.RESET}"
             
@@ -119,12 +126,6 @@ def main():
     redacted_key = args.redacted_key or os.environ.get("REDACTED_API_KEY")
     if redacted_key:
         if artist:
-            # Pass limit to provider if needed, or manager handles filtering?
-            # Provider handles search, so better pass limit there.
-            # We'll update RedactedProvider to accept search_limit via property or init, 
-            # but init is cleaner or we pass in search method. 
-            # For now, let's assume FetchManager or Provider respects a global limit or we set it.
-            # Actually we can just pass it to the provider instance.
             rp = RedactedProvider(redacted_key)
             rp.search_limit = args.limit
             manager.add_provider(rp)
