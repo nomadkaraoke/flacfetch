@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import Optional
-from .models import TrackQuery, Release
+
+from .models import Release, TrackQuery
+
 
 class Provider(ABC):
     @property
@@ -31,12 +33,12 @@ class Downloader(ABC):
     def download(self, release: Release, output_path: str, output_filename: Optional[str] = None) -> str:
         """
         Download a release to the specified output path.
-        
+
         Args:
             release: Release object to download
             output_path: Directory to save the downloaded file
             output_filename: Optional specific filename for the output
-        
+
         Returns:
             Path to the downloaded file
         """

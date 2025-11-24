@@ -1,6 +1,7 @@
 import re
 from difflib import SequenceMatcher
 
+
 def clean_filename(filename: str) -> str:
     # Remove file extension
     if '.' in filename:
@@ -19,15 +20,15 @@ def calculate_match_score(track_title: str, filename: str) -> float:
     """
     cleaned_name = clean_filename(filename).lower()
     target = track_title.lower()
-    
+
     # Exact match check
     if cleaned_name == target:
         return 1.0
-        
+
     # Exact word match check (e.g. "Tonight" in "Tonight (Acoustic)")
     # But NOT "Tonight" in "Goodbye Tonight" - wait, actually "Goodbye Tonight" IS a match if user asks for "Tonight".
     # But we want to penalize it.
-    
+
     # Regex for exact phrase with word boundaries
     import re
     escaped_target = re.escape(target)
@@ -37,16 +38,16 @@ def calculate_match_score(track_title: str, filename: str) -> float:
         # "Tonight" (7) vs "Tonight (Acoustic)" (18) -> 0.38
         # This seems too low for a good match.
         # Let's boost it if it STARTS with the target.
-        
+
         base_score = len(target) / len(cleaned_name)
-        
+
         if cleaned_name.startswith(target):
             # Bonus for starting with the title (likely the correct track)
             return 0.8 + (0.2 * base_score)
         else:
             # Present but not at start (e.g. "Goodbye Tonight")
             return 0.5 + (0.4 * base_score)
-        
+
     # Fuzzy match for minor typos
     return SequenceMatcher(None, target, cleaned_name).ratio()
 

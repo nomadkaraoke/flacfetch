@@ -1,16 +1,17 @@
 import argparse
 import os
-import sys
 import re
+import sys
 from typing import Optional
-from ..core.models import Release, TrackQuery
+
 from ..core.interfaces import InteractionHandler
-from ..core.manager import FetchManager
 from ..core.log import setup_logging
-from ..providers.redacted import RedactedProvider
-from ..providers.ops import OPSProvider
-from ..providers.youtube import YoutubeProvider
+from ..core.manager import FetchManager
+from ..core.models import Release, TrackQuery
 from ..downloaders.youtube import YoutubeDownloader
+from ..providers.ops import OPSProvider
+from ..providers.redacted import RedactedProvider
+from ..providers.youtube import YoutubeProvider
 
 try:
     from ..downloaders.torrent import TorrentDownloader
@@ -39,7 +40,7 @@ class CLIHandler(InteractionHandler):
         print(f"\nFound {len(releases)} releases:\n")
         for idx, r in enumerate(releases):
             self._print_release(idx + 1, r)
-        
+
         while True:
             choice = input(f"\n{Colors.BOLD}Select a release (1-{len(releases)}, 0 to cancel): {Colors.RESET}")
             try:
@@ -58,10 +59,10 @@ class CLIHandler(InteractionHandler):
             format_indicator = f"{Colors.GREEN}[LOSSLESS]{Colors.RESET}"
         else:
             format_indicator = f"{Colors.DIM}[lossy]{Colors.RESET}"
-        
+
         # 2. Source Name
         source_tag = f"[{Colors.CYAN}{r.source_name}{Colors.RESET}]"
-        
+
         # Title/Artist Display
         if r.source_name == "YouTube":
             # Channel: Title
@@ -69,7 +70,7 @@ class CLIHandler(InteractionHandler):
             color = Colors.ORANGE
             if subject and self.target_artist and subject.lower() == self.target_artist.lower():
                 color = Colors.GREEN
-            
+
             subject_str = f"{color}{subject}{Colors.RESET}" if subject else "Unknown"
             title_str = f"{Colors.BOLD}{r.title}{Colors.RESET}"
             main_info = f"{subject_str}: {title_str}"
@@ -79,21 +80,21 @@ class CLIHandler(InteractionHandler):
             color = Colors.ORANGE
             if subject and self.target_artist and subject.lower() == self.target_artist.lower():
                 color = Colors.GREEN
-                
+
             subject_str = f"{color}{subject}{Colors.RESET}" if subject else "Unknown"
             title_str = f"{Colors.BOLD}{r.title}{Colors.RESET}"
             main_info = f"{subject_str} - {title_str}"
-        
+
         header = f"{idx}. {format_indicator} {source_tag} {main_info}"
-        
+
         # Metadata
         meta_parts = []
-        
+
         if r.source_name == "YouTube":
             # YouTube Metadata: [Duration | Year (colored) | URL]
             if r.formatted_duration:
                 meta_parts.append(r.formatted_duration)
-            
+
             if r.year:
                 y = r.year
                 if y >= 2020:
@@ -103,7 +104,7 @@ class CLIHandler(InteractionHandler):
                 else:
                     c = Colors.RED
                 meta_parts.append(f"{c}{y}{Colors.RESET}")
-                
+
             # Shorten URL: https://www.youtube.com/watch?v=ID -> youtu.be/ID
             if r.download_url:
                 short_url = r.download_url
@@ -124,9 +125,9 @@ class CLIHandler(InteractionHandler):
             if r.label: meta_parts.append(r.label)
             if r.edition_info: meta_parts.append(r.edition_info)
             meta_parts.append(r.quality.media.name)
-        
+
         meta_str = f" [{ ' / '.join(meta_parts) }]" if meta_parts else ""
-        
+
         # Quality
         qual_str = ""
         if r.source_name != "YouTube":
@@ -134,20 +135,20 @@ class CLIHandler(InteractionHandler):
             media_name = r.quality.media.name
             if qual_text.endswith(media_name):
                 qual_text = qual_text[:-len(media_name)].strip()
-                
+
             if "24bit" in qual_text:
                 qual_str = f" ({Colors.YELLOW}{qual_text}{Colors.RESET})"
             else:
                 qual_str = f" ({Colors.GREEN}{qual_text}{Colors.RESET})"
-        
+
         # Stats (Size, Seeders/Views)
         stats_parts = []
-        
+
         # Size
         size_str = r.formatted_size
         if size_str != "?":
             stats_parts.append(size_str)
-            
+
         # Seeders (Redacted)
         if r.seeders is not None:
             s = r.seeders
@@ -158,7 +159,7 @@ class CLIHandler(InteractionHandler):
             else:
                 s_color = Colors.RED
             stats_parts.append(f"Seeders: {s_color}{s}{Colors.RESET}")
-            
+
         # Views (YouTube)
         if r.view_count is not None:
             v = r.view_count
@@ -169,24 +170,24 @@ class CLIHandler(InteractionHandler):
             else:
                 v_color = Colors.RED
             stats_parts.append(f"Views: {v_color}{r.formatted_views}{Colors.RESET}")
-            
+
         stats_str = f" - {', '.join(stats_parts)}" if stats_parts else ""
-        
+
         # Target File (Redacted) with highlighting - moved to end of line
         file_str = ""
         if r.target_file:
             fname = r.target_file
-            
+
             # Strip track numbers (e.g., "12. " or "1.12 - " or "05 - ")
             fname = re.sub(r'^\d+[\.\-\s]+', '', fname)
-            
+
             if r.track_pattern:
                 # Highlight match
                 pattern = re.escape(r.track_pattern)
                 fname = re.sub(f"({pattern})", f"{Colors.YELLOW}\\1{Colors.RESET}", fname, flags=re.IGNORECASE)
-            
+
             file_str = f', "{fname}"'
-            
+
         print(f"{header}{meta_str}{qual_str}{stats_str}{file_str}")
 
 def main():
@@ -194,7 +195,7 @@ def main():
     class WideHelpFormatter(argparse.RawDescriptionHelpFormatter):
         def __init__(self, prog, max_help_position=35, width=100):
             super().__init__(prog, max_help_position=max_help_position, width=width)
-    
+
     parser = argparse.ArgumentParser(
         prog="flacfetch",
         description="""
@@ -208,16 +209,16 @@ presents quality options.
 Examples:
   flacfetch "Artist" "Title"
       Search with positional args
-      
+
   flacfetch -a "Artist" -t "Title"
       Search with explicit flags
-      
+
   flacfetch "Artist" "Title" --auto
       Auto-select best quality
-      
+
   flacfetch -a "Artist" -t "Title" -o ~/Music --rename
       Download to ~/Music with auto-rename
-      
+
   flacfetch -t "Title"
       Search YouTube only (no artist required)
 
@@ -228,68 +229,68 @@ Environment Variables:
         """.strip(),
         formatter_class=WideHelpFormatter
     )
-    
+
     # Positional arguments
     parser.add_argument(
-        "query", 
-        nargs="*", 
+        "query",
+        nargs="*",
         help="Artist and title as two separate args: 'Artist' 'Title'"
     )
-    
+
     # Search options
     search_group = parser.add_argument_group("Search Options")
     search_group.add_argument(
-        "-a", "--artist", 
+        "-a", "--artist",
         metavar="NAME",
         help="Artist name (enables torrent trackers if API keys set)"
     )
     search_group.add_argument(
-        "-t", "--title", 
+        "-t", "--title",
         dest="title",
         metavar="NAME",
         help="Track/song title (required)"
     )
     search_group.add_argument(
-        "--auto", 
-        action="store_true", 
+        "--auto",
+        action="store_true",
         help="Auto-select best quality without prompting"
     )
     search_group.add_argument(
-        "--limit", 
-        type=int, 
+        "--limit",
+        type=int,
         default=20,
         metavar="N",
         help="Limit torrent tracker result groups (default: 20)"
     )
-    
+
     # Output options
     output_group = parser.add_argument_group("Output Options")
     output_group.add_argument(
-        "-o", "--output", 
+        "-o", "--output",
         metavar="DIR",
         help="Output directory (default: current dir)"
     )
     output_group.add_argument(
-        "--rename", 
-        action="store_true", 
+        "--rename",
+        action="store_true",
         dest="auto_rename",
         help="Auto-rename to 'ARTIST - TITLE.ext'"
     )
     output_group.add_argument(
-        "--filename", 
+        "--filename",
         metavar="NAME",
         help="Exact output filename (extension optional)"
     )
-    
+
     # Provider options
     provider_group = parser.add_argument_group("Provider Options")
     provider_group.add_argument(
-        "--redacted-key", 
+        "--redacted-key",
         metavar="KEY",
         help="Redacted API key (or use REDACTED_API_KEY env var)"
     )
     provider_group.add_argument(
-        "--ops-key", 
+        "--ops-key",
         metavar="KEY",
         help="OPS API key (or use OPS_API_KEY env var)"
     )
@@ -303,22 +304,22 @@ Environment Variables:
         action="store_true",
         help="Don't search lower priority providers if higher ones return results"
     )
-    
+
     # General options
     general_group = parser.add_argument_group("General Options")
     general_group.add_argument(
-        "-v", "--verbose", 
-        action="store_true", 
+        "-v", "--verbose",
+        action="store_true",
         help="Enable verbose logging"
     )
-    
+
     args = parser.parse_args()
-    
+
     setup_logging(args.verbose)
-    
+
     artist = args.artist
     title = args.title
-    
+
     # Parse positional arguments
     if not (artist and title) and args.query:
         if len(args.query) == 2:
@@ -331,7 +332,7 @@ Environment Variables:
         elif len(args.query) > 2:
             # Multiple args: join all as title
             if not title: title = " ".join(args.query).strip()
-    
+
     # Validate required arguments
     if not title:
         print(f"\n{Colors.RED}✗ Error: Track title is required{Colors.RESET}\n")
@@ -341,9 +342,9 @@ Environment Variables:
         print(f'  {Colors.CYAN}flacfetch -t "Title"{Colors.RESET} (YouTube only)\n')
         print(f"Run {Colors.CYAN}flacfetch --help{Colors.RESET} for more information.")
         sys.exit(1)
-        
+
     manager = FetchManager()
-    
+
     manager.add_provider(YoutubeProvider())
     manager.register_downloader("YouTube", YoutubeDownloader())
 
@@ -354,7 +355,7 @@ Environment Variables:
             rp = RedactedProvider(redacted_key)
             rp.search_limit = args.limit
             manager.add_provider(rp)
-            
+
             if TorrentDownloader:
                 try:
                     manager.register_downloader("Redacted", TorrentDownloader())
@@ -363,7 +364,7 @@ Environment Variables:
         else:
              if args.verbose:
                 print("Info: Redacted provider skipped (requires Artist name).")
-    
+
     # Register OPS provider
     ops_key = args.ops_key or os.environ.get("OPS_API_KEY")
     if ops_key:
@@ -371,7 +372,7 @@ Environment Variables:
             ops = OPSProvider(ops_key)
             ops.search_limit = args.limit
             manager.add_provider(ops)
-            
+
             if TorrentDownloader:
                 try:
                     manager.register_downloader("OPS", TorrentDownloader())
@@ -380,12 +381,12 @@ Environment Variables:
         else:
              if args.verbose:
                 print("Info: OPS provider skipped (requires Artist name).")
-    
+
     if not manager.providers:
         print(f"\n{Colors.RED}✗ Error: No providers configured{Colors.RESET}")
         print(f"\n{Colors.BOLD}Tip:{Colors.RESET} Set REDACTED_API_KEY or OPS_API_KEY environment variable to enable lossless FLAC downloads.")
         sys.exit(1)
-    
+
     # Configure provider priority
     priority_str = args.provider_priority or os.environ.get("FLACFETCH_PROVIDER_PRIORITY")
     if priority_str:
@@ -400,45 +401,45 @@ Environment Variables:
                 default_priority.append(name)
         if default_priority:
             manager.set_provider_priority(default_priority)
-    
+
     # Configure fallback behavior
     if args.no_fallback:
         manager.enable_fallback_search(False)
-    
+
     # Show configured providers
     provider_names = [p.name for p in manager.providers]
     provider_str = ", ".join(f"{Colors.CYAN}{p}{Colors.RESET}" for p in provider_names)
     print(f"\n{Colors.BOLD}Searching:{Colors.RESET} {Colors.GREEN}{artist or 'Unknown Artist'}{Colors.RESET} - {Colors.GREEN}{title}{Colors.RESET}")
     print(f"{Colors.BOLD}Providers:{Colors.RESET} {provider_str}\n")
-    
+
     q = TrackQuery(artist=artist or "", title=title)
     releases = manager.search(q)
-    
+
     if not releases:
         print(f"{Colors.YELLOW}No results found.{Colors.RESET}")
         print(f"\n{Colors.BOLD}Suggestions:{Colors.RESET}")
-        print(f"  • Try a different spelling or search term")
-        print(f"  • Check that your artist/title are correct")
+        print("  • Try a different spelling or search term")
+        print("  • Check that your artist/title are correct")
         if not artist:
-            print(f"  • Provide an artist name for better torrent tracker results")
+            print("  • Provide an artist name for better torrent tracker results")
         if "Redacted" not in provider_names and "OPS" not in provider_names and not args.redacted_key and not args.ops_key:
-            print(f"  • Set REDACTED_API_KEY or OPS_API_KEY to search lossless FLAC sources")
+            print("  • Set REDACTED_API_KEY or OPS_API_KEY to search lossless FLAC sources")
         sys.exit(0)
-    
+
     selected = None
     if args.auto:
         selected = manager.select_best(releases)
         print(f"\n{Colors.BOLD}Auto-selected:{Colors.RESET} {selected.title} ({selected.quality})")
     else:
         selected = manager.select_interactive(releases, CLIHandler(artist))
-        
+
     if selected:
         if not args.auto:
             print(f"\n{Colors.BOLD}Selected:{Colors.RESET} {selected.title} ({selected.quality})")
-        
+
         # Determine output directory
         output_dir = args.output or "."
-        
+
         # Determine output filename if needed
         output_filename = None
         if args.filename:
@@ -447,10 +448,10 @@ Environment Variables:
             # Auto-rename to "ARTIST - TITLE.ext"
             # Extension will be determined by the downloader
             output_filename = f"{artist} - {title}"
-        
+
         try:
             downloaded_file = manager.download(selected, output_dir, output_filename=output_filename)
-            
+
             # Friendly summary message
             print(f"\n{Colors.GREEN}{'='*60}{Colors.RESET}")
             print(f"{Colors.GREEN}✓ Download Complete!{Colors.RESET}\n")
@@ -472,7 +473,7 @@ Environment Variables:
                     file_display = downloaded_file
                 print(f"{Colors.BOLD}Saved to:{Colors.RESET}  {Colors.CYAN}{file_display}{Colors.RESET}")
             print(f"{Colors.GREEN}{'='*60}{Colors.RESET}\n")
-            
+
         except Exception as e:
             if args.verbose:
                 import traceback

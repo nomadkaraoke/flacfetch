@@ -1,7 +1,8 @@
 from typing import Optional
-from .models import TrackQuery, Release
-from .interfaces import Provider, Downloader, InteractionHandler
+
+from .interfaces import Downloader, InteractionHandler, Provider
 from .log import get_logger
+from .models import Release, TrackQuery
 
 logger = get_logger("FetchManager")
 
@@ -12,22 +13,22 @@ class FetchManager:
         self._default_downloader: Optional[Downloader] = None
         self._provider_priority: Optional[list[str]] = None
         self._use_fallback_search: bool = True  # Search lower priority providers if higher ones fail
-    
+
     def add_provider(self, provider: Provider):
         self.providers.append(provider)
-    
+
     def set_provider_priority(self, priority_list: list[str]):
         """Set provider search priority by name.
-        
+
         Args:
             priority_list: List of provider names in priority order (e.g., ['Redacted', 'OPS', 'YouTube'])
         """
         self._provider_priority = priority_list
         logger.info(f"Provider priority set to: {' > '.join(priority_list)}")
-    
+
     def enable_fallback_search(self, enabled: bool = True):
         """Enable/disable searching lower priority providers if higher ones return no results.
-        
+
         Args:
             enabled: If True, search lower priority providers when higher ones fail.
                     If False, only search the highest priority provider.
@@ -42,16 +43,16 @@ class FetchManager:
 
     def search(self, query: TrackQuery) -> list[Release]:
         all_releases = []
-        
+
         # Get providers in priority order
         providers = self._get_ordered_providers()
-        
-        for idx, provider in enumerate(providers):
+
+        for _idx, provider in enumerate(providers):
             try:
-                logger.info(f"Searching {provider.name} for '{query.artist} - {query.title}'...") 
+                logger.info(f"Searching {provider.name} for '{query.artist} - {query.title}'...")
                 results = provider.search(query)
                 logger.info(f"Found {len(results)} results from {provider.name}")
-                
+
                 if results:
                     all_releases.extend(results)
                     # If we found results and fallback is disabled, stop searching
@@ -66,7 +67,7 @@ class FetchManager:
                         # Fallback disabled and no results - stop here
                         logger.info(f"No results from {provider.name} and fallback disabled, stopping search")
                         break
-                    
+
             except Exception as e:
                 logger.error(f"Error searching {provider.name}: {e}")
                 # Continue to next provider on error if fallback enabled
@@ -75,28 +76,28 @@ class FetchManager:
                 else:
                     logger.info(f"Provider {provider.name} failed and fallback disabled, stopping search")
                     break
-                
+
         return all_releases
-    
+
     def _get_ordered_providers(self) -> list[Provider]:
         """Get providers ordered by priority (if set), otherwise in registration order."""
         if not self._provider_priority:
             return self.providers
-        
+
         # Build a map of provider name to provider
         provider_map = {p.name: p for p in self.providers}
-        
+
         # Order providers by priority list
         ordered = []
         for name in self._provider_priority:
             if name in provider_map:
                 ordered.append(provider_map[name])
-        
+
         # Add any providers not in priority list at the end
         for provider in self.providers:
             if provider not in ordered:
                 ordered.append(provider)
-        
+
         return ordered
 
     def _sort_releases(self, releases: list[Release]) -> list[Release]:
@@ -108,7 +109,7 @@ class FetchManager:
         # 5. Seeders (Redacted) / Views (YouTube)
         # 6. Quality (Bitrate/Lossless)
         # 7. Year (Context dependent)
-        
+
         def release_type_score(r: Release) -> int:
             if not r.release_type: return 0
             priority = {
@@ -121,17 +122,17 @@ class FetchManager:
                 "Remix": 1
             }
             return priority.get(r.release_type, 0)
-        
+
         def channel_match_score(r: Release) -> int:
             """Score based on how well the channel name matches the artist name (YouTube only)"""
             if r.source_name != "YouTube":
                 return 0
             if not r.channel or not r.artist:
                 return 0
-            
+
             channel_lower = r.channel.lower()
             artist_lower = r.artist.lower()
-            
+
             # Exact match (highest priority)
             if channel_lower == artist_lower:
                 return 100
@@ -164,7 +165,7 @@ class FetchManager:
                 score += 5
             elif "lyric video" in title_lower:
                 score += 2
-            
+
             return score
 
         def year_score(r: Release) -> int:
@@ -205,26 +206,26 @@ class FetchManager:
             msg = f"No downloader registered for source: {release.source_name}"
             logger.error(msg)
             raise ValueError(msg)
-        
+
         provider = next((p for p in self.providers if p.name == release.source_name), None)
-        
+
         if provider:
             if not release.target_file and release.track_pattern:
                 logger.info(f"Resolving target file for {release.title}...")
                 provider.populate_details(release)
-        
+
         if provider:
             logger.info(f"Fetching metadata/artifact for {release.title} from {provider.name}...")
             artifact = provider.fetch_artifact(release)
             if artifact:
-                import tempfile
                 import os
+                import tempfile
                 fd, path = tempfile.mkstemp(suffix=".torrent")
                 with os.fdopen(fd, 'wb') as tmp:
                     tmp.write(artifact)
-                
+
                 logger.debug(f"Saved temporary torrent file to {path}")
-                release.download_url = path 
+                release.download_url = path
             elif provider.name == "Redacted":
                  # If we failed to fetch the artifact but still proceed, we likely passed a URL to the downloader
                  # The downloader expects a local path or magnet.

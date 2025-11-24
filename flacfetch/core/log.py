@@ -1,5 +1,5 @@
 import logging
-import os
+
 
 def setup_logging(verbose: bool = False):
     level = logging.DEBUG if verbose else logging.INFO

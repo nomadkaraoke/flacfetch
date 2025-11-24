@@ -1,7 +1,9 @@
-import yt_dlp # type: ignore
-from typing import Optional
+
+import yt_dlp  # type: ignore
+
 from ..core.interfaces import Provider
-from ..core.models import TrackQuery, Release, Quality, AudioFormat, MediaSource
+from ..core.models import AudioFormat, MediaSource, Quality, Release, TrackQuery
+
 
 class YoutubeProvider(Provider):
     @property
@@ -12,15 +14,15 @@ class YoutubeProvider(Provider):
         # Search for 5 results
         # Adding "topic" often helps find the auto-generated "Topic" channel results which are high quality audio
         search_query = f"ytsearch5:{query.artist} {query.title} topic"
-        
+
         # Disable extract_flat to get formats and duration
         ydl_opts = {
             'quiet': True,
-            'extract_flat': False, 
+            'extract_flat': False,
             'ignoreerrors': True,
             'no_warnings': True,
         }
-        
+
         releases = []
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -29,7 +31,7 @@ class YoutubeProvider(Provider):
                     for entry in info['entries']:
                         if not entry: continue
                         title = entry.get('title', 'Unknown')
-                        
+
                         # URL Generation: Prefer webpage_url, fall back to constructed, then direct
                         url = entry.get('webpage_url')
                         if not url:
@@ -38,12 +40,12 @@ class YoutubeProvider(Provider):
                                 url = f"https://youtu.be/{vid_id}"
                             else:
                                 url = entry.get('url')
-                        
+
                         # Extract Metadata
                         channel = entry.get('uploader') or entry.get('channel')
                         view_count = entry.get('view_count')
                         duration = entry.get('duration')
-                        
+
                         # Extract Year
                         upload_date = entry.get('upload_date') # YYYYMMDD
                         year = None
@@ -52,12 +54,12 @@ class YoutubeProvider(Provider):
                                 year = int(upload_date[:4])
                             except ValueError:
                                 pass
-                        
+
                         # Find best audio format
                         formats = entry.get('formats', [])
                         best_audio = None
                         best_bitrate = 0.0
-                        
+
                         # Helper to get bitrate safely
                         def get_fmt_bitrate(f):
                             if f.get('abr'):
@@ -77,9 +79,9 @@ class YoutubeProvider(Provider):
                             # Only consider formats that contain audio
                             if f.get('acodec') == 'none':
                                 continue
-                                
+
                             br = get_fmt_bitrate(f)
-                            
+
                             # Optimization: Prefer audio-only (vcodec='none') if bitrates are close?
                             # Actually, let's just find max bitrate.
                             if br > best_bitrate:
@@ -89,26 +91,26 @@ class YoutubeProvider(Provider):
                                 # Tie-breaker: Prefer audio-only container
                                 if f.get('vcodec') == 'none' and best_audio.get('vcodec') != 'none':
                                     best_audio = f
-                        
+
                         # Default values
                         fmt_enum = AudioFormat.AAC
                         bitrate = None
                         size = None
-                        
+
                         if best_audio:
                             acodec = best_audio.get('acodec', '')
                             ext = best_audio.get('ext', '')
                             if 'opus' in acodec or ext == 'opus':
                                 fmt_enum = AudioFormat.OPUS
-                            
+
                             if best_bitrate > 0:
                                 bitrate = int(best_bitrate)
-                            
+
                             # Filesize logic:
                             # If audio-only, use filesize.
                             if best_audio.get('vcodec') == 'none':
                                 size = best_audio.get('filesize') or best_audio.get('filesize_approx')
-                            
+
                             # If we still don't have size (because video+audio container or missing meta),
                             # estimate from bitrate if we have it.
                             if not size and bitrate and duration:
@@ -119,10 +121,10 @@ class YoutubeProvider(Provider):
                             bitrate=bitrate,
                             media=MediaSource.WEB
                         )
-                        
+
                         releases.append(Release(
                             title=title,
-                            artist=query.artist, 
+                            artist=query.artist,
                             quality=quality,
                             source_name=self.name,
                             download_url=url,
@@ -132,8 +134,8 @@ class YoutubeProvider(Provider):
                             duration_seconds=duration,
                             year=year
                         ))
-        except Exception as e:
+        except Exception:
             # print(f"YouTube search error: {e}")
             pass
-            
+
         return releases

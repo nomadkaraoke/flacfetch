@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Optional, Any
+from typing import Optional
+
 
 class AudioFormat(Enum):
     FLAC = auto()
@@ -25,7 +26,7 @@ class Quality:
     sample_rate: Optional[int] = None # e.g. 44100, 96000
     bitrate: Optional[int] = None # For lossy, e.g. 320
     media: MediaSource = MediaSource.OTHER
-    
+
     def __lt__(self, other: 'Quality') -> bool:
         # Comparison logic for "better" quality
         # 1. Format: FLAC/WAV > Lossy
@@ -33,20 +34,20 @@ class Quality:
             return False
         if not self.is_lossless() and other.is_lossless():
             return True
-            
+
         # 2. If both lossless, check bit depth
         if self.is_lossless():
             s_bits = self.bit_depth or 16
             o_bits = other.bit_depth or 16
             if s_bits != o_bits:
                 return s_bits < o_bits
-                
+
             # 3. Check sample rate
             s_rate = self.sample_rate or 44100
             o_rate = other.sample_rate or 44100
             if s_rate != o_rate:
                 return s_rate < o_rate
-                
+
             # 4. Media preference: WEB > CD > Vinyl (Opinionated default)
             media_rank = {
                 MediaSource.WEB: 3,
@@ -65,7 +66,7 @@ class Quality:
 
     def is_lossless(self) -> bool:
         return self.format in (AudioFormat.FLAC, AudioFormat.WAV)
-        
+
     def __str__(self) -> str:
         parts = []
         parts.append(self.format.name)
@@ -90,7 +91,7 @@ class Release:
     download_url: Optional[str] = None
     info_hash: Optional[str] = None # For torrents
     size_bytes: Optional[int] = None
-    
+
     # Extra Metadata
     year: Optional[int] = None
     edition_info: Optional[str] = None # e.g. "Deluxe Edition", "Remaster 2020"
@@ -98,38 +99,38 @@ class Release:
     catalogue_number: Optional[str] = None
     release_type: Optional[str] = None # e.g. "Album", "Single"
     seeders: Optional[int] = None
-    
+
     # YouTube / Streaming Metadata
     channel: Optional[str] = None
     view_count: Optional[int] = None
     duration_seconds: Optional[int] = None
-    
+
     # Selective Download Info
     target_file: Optional[str] = None
     target_file_size: Optional[int] = None # Size of the specific file
     track_pattern: Optional[str] = None # The track title to search for if target_file is not yet resolved
     match_score: float = 0.0 # 0.0 to 1.0, higher is better match for the track title
-    
+
     @property
     def formatted_size(self) -> str:
         size = self.target_file_size if self.target_file_size is not None else self.size_bytes
         if size is None:
             return "?"
-        
+
         s = float(size)
         for unit in ['B', 'KB', 'MB', 'GB']:
             if s < 1024.0:
                 return f"{s:.1f} {unit}"
             s /= 1024.0
         return f"{s:.1f} TB"
-    
+
     @property
     def formatted_duration(self) -> Optional[str]:
         if self.duration_seconds is None:
             return None
         m, s = divmod(self.duration_seconds, 60)
         return f"{m}:{s:02d}"
-    
+
     @property
     def formatted_views(self) -> Optional[str]:
         if self.view_count is None:
@@ -143,13 +144,13 @@ class Release:
     def __str__(self) -> str:
         # This is the basic string representation, CLI will handle colorization
         parts = [f"[{self.source_name}]"]
-        
+
         # If YouTube, include channel
         if self.source_name == "YouTube" and self.channel:
              parts.append(f"{self.channel}: {self.title}")
         else:
              parts.append(f"{self.artist} - {self.title}")
-        
+
         # Detailed metadata string similar to Redacted UI
         # Format: Year / Label / Cat# / Edition / Media
         meta_components = []
@@ -160,21 +161,21 @@ class Release:
         # Media is part of quality usually, but sometimes useful here.
         # The UI puts Media at the end of this string.
         meta_components.append(self.quality.media.name)
-        
+
         if meta_components:
             parts.append(f"[{' / '.join(meta_components)}]")
-            
+
         parts.append(f"({self.quality})")
-        
+
         if self.seeders is not None:
             parts.append(f"Seeders: {self.seeders}")
-            
+
         parts.append(f"- {self.formatted_size}")
-        
+
         if self.duration_seconds:
             parts.append(f"({self.formatted_duration})")
-            
+
         if self.target_file:
             parts.append(f"\n   -> File: {self.target_file}")
-            
+
         return " ".join(parts)

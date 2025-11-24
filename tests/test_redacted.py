@@ -1,7 +1,7 @@
-import pytest
 from unittest.mock import MagicMock
+
+from flacfetch.core.models import AudioFormat, TrackQuery
 from flacfetch.providers.redacted import RedactedProvider
-from flacfetch.core.models import TrackQuery, AudioFormat, MediaSource
 
 # Updated Mock to include file lists and multiple qualities
 SAMPLE_GROUP_RESPONSE = {
@@ -50,33 +50,33 @@ SAMPLE_GROUP_RESPONSE = {
 def test_redacted_lossless_filtering():
     provider = RedactedProvider(api_key="test")
     provider.session.get = MagicMock()
-    
+
     # Mock the browse search response
     browse_resp = MagicMock()
     browse_resp.status_code = 200
     browse_resp.json.return_value = {
-        "status": "success", 
+        "status": "success",
         "response": {"results": [{"groupId": 123}]}
     }
-    
+
     # Mock the group details response
     details_resp = MagicMock()
     details_resp.status_code = 200
     details_resp.json.return_value = SAMPLE_GROUP_RESPONSE
-    
+
     # Configure side effect to return different responses for different calls
     provider.session.get.side_effect = [browse_resp, details_resp]
-    
+
     q = TrackQuery(artist="Logistics", title="Fear Not")
     releases = provider.search(q)
-    
+
     # Should find 2 releases (FLAC 16bit and FLAC 24bit)
     # The MP3 release should be filtered out
     assert len(releases) == 2
-    
+
     formats = [r.quality.format for r in releases]
     assert all(f == AudioFormat.FLAC for f in formats)
-    
+
     # Verify target files
     assert releases[0].target_file == "01 - Fear Not.flac"
     assert releases[1].target_file == "01 Fear Not.flac"
@@ -84,7 +84,7 @@ def test_redacted_lossless_filtering():
 def test_redacted_no_match_filtered():
     provider = RedactedProvider(api_key="test")
     provider.session.get = MagicMock()
-    
+
     # Response with no matching file
     NO_MATCH_RESPONSE = {
         "status": "success",
@@ -96,27 +96,27 @@ def test_redacted_no_match_filtered():
             }]
         }
     }
-    
+
     browse_resp = MagicMock()
     browse_resp.status_code = 200
     browse_resp.json.return_value = {"status": "success", "response": {"results": [{"groupId": 1}]}}
-    
+
     details_resp = MagicMock()
     details_resp.status_code = 200
     details_resp.json.return_value = NO_MATCH_RESPONSE
-    
+
     provider.session.get.side_effect = [browse_resp, details_resp]
-    
+
     q = TrackQuery(artist="Test", title="Fear Not")
     releases = provider.search(q)
-    
+
     assert len(releases) == 0
 
 def test_redacted_html_entity_decoding():
     """Test that HTML entities like &amp; are properly decoded in filenames."""
     provider = RedactedProvider(api_key="test")
     provider.session.get = MagicMock()
-    
+
     # Response with HTML entities in filename
     # Use "Luv Stuck" as the track name to get better matching
     HTML_ENTITY_RESPONSE = {
@@ -142,20 +142,20 @@ def test_redacted_html_entity_decoding():
             }]
         }
     }
-    
+
     browse_resp = MagicMock()
     browse_resp.status_code = 200
     browse_resp.json.return_value = {"status": "success", "response": {"results": [{"groupId": 1}]}}
-    
+
     details_resp = MagicMock()
     details_resp.status_code = 200
     details_resp.json.return_value = HTML_ENTITY_RESPONSE
-    
+
     provider.session.get.side_effect = [browse_resp, details_resp]
-    
+
     q = TrackQuery(artist="Salute", title="Luv Stuck")
     releases = provider.search(q)
-    
+
     # Should find the release and decode &amp; to &
     assert len(releases) == 1
     assert releases[0].target_file == "05 - Salute & Piri - Luv Stuck.flac"
