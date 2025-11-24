@@ -35,14 +35,12 @@ class FetchManager:
 
     def _sort_releases(self, releases: List[Release]) -> List[Release]:
         # Sorting Logic:
-        # 1. Match Score (Exact match > Partial match)
-        # 2. Release Type (Album > Single > EP > Other)
-        # 3. Seeders (Higher is better - reliability/speed)
-        # 4. Year (Oldest first for "original" preference if types match, or Descending?
-        #    - If I want "most normal", usually oldest main album.
-        #    - If I want "newest remaster", newest.
-        #    - Let's go with Oldest as tie-breaker for "Original".
-        # 5. Quality
+        # 1. Match Score (Redacted only, mostly)
+        # 2. Official/Topic (YouTube)
+        # 3. Release Type (Redacted)
+        # 4. Seeders (Redacted)
+        # 5. Quality (Bitrate/Lossless)
+        # 6. Year (Context dependent)
         
         def release_type_score(r: Release) -> int:
             if not r.release_type: return 0
@@ -57,12 +55,46 @@ class FetchManager:
             }
             return priority.get(r.release_type, 0)
 
+        def is_official_score(r: Release) -> int:
+            if r.source_name != "YouTube":
+                return 0
+            score = 0
+            # "Topic" channels are auto-generated official audio
+            if r.channel and " - Topic" in r.channel:
+                score += 20
+            # VEVO
+            if r.channel and "VEVO" in r.channel.upper():
+                score += 15
+            # Title keywords
+            title_lower = r.title.lower()
+            if "official audio" in title_lower:
+                score += 10
+            elif "official video" in title_lower:
+                score += 5
+            elif "official music video" in title_lower:
+                score += 5
+            elif "lyric video" in title_lower:
+                score += 2
+            
+            return score
+
+        def year_score(r: Release) -> int:
+            if not r.year: return 0
+            if r.source_name == "Redacted":
+                # Oldest first -> -Year
+                return -r.year
+            elif r.source_name == "YouTube":
+                # Newest first -> Year
+                return r.year
+            return -r.year
+
         return sorted(releases, key=lambda r: (
-            r.match_score,          # 1. Name Match (High to Low)
-            release_type_score(r),  # 2. Type (Album first)
-            (r.seeders or 0),       # 3. Seeders (High to Low)
-            -(r.year or 9999),      # 4. Year (Oldest first -> Smallest year -> Largest negative)
-            r.quality               # 5. Quality
+            r.match_score,          # 1. Name Match
+            is_official_score(r),   # 2. Official (YouTube)
+            release_type_score(r),  # 3. Type (Redacted)
+            (r.seeders or 0),       # 4. Seeders
+            r.quality,              # 5. Quality
+            year_score(r)           # 6. Year
         ), reverse=True)
 
     def select_best(self, releases: List[Release]) -> Optional[Release]:

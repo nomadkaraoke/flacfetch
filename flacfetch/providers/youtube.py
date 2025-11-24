@@ -29,8 +29,7 @@ class YoutubeProvider(Provider):
                     for entry in info['entries']:
                         if not entry: continue
                         title = entry.get('title', 'Unknown')
-                        # Prefer webpage_url (the watch page) over direct stream url
-                        url = entry.get('webpage_url') or entry.get('url')
+                        url = entry.get('url') or entry.get('webpage_url')
                         
                         # Extract Metadata
                         channel = entry.get('uploader') or entry.get('channel')
@@ -49,12 +48,30 @@ class YoutubeProvider(Provider):
                         # Find best audio format
                         formats = entry.get('formats', [])
                         best_audio = None
-                        best_bitrate = 0
+                        best_bitrate = 0.0
                         
                         for f in formats:
                             # Filter for audio-only if possible, or just best audio
-                            if f.get('vcodec') == 'none' or f.get('acodec') != 'none':
-                                abr = f.get('abr', 0) or 0
+                            # Note: vcodec='none' usually means audio-only stream
+                            if f.get('vcodec') == 'none':
+                                abr = f.get('abr')
+                                
+                                # If abr is missing, try to calculate from size/duration
+                                if not abr:
+                                    fs = f.get('filesize')
+                                    if fs and duration:
+                                        abr = (fs * 8) / duration / 1000.0
+                                
+                                # If still missing, estimate from format_id (common YouTube ITAGs)
+                                if not abr:
+                                    fid = f.get('format_id')
+                                    if fid == '251': abr = 150 # Opus ~160k
+                                    elif fid == '140': abr = 128 # AAC ~128k
+                                    elif fid == '250': abr = 70
+                                    elif fid == '249': abr = 50
+                                    elif fid == '139': abr = 48
+                                
+                                abr = abr or 0
                                 if abr > best_bitrate:
                                     best_bitrate = abr
                                     best_audio = f
@@ -67,13 +84,16 @@ class YoutubeProvider(Provider):
                         if best_audio:
                             # Determine format
                             ext = best_audio.get('ext', '')
-                            if ext == 'opus' or best_audio.get('acodec', '').startswith('opus'):
+                            acodec = best_audio.get('acodec', '')
+                            if ext == 'opus' or acodec.startswith('opus'):
                                 fmt_enum = AudioFormat.OPUS
+                            elif ext == 'm4a' or acodec.startswith('mp4a'):
+                                fmt_enum = AudioFormat.AAC
                             
-                            bitrate = int(best_audio.get('abr', 192))
+                            bitrate = int(best_bitrate) if best_bitrate else 192
                             size = best_audio.get('filesize') or best_audio.get('filesize_approx')
                         
-                        # Fallback size estimate if metadata missing but duration exists
+                        # Fallback size estimate
                         if not size:
                              if duration:
                                  size = int(duration * (bitrate * 1024 / 8))
