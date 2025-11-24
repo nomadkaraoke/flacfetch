@@ -68,19 +68,32 @@ class CLIHandler(InteractionHandler):
         meta_parts = []
         
         if r.source_name == "YouTube":
-            # YouTube Metadata: [Duration | URL]
+            # YouTube Metadata: [Duration | Year (colored) | URL]
             if r.formatted_duration:
                 meta_parts.append(r.formatted_duration)
             
             if r.year:
-                meta_parts.append(str(r.year))
+                y = r.year
+                if y >= 2020:
+                    c = Colors.GREEN
+                elif y >= 2015:
+                    c = Colors.YELLOW
+                else:
+                    c = Colors.RED
+                meta_parts.append(f"{c}{y}{Colors.RESET}")
                 
             # Shorten URL: https://www.youtube.com/watch?v=ID -> youtu.be/ID
             if r.download_url:
                 short_url = r.download_url
                 if "youtube.com/watch?v=" in short_url:
-                    vid_id = short_url.split("v=")[1].split("&")[0]
-                    short_url = f"youtu.be/{vid_id}"
+                    try:
+                        vid_id = short_url.split("v=")[1].split("&")[0]
+                        short_url = f"youtu.be/{vid_id}"
+                    except IndexError:
+                        pass # Keep original if format unexpected
+                elif "googlevideo.com" in short_url:
+                    # Fallback if ID extraction failed before, though provider tries to fix it now.
+                    short_url = "Stream"
                 meta_parts.append(short_url)
         else:
             # Redacted Metadata: [Album, 2014 / Label / WEB]
@@ -93,35 +106,17 @@ class CLIHandler(InteractionHandler):
         meta_str = f" [{ ' / '.join(meta_parts) }]" if meta_parts else ""
         
         # Quality
-        qual_text = str(r.quality)
-        media_name = r.quality.media.name
-        if qual_text.endswith(media_name):
-            qual_text = qual_text[:-len(media_name)].strip()
-            
-        # Colorize quality
-        # Green: Lossless or High Bitrate (>130)
-        # Yellow: Medium Bitrate (50-130)
-        # Red: Low Bitrate (<50)
-        
-        is_good = False
-        is_ok = False
-        
-        if r.quality.is_lossless():
-            is_good = True
-        elif r.quality.bitrate:
-            if r.quality.bitrate > 130:
-                is_good = True
-            elif r.quality.bitrate >= 50:
-                is_ok = True
+        qual_str = ""
+        if r.source_name != "YouTube":
+            qual_text = str(r.quality)
+            media_name = r.quality.media.name
+            if qual_text.endswith(media_name):
+                qual_text = qual_text[:-len(media_name)].strip()
                 
-        if "24bit" in qual_text:
-            qual_str = f" ({Colors.YELLOW}{qual_text}{Colors.RESET})"
-        elif is_good:
-            qual_str = f" ({Colors.GREEN}{qual_text}{Colors.RESET})"
-        elif is_ok:
-            qual_str = f" ({Colors.YELLOW}{qual_text}{Colors.RESET})"
-        else:
-            qual_str = f" ({Colors.RED}{qual_text}{Colors.RESET})"
+            if "24bit" in qual_text:
+                qual_str = f" ({Colors.YELLOW}{qual_text}{Colors.RESET})"
+            else:
+                qual_str = f" ({Colors.GREEN}{qual_text}{Colors.RESET})"
         
         # Stats (Size, Seeders/Views)
         stats_parts = []
