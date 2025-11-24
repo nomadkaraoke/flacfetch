@@ -1,5 +1,6 @@
 import requests
 import time
+import itertools
 from typing import List, Optional, Any, Dict, Set
 from ..core.interfaces import Provider
 from ..core.models import TrackQuery, Release, Quality, AudioFormat, MediaSource
@@ -15,6 +16,7 @@ class RedactedProvider(Provider):
         self.api_key = api_key
         self.session = requests.Session()
         self.session.headers.update({"Authorization": self.api_key})
+        self.search_limit = 20 # Default limit
         
     @property
     def name(self) -> str:
@@ -25,7 +27,9 @@ class RedactedProvider(Provider):
         params = {
             "action": "browse",
             "artistname": query.artist,
-            "filelist": query.title
+            "filelist": query.title,
+            # Filter for FLAC only at API level to reduce response size and processing
+            "format": "FLAC" 
         }
         
         logger.debug(f"Searching Redacted with params: {params}")
@@ -55,10 +59,28 @@ class RedactedProvider(Provider):
                 if gid:
                     group_ids.add(gid)
             
-            logger.info(f"Fetching details for {len(group_ids)} groups to resolve file lists...")
+            # Limit the number of groups we fetch details for
+            sorted_group_ids = sorted(list(group_ids), reverse=True) # Newest first typically implies higher ID? Not always reliable but okay.
+            # Or rely on search order (relevance/time). browse_results is already ordered by API default (Time descending usually).
+            
+            # Actually browse_results order is best.
+            ordered_group_ids = []
+            seen = set()
+            for g in browse_results:
+                gid = g.get("groupId")
+                if gid and gid not in seen:
+                    ordered_group_ids.append(gid)
+                    seen.add(gid)
+            
+            limited_group_ids = ordered_group_ids[:self.search_limit]
+            
+            if len(ordered_group_ids) > self.search_limit:
+                logger.info(f"Limiting detailed fetch to top {self.search_limit} groups (out of {len(ordered_group_ids)} found)")
+            
+            logger.info(f"Fetching details for {len(limited_group_ids)} groups to resolve file lists...")
             
             releases = []
-            for gid in group_ids:
+            for gid in limited_group_ids:
                 group_releases = self._fetch_group_details(gid, query.title)
                 releases.extend(group_releases)
                 time.sleep(1.1) 
@@ -105,6 +127,7 @@ class RedactedProvider(Provider):
             releases = []
             for torrent in torrents:
                 # Filter for Lossless only (FLAC/WAV)
+                # Even if we filter in search, group details returns ALL formats in that group.
                 quality = self._parse_quality(torrent)
                 if not quality.is_lossless():
                     continue
@@ -120,17 +143,15 @@ class RedactedProvider(Provider):
                 edition_parts = []
                 remaster_title = torrent.get("remasterTitle")
                 remaster_year = torrent.get("remasterYear")
-                # remaster_record_label not reliably in torrent info here? 
-                # Docs say it should be. Check keys if issues arise.
                 remaster_record_label = torrent.get("remasterRecordLabel")
                 remaster_catalogue_number = torrent.get("remasterCatalogueNumber")
                 
                 if torrent.get("remastered"):
                     if remaster_title:
                         edition_parts.append(remaster_title)
-                    # Remaster year often IS the release year we care about for sorting (e.g. 2014 release of 2011 album)
-                    # But user might want original year. 
-                    
+                    if remaster_year:
+                        edition_parts.append(f"{remaster_year}")
+                
                 edition_info = " ".join(edition_parts) if edition_parts else None
                 
                 label = remaster_record_label or group.get("recordLabel")
@@ -178,7 +199,6 @@ class RedactedProvider(Provider):
         return None
 
     def _find_best_target_file(self, file_list_str: str, track_title: str) -> tuple[Optional[str], Optional[int], float]:
-        # Returns (filename, size_bytes, score)
         if not file_list_str:
             return None, None, 0.0
             
@@ -189,7 +209,6 @@ class RedactedProvider(Provider):
         best_score = 0.0
         
         for f_entry in files:
-            # Format: filename{{{size}}}
             size = 0
             if "{{{" in f_entry:
                 parts = f_entry.split("{{{")
@@ -220,7 +239,6 @@ class RedactedProvider(Provider):
         encoding = torrent_data.get("encoding", "")
         media_str = torrent_data.get("media", "").upper()
         
-        # Format
         if format_str == "FLAC":
             fmt = AudioFormat.FLAC
         elif format_str == "MP3":
@@ -232,7 +250,6 @@ class RedactedProvider(Provider):
         else:
             fmt = AudioFormat.OTHER
             
-        # Media
         media_map = {
             "WEB": MediaSource.WEB,
             "CD": MediaSource.CD,
@@ -242,7 +259,6 @@ class RedactedProvider(Provider):
         }
         media = media_map.get(media_str, MediaSource.OTHER)
         
-        # Bit depth / Bitrate
         bit_depth = None
         bitrate = None
         
@@ -252,7 +268,6 @@ class RedactedProvider(Provider):
             else:
                 bit_depth = 16
         elif fmt in (AudioFormat.MP3, AudioFormat.AAC):
-            # Parse "320", "V0 (VBR)"
             if "320" in encoding:
                 bitrate = 320
             elif "V0" in encoding:
@@ -260,9 +275,9 @@ class RedactedProvider(Provider):
             elif "V2" in encoding:
                 bitrate = 190
             elif "APS" in encoding:
-                bitrate = 215 # Approx VBR
+                bitrate = 215
             elif "APX" in encoding:
-                bitrate = 245 # Approx VBR
+                bitrate = 245
             elif "192" in encoding:
                 bitrate = 192
             elif "256" in encoding:
