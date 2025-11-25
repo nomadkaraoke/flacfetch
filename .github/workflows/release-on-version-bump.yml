@@ -1,0 +1,190 @@
+name: Release on Version Bump
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'pyproject.toml'
+
+permissions:
+  contents: write
+  id-token: write  # For PyPI trusted publishing
+
+jobs:
+  check-version-change:
+    runs-on: ubuntu-latest
+    outputs:
+      version_changed: ${{ steps.check.outputs.changed }}
+      new_version: ${{ steps.check.outputs.version }}
+      tag_exists: ${{ steps.check.outputs.tag_exists }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check if version changed
+        id: check
+        run: |
+          # Get current version from pyproject.toml
+          NEW_VERSION=$(python3 -c "import toml; print(toml.load('pyproject.toml')['project']['version'])")
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          
+          # Get previous version from pyproject.toml
+          git checkout HEAD^1 pyproject.toml 2>/dev/null || true
+          if [ -f pyproject.toml ]; then
+            OLD_VERSION=$(python3 -c "import toml; print(toml.load('pyproject.toml')['project']['version'])" 2>/dev/null || echo "none")
+          else
+            OLD_VERSION="none"
+          fi
+          git checkout HEAD pyproject.toml
+          
+          echo "Old version: $OLD_VERSION"
+          echo "New version: $NEW_VERSION"
+          
+          # Check if version changed
+          if [ "$NEW_VERSION" != "$OLD_VERSION" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "✅ Version changed from $OLD_VERSION to $NEW_VERSION"
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "ℹ️  Version unchanged: $NEW_VERSION"
+          fi
+          
+          # Check if tag already exists
+          if git ls-remote --tags origin | grep -q "refs/tags/v$NEW_VERSION$"; then
+            echo "tag_exists=true" >> $GITHUB_OUTPUT
+            echo "⚠️  Tag v$NEW_VERSION already exists"
+          else
+            echo "tag_exists=false" >> $GITHUB_OUTPUT
+            echo "✅ Tag v$NEW_VERSION does not exist yet"
+          fi
+
+      - name: Install toml package
+        if: steps.check.outputs.changed == 'true'
+        run: pip install toml
+
+  test:
+    needs: check-version-change
+    if: needs.check-version-change.outputs.version_changed == 'true' && needs.check-version-change.outputs.tag_exists == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run tests
+        run: pytest
+
+      - name: Run linter
+        run: ruff check flacfetch/
+
+  build-and-release:
+    needs: [check-version-change, test]
+    if: needs.check-version-change.outputs.version_changed == 'true' && needs.check-version-change.outputs.tag_exists == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build toml
+
+      - name: Build package
+        run: python -m build
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION="${{ needs.check-version-change.outputs.new_version }}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          echo "## What's Changed" > release_notes.md
+          echo "" >> release_notes.md
+          
+          # Get commits since last tag
+          LAST_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -n "$LAST_TAG" ]; then
+            git log --pretty=format:"* %s (%h)" $LAST_TAG..HEAD >> release_notes.md
+          else
+            git log --pretty=format:"* %s (%h)" HEAD~10..HEAD >> release_notes.md
+          fi
+          
+          echo "" >> release_notes.md
+          cat release_notes.md
+
+      - name: Create tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.version.outputs.tag }}" -m "Release ${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          body_path: release_notes.md
+          files: dist/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-to-pypi:
+    needs: [check-version-change, build-and-release]
+    if: needs.check-version-change.outputs.version_changed == 'true' && needs.check-version-change.outputs.tag_exists == 'false'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/flacfetch/
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build
+
+      - name: Build package
+        run: python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true
+
+      - name: Success message
+        run: |
+          echo "🎉 Successfully released version ${{ needs.check-version-change.outputs.new_version }}!"
+          echo ""
+          echo "✅ GitHub Release: https://github.com/${{ github.repository }}/releases/tag/v${{ needs.check-version-change.outputs.new_version }}"
+          echo "✅ PyPI: https://pypi.org/project/flacfetch/${{ needs.check-version-change.outputs.new_version }}/"
+

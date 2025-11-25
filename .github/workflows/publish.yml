@@ -1,8 +1,9 @@
-name: Publish to PyPI
+name: Publish to PyPI (Manual)
+
+# This workflow is for manual PyPI publishing only.
+# Automated publishing happens via release-on-version-bump.yml
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
 
 permissions:
