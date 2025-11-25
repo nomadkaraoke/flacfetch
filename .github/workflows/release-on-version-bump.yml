@@ -23,6 +23,9 @@ jobs:
         with:
           fetch-depth: 2
 
+      - name: Install toml package
+        run: pip install toml
+
       - name: Check if version changed
         id: check
         run: |
@@ -59,10 +62,6 @@ jobs:
             echo "tag_exists=false" >> $GITHUB_OUTPUT
             echo "✅ Tag v$NEW_VERSION does not exist yet"
           fi
-
-      - name: Install toml package
-        if: steps.check.outputs.changed == 'true'
-        run: pip install toml
 
   test:
     needs: check-version-change
