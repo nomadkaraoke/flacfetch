@@ -146,6 +146,8 @@ flacfetch "Artist" "Title" --auto --no-fallback
 
 ### Library Usage
 
+**Quick Example:**
+
 ```python
 from flacfetch.core.manager import FetchManager
 from flacfetch.core.models import TrackQuery
@@ -169,6 +171,16 @@ if best:
     )
     print(f"Downloaded to: {file_path}")
 ```
+
+**For comprehensive library documentation**, including:
+- Complete API reference for all classes and methods
+- Data models and type hints
+- Provider configuration options
+- Advanced usage patterns (filtering, custom sorting, batch processing)
+- Error handling best practices
+- 5+ detailed examples
+
+See **[LIBRARY.md](LIBRARY.md)** for full library API documentation.
 
 ## Architecture & Design
 
