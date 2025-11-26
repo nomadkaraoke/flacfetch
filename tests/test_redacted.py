@@ -160,3 +160,40 @@ def test_redacted_html_entity_decoding():
     assert len(releases) == 1
     assert releases[0].target_file == "05 - Salute & Piri - Luv Stuck.flac"
     assert "&amp;" not in releases[0].target_file
+
+def test_redacted_filelist_sanitization():
+    """Test that special characters are removed from filelist queries.
+    
+    Sphinx (the search engine used by Redacted) treats certain characters as
+    special operators that break the search:
+    - : (colon) - field search operator
+    - / (slash) - path separator
+    - () (parentheses) - grouping
+    - [] (brackets) - character classes
+    - ! (exclamation) - NOT operator
+    - , (comma) - separator
+    - . (period) - wildcard
+    - ; (semicolon) - separator
+    """
+    provider = RedactedProvider("fake_api_key")
+    
+    # Test cases: (input, expected_output)
+    test_cases = [
+        ("Flight 717: Going To Denmark", "Flight 717 Going To Denmark"),
+        ("Track (feat. Artist)", "Track feat Artist"),
+        ("Song [Remix]", "Song Remix"),
+        ("Part 1/3", "Part 1 3"),
+        ("No! Way!", "No Way"),
+        ("Item 1, 2, 3", "Item 1 2 3"),
+        ("End. Start", "End Start"),
+        ("Part A; Part B", "Part A Part B"),
+        # Multiple special chars should be collapsed to single space
+        ("Track::(Remix)", "Track Remix"),
+        # Hyphens and ampersands should be preserved (they work in Sphinx)
+        ("Track - Artist", "Track - Artist"),
+        ("Artist & Artist", "Artist & Artist"),
+    ]
+    
+    for input_query, expected in test_cases:
+        result = provider._sanitize_filelist_query(input_query)
+        assert result == expected, f"Failed for '{input_query}': got '{result}', expected '{expected}'"

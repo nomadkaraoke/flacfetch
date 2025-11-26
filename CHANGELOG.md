@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4] - 2025-11-26
+
+### Fixed
+- Fixed Redacted and OPS filelist search failing for tracks with special characters (colons, parentheses, etc.)
+- Sphinx search engine treats certain characters as operators, now sanitizing queries to remove: `:/()\[\]!,.;`
+- Tracks like "Flight 717: Going To Denmark" now search correctly
+- Added comprehensive tests for filelist query sanitization
+
 ## [0.3.3] - 2025-11-25
 
 ### Fixed
