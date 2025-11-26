@@ -1,5 +1,4 @@
-import pytest
-from flacfetch.core.models import Quality, Release, AudioFormat, MediaSource, TrackQuery
+from flacfetch.core.models import AudioFormat, MediaSource, Quality, Release, TrackQuery
 
 
 class TestEnums:

@@ -1,8 +1,8 @@
 """Tests for YouTube provider"""
-import pytest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import MagicMock, patch
+
+from flacfetch.core.models import AudioFormat, TrackQuery
 from flacfetch.providers.youtube import YoutubeProvider
-from flacfetch.core.models import TrackQuery, AudioFormat
 
 
 class TestYoutubeProvider:
@@ -14,11 +14,11 @@ class TestYoutubeProvider:
 
     def test_search_with_results(self):
         provider = YoutubeProvider()
-        
+
         with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
             mock_instance = MagicMock()
             mock_yt_dlp.return_value.__enter__.return_value = mock_instance
-            
+
             mock_instance.extract_info.return_value = {
                 'entries': [
                     {
@@ -34,10 +34,10 @@ class TestYoutubeProvider:
                     }
                 ]
             }
-            
+
             query = TrackQuery(artist="Artist", title="Track")
             results = provider.search(query)
-            
+
             assert len(results) > 0
             assert results[0].title == 'Artist - Track (Official Audio)'
             assert results[0].channel == 'Artist - Topic'
@@ -45,41 +45,41 @@ class TestYoutubeProvider:
 
     def test_search_no_results(self):
         provider = YoutubeProvider()
-        
+
         with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
             mock_instance = MagicMock()
             mock_yt_dlp.return_value.__enter__.return_value = mock_instance
-            
+
             mock_instance.extract_info.return_value = {'entries': []}
-            
+
             query = TrackQuery(artist="Unknown", title="Unknown")
             results = provider.search(query)
-            
+
             assert results == []
 
     def test_search_error_handling(self):
         provider = YoutubeProvider()
-        
+
         with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
             mock_instance = MagicMock()
             mock_yt_dlp.return_value.__enter__.return_value = mock_instance
-            
+
             mock_instance.extract_info.side_effect = Exception("Network error")
-            
+
             query = TrackQuery(artist="Artist", title="Track")
             results = provider.search(query)
-            
+
             # Should return empty list on error
             assert results == []
 
     def test_search_with_none_entry(self):
         """Test handling of None entries in search results"""
         provider = YoutubeProvider()
-        
+
         with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
             mock_instance = MagicMock()
             mock_yt_dlp.return_value.__enter__.return_value = mock_instance
-            
+
             mock_instance.extract_info.return_value = {
                 'entries': [
                     None,  # Should skip this
@@ -92,10 +92,10 @@ class TestYoutubeProvider:
                     }
                 ]
             }
-            
+
             query = TrackQuery(artist="Artist", title="Track")
             results = provider.search(query)
-            
+
             # Should skip None entry and process valid one
             assert len(results) == 1
             assert results[0].title == 'Valid Track'
@@ -103,11 +103,11 @@ class TestYoutubeProvider:
     def test_search_prefers_higher_bitrate(self):
         """Test that search prefers higher bitrate formats"""
         provider = YoutubeProvider()
-        
+
         with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
             mock_instance = MagicMock()
             mock_yt_dlp.return_value.__enter__.return_value = mock_instance
-            
+
             mock_instance.extract_info.return_value = {
                 'entries': [
                     {
@@ -122,21 +122,21 @@ class TestYoutubeProvider:
                     }
                 ]
             }
-            
+
             query = TrackQuery(artist="Artist", title="Track")
             results = provider.search(query)
-            
+
             # Should prefer higher bitrate
             assert len(results) > 0
 
     def test_search_with_abr_field(self):
         """Test search handles abr field for bitrate"""
         provider = YoutubeProvider()
-        
+
         with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
             mock_instance = MagicMock()
             mock_yt_dlp.return_value.__enter__.return_value = mock_instance
-            
+
             mock_instance.extract_info.return_value = {
                 'entries': [
                     {
@@ -150,21 +150,21 @@ class TestYoutubeProvider:
                     }
                 ]
             }
-            
+
             query = TrackQuery(artist="Artist", title="Track")
             results = provider.search(query)
-            
+
             assert len(results) > 0
             assert results[0].quality.bitrate == 320
 
     def test_search_skips_video_only_formats(self):
         """Test that video-only formats are skipped"""
         provider = YoutubeProvider()
-        
+
         with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
             mock_instance = MagicMock()
             mock_yt_dlp.return_value.__enter__.return_value = mock_instance
-            
+
             mock_instance.extract_info.return_value = {
                 'entries': [
                     {
@@ -179,36 +179,36 @@ class TestYoutubeProvider:
                     }
                 ]
             }
-            
+
             query = TrackQuery(artist="Artist", title="Track")
             results = provider.search(query)
-            
+
             # Should work despite video-only format
             assert len(results) > 0
 
     def test_populate_details(self):
         """Test populate_details method (currently a no-op)"""
         provider = YoutubeProvider()
-        from flacfetch.core.models import Release, Quality
-        
+        from flacfetch.core.models import Quality, Release
+
         release = Release(
             title="Test", artist="Test", quality=Quality(AudioFormat.OPUS),
             source_name="YouTube"
         )
-        
+
         # Should not raise an error
         provider.populate_details(release)
 
     def test_fetch_artifact(self):
         """Test fetch_artifact method (returns None for YouTube)"""
         provider = YoutubeProvider()
-        from flacfetch.core.models import Release, Quality
-        
+        from flacfetch.core.models import Quality, Release
+
         release = Release(
             title="Test", artist="Test", quality=Quality(AudioFormat.OPUS),
             source_name="YouTube"
         )
-        
+
         result = provider.fetch_artifact(release)
         assert result is None
 

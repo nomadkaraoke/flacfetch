@@ -1,0 +1,39 @@
+#!/bin/bash
+
+# Pre-commit hook to run ruff linting
+# Auto-fixes issues when possible, prevents commit if unfixable issues remain
+
+set -e
+
+echo "Running ruff linter..."
+
+# Get the list of Python files being committed
+FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.py$' || true)
+
+if [ -z "$FILES" ]; then
+    echo "No Python files to check."
+    exit 0
+fi
+
+# Run ruff check with auto-fix
+if ! python -m ruff check --fix $FILES; then
+    echo ""
+    echo "❌ Ruff found issues that could not be auto-fixed."
+    echo "Please fix the issues above and try committing again."
+    exit 1
+fi
+
+# Check if ruff made any changes (auto-fixes)
+if ! git diff --quiet $FILES; then
+    echo ""
+    echo "✅ Ruff auto-fixed some issues."
+    echo "Staging the fixed files..."
+    git add $FILES
+    echo ""
+    echo "Files have been auto-fixed and staged."
+    echo "Your commit will proceed with the fixed files."
+fi
+
+echo "✅ All ruff checks passed!"
+exit 0
+

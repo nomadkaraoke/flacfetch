@@ -1,5 +1,6 @@
 """Test logging configuration"""
 import logging
+
 from flacfetch.core.log import get_logger, setup_logging
 
 

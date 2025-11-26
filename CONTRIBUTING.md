@@ -17,7 +17,14 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -e ".[dev]"
 ```
 
-3. Run tests to verify your setup:
+3. Install git hooks (recommended):
+```bash
+./.githooks/install.sh
+```
+
+This installs a pre-commit hook that automatically runs ruff linting and fixes issues before each commit.
+
+4. Run tests to verify your setup:
 ```bash
 pytest
 ```
@@ -43,6 +50,15 @@ pytest tests/test_matching.py
 ### Code Quality
 
 We use several tools to maintain code quality:
+
+#### Pre-commit Hook (Recommended)
+
+The pre-commit hook automatically runs ruff before each commit:
+- Auto-fixes issues when possible (formatting, import sorting, etc.)
+- Prevents commits if there are unfixable linting errors
+- Install with: `./.githooks/install.sh`
+
+#### Manual Linting
 
 ```bash
 # Lint code
