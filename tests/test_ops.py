@@ -163,7 +163,7 @@ def test_ops_html_entity_decoding():
 
 def test_ops_filelist_sanitization():
     """Test that special characters are removed from filelist queries.
-    
+
     Sphinx (the search engine used by OPS) treats certain characters as
     special operators that break the search:
     - : (colon) - field search operator
@@ -176,7 +176,7 @@ def test_ops_filelist_sanitization():
     - ; (semicolon) - separator
     """
     provider = OPSProvider("fake_api_key")
-    
+
     # Test cases: (input, expected_output)
     test_cases = [
         ("Flight 717: Going To Denmark", "Flight 717 Going To Denmark"),
@@ -193,7 +193,7 @@ def test_ops_filelist_sanitization():
         ("Track - Artist", "Track - Artist"),
         ("Artist & Artist", "Artist & Artist"),
     ]
-    
+
     for input_query, expected in test_cases:
         result = provider._sanitize_filelist_query(input_query)
         assert result == expected, f"Failed for '{input_query}': got '{result}', expected '{expected}'"

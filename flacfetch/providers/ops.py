@@ -37,7 +37,7 @@ class OPSProvider(Provider):
     def _sanitize_filelist_query(self, query: str) -> str:
         """
         Sanitize filelist query for Sphinx search.
-        
+
         Sphinx treats certain characters as special operators that break the search:
         - : (colon) - field search operator
         - / (slash) - path separator or operator
@@ -47,29 +47,29 @@ class OPSProvider(Provider):
         - , (comma) - separator
         - . (period) - wildcard
         - ; (semicolon) - separator
-        
+
         We remove these characters to allow the search to work properly.
         """
         # Characters that break Sphinx filelist search
         special_chars = r':/()\[\]!,.;'
-        
+
         # Remove special characters
         sanitized = query
         for char in special_chars:
             sanitized = sanitized.replace(char, ' ')
-        
+
         # Collapse multiple spaces into one
         sanitized = ' '.join(sanitized.split())
-        
+
         logger.debug(f"Sanitized filelist query: '{query}' -> '{sanitized}'")
         return sanitized
 
     def search(self, query: TrackQuery) -> list[Release]:
         url = f"{self.BASE_URL}/ajax.php"
-        
+
         # Sanitize the filelist query to remove Sphinx special operators
         sanitized_title = self._sanitize_filelist_query(query.title) if query.title else ""
-        
+
         params = {
             "action": "browse",
             "artistname": query.artist,
