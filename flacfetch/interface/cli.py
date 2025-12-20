@@ -2,7 +2,7 @@ import argparse
 import os
 import re
 import sys
-from typing import Optional, Union, List, Any, Callable
+from typing import Any, Callable, List, Optional, Union
 
 from ..core.interfaces import InteractionHandler
 from ..core.log import setup_logging
@@ -48,17 +48,17 @@ def format_release_line(
 ) -> str:
     """
     Format a single release for display.
-    
+
     This is the shared formatting function that can work with either:
     - Release objects (local CLI)
     - Dicts from Release.to_dict() (remote CLI via API)
-    
+
     Args:
         idx: 1-based display index
         release: Release object or dict from Release.to_dict()
         target_artist: Artist name for highlighting matches
         use_colors: Whether to use ANSI color codes
-        
+
     Returns:
         Formatted string for display (without trailing newline)
     """
@@ -71,7 +71,7 @@ def format_release_line(
             RESET = BOLD = DIM = CYAN = GREEN = YELLOW = MAGENTA = BLUE = RED = ""
             BRIGHT_MAGENTA = ORANGE = ""
         C = NoColors
-    
+
     # Extract fields (works with both Release and dict)
     source_name = _get_release_field(release, "source_name", "Unknown")
     title = _get_release_field(release, "title", "Unknown")
@@ -86,7 +86,7 @@ def format_release_line(
     target_file = _get_release_field(release, "target_file")
     track_pattern = _get_release_field(release, "track_pattern")
     download_url = _get_release_field(release, "download_url")
-    
+
     # Get quality info - handle both Release and dict
     if isinstance(release, Release):
         is_lossless = release.quality.is_lossless()
@@ -104,16 +104,16 @@ def format_release_line(
         formatted_size = release.get("formatted_size", "?")
         formatted_duration = release.get("formatted_duration")
         formatted_views = release.get("formatted_views")
-    
+
     # 1. Format indicator (lossless vs lossy)
     if is_lossless:
         format_indicator = f"{C.GREEN}[LOSSLESS]{C.RESET}"
     else:
         format_indicator = f"{C.DIM}[lossy]{C.RESET}"
-    
+
     # 2. Source Name
     source_tag = f"[{C.CYAN}{source_name}{C.RESET}]"
-    
+
     # Title/Artist Display
     if source_name == "YouTube":
         subject = channel
@@ -131,9 +131,9 @@ def format_release_line(
         subject_str = f"{color}{subject}{C.RESET}" if subject else "Unknown"
         title_str = f"{C.BOLD}{title}{C.RESET}"
         main_info = f"{subject_str} - {title_str}"
-    
+
     header = f"{idx}. {format_indicator} {source_tag} {main_info}"
-    
+
     # Metadata
     meta_parts = []
     if source_name == "YouTube":
@@ -168,9 +168,9 @@ def format_release_line(
         if edition_info:
             meta_parts.append(edition_info)
         meta_parts.append(media_name)
-    
+
     meta_str = f" [{' / '.join(meta_parts)}]" if meta_parts else ""
-    
+
     # Quality
     qual_str = ""
     if source_name != "YouTube":
@@ -181,12 +181,12 @@ def format_release_line(
             qual_str = f" ({C.YELLOW}{qual_text}{C.RESET})"
         else:
             qual_str = f" ({C.GREEN}{qual_text}{C.RESET})"
-    
+
     # Stats (Size, Seeders/Views)
     stats_parts = []
     if formatted_size and formatted_size != "?":
         stats_parts.append(formatted_size)
-    
+
     if seeders is not None:
         if seeders > 50:
             s_color = C.GREEN
@@ -195,7 +195,7 @@ def format_release_line(
         else:
             s_color = C.RED
         stats_parts.append(f"Seeders: {s_color}{seeders}{C.RESET}")
-    
+
     if view_count is not None:
         if view_count > 1_000_000:
             v_color = C.GREEN
@@ -204,9 +204,9 @@ def format_release_line(
         else:
             v_color = C.RED
         stats_parts.append(f"Views: {v_color}{formatted_views}{C.RESET}")
-    
+
     stats_str = f" - {', '.join(stats_parts)}" if stats_parts else ""
-    
+
     # Target File with highlighting
     file_str = ""
     if target_file:
@@ -216,7 +216,7 @@ def format_release_line(
             pattern = re.escape(track_pattern)
             fname = re.sub(f"({pattern})", f"{C.YELLOW}\\1{C.RESET}", fname, flags=re.IGNORECASE)
         file_str = f', "{fname}"'
-    
+
     return f"{header}{meta_str}{qual_str}{stats_str}{file_str}"
 
 
@@ -228,9 +228,9 @@ def print_releases(
 ) -> None:
     """
     Print formatted release list for user selection.
-    
+
     This is the shared display function usable by both local and remote CLIs.
-    
+
     Args:
         releases: List of Release objects or dicts from Release.to_dict()
         target_artist: Artist name for highlighting matches

@@ -5,20 +5,20 @@ __author__ = "Andrew Beveridge"
 __email__ = "andrew@beveridge.uk"
 
 # Core models
-from .core.models import Release, Quality, AudioFormat, MediaSource, TrackQuery
+from .core.models import AudioFormat, MediaSource, Quality, Release, TrackQuery
 
 # Display utilities for both local and remote CLIs
 from .interface.cli import (
+    CLIHandler,
+    Colors,
     format_release_line,
     print_releases,
-    Colors,
-    CLIHandler,
 )
 
 __all__ = [
     # Core models
     "Release",
-    "Quality", 
+    "Quality",
     "AudioFormat",
     "MediaSource",
     "TrackQuery",

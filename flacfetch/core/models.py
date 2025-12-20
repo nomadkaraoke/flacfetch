@@ -114,7 +114,7 @@ class Release:
     def to_dict(self) -> dict:
         """
         Serialize Release to a dictionary for API/JSON transmission.
-        
+
         This enables remote CLIs to receive full release data and display
         it with the same rich formatting as local CLIs.
         """
@@ -153,12 +153,12 @@ class Release:
             "is_lossless": self.quality.is_lossless(),
             "quality_str": str(self.quality),
         }
-    
+
     @classmethod
     def from_dict(cls, data: dict) -> "Release":
         """
         Reconstruct a Release from a dictionary.
-        
+
         This enables remote CLIs to reconstruct Release objects from API data
         for display with full formatting.
         """
@@ -175,7 +175,7 @@ class Release:
         else:
             # Fallback for legacy data
             quality = Quality(format=AudioFormat.OTHER)
-        
+
         return cls(
             title=data.get("title", ""),
             artist=data.get("artist", ""),
