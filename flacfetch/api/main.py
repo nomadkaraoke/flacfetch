@@ -7,10 +7,10 @@ enabling remote search and download of audio files.
 Usage:
     # Run directly
     uvicorn flacfetch.api.main:app --host 0.0.0.0 --port 8080
-    
+
     # Or via CLI
     flacfetch serve --port 8080
-    
+
     # Or programmatically
     from flacfetch.api import create_app, run_server
     app = create_app()
@@ -42,18 +42,18 @@ async def lifespan(app: FastAPI):
     """
     # Startup
     logger.info("Starting flacfetch HTTP API...")
-    
-    # Initialize services
-    download_manager = get_download_manager()
-    disk_manager = get_disk_manager()
-    
+
+    # Initialize singleton services
+    _ = get_download_manager()
+    _ = get_disk_manager()
+
     # Start background cleanup task
     cleanup_task = asyncio.create_task(_background_cleanup_loop())
-    
+
     logger.info("Flacfetch HTTP API started")
-    
+
     yield
-    
+
     # Shutdown
     logger.info("Shutting down flacfetch HTTP API...")
     cleanup_task.cancel()
@@ -70,11 +70,11 @@ async def _background_cleanup_loop():
     """
     disk_manager = get_disk_manager()
     check_interval = int(os.environ.get("FLACFETCH_CLEANUP_INTERVAL", "300"))  # 5 minutes
-    
+
     while True:
         try:
             await asyncio.sleep(check_interval)
-            
+
             if disk_manager.needs_cleanup():
                 logger.info("Disk space low, triggering automatic cleanup")
                 try:
@@ -82,7 +82,7 @@ async def _background_cleanup_loop():
                     host = os.environ.get("TRANSMISSION_HOST", "localhost")
                     port = int(os.environ.get("TRANSMISSION_PORT", "9091"))
                     client = transmission_rpc.Client(host=host, port=port, timeout=10)
-                    
+
                     removed, freed = disk_manager.cleanup_oldest(client)
                     if removed > 0:
                         logger.info(f"Auto-cleanup: removed {removed} torrents, freed {freed / (1024**2):.1f} MB")
@@ -97,7 +97,7 @@ async def _background_cleanup_loop():
 def create_app() -> FastAPI:
     """
     Create and configure the FastAPI application.
-    
+
     Returns:
         Configured FastAPI application instance
     """
@@ -107,7 +107,7 @@ def create_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
-    
+
     # Add CORS middleware (permissive for API access)
     app.add_middleware(
         CORSMiddleware,
@@ -116,13 +116,13 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    
+
     # Include routers
     app.include_router(health_router)
     app.include_router(search_router)
     app.include_router(download_router)
     app.include_router(torrents_router)
-    
+
     return app
 
 
@@ -134,7 +134,7 @@ def run_server(
 ):
     """
     Run the flacfetch HTTP API server.
-    
+
     Args:
         app: FastAPI application (created if not provided)
         host: Host to bind to
@@ -142,18 +142,18 @@ def run_server(
         log_level: Logging level
     """
     import uvicorn
-    
+
     if app is None:
         app = create_app()
-    
+
     # Configure logging
     logging.basicConfig(
         level=getattr(logging, log_level.upper()),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
-    
+
     logger.info(f"Starting flacfetch API server on {host}:{port}")
-    
+
     uvicorn.run(
         app,
         host=host,

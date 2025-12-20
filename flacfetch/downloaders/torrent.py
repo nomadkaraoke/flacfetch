@@ -54,7 +54,7 @@ class TorrentDownloader(Downloader):
         self.password = password
         self.keep_seeding = keep_seeding
         self.client = None
-        
+
         # Download directory for keep_seeding mode
         self._download_dir = os.environ.get(
             "FLACFETCH_DOWNLOAD_DIR",
@@ -255,7 +255,7 @@ class TorrentDownloader(Downloader):
                             if file_obj.selected and release.target_file in file_obj.name:
                                 source_path = Path(download_dir) / file_obj.name
                                 break
-                    
+
                     if source_path and source_path.exists():
                         # Determine output filename
                         if output_filename:
@@ -268,13 +268,13 @@ class TorrentDownloader(Downloader):
                             final_filename = source_path.name
 
                         target_file_path = Path(abs_output_path) / final_filename
-                        
+
                         if self.keep_seeding:
                             # Copy file instead of move (keep original for seeding)
                             logger.info(f"Copying file to: {target_file_path}")
                             shutil.copy2(str(source_path), str(target_file_path))
                             downloaded_file_path = str(target_file_path)
-                            logger.info(f"File copied successfully. Torrent continues seeding.")
+                            logger.info("File copied successfully. Torrent continues seeding.")
                         else:
                             # Move file (original behavior)
                             logger.info(f"Moving file to: {target_file_path}")

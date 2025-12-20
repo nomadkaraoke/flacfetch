@@ -24,12 +24,12 @@ def serve_command(args):
     try:
         from ..api import run_server
     except ImportError as e:
-        print(f"Error: API dependencies not installed. Install with: pip install flacfetch[api]")
+        print("Error: API dependencies not installed. Install with: pip install flacfetch[api]")
         print(f"Details: {e}")
         sys.exit(1)
-    
+
     setup_logging(args.verbose)
-    
+
     run_server(
         host=args.host,
         port=args.port,

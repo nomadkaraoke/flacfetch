@@ -6,7 +6,7 @@ enabling remote search and download of audio files from various sources.
 
 Usage:
     flacfetch serve --port 8080
-    
+
     # Or programmatically:
     from flacfetch.api import create_app
     app = create_app()

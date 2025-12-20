@@ -1,10 +1,10 @@
 """
 Flacfetch API routes.
 """
-from .search import router as search_router
 from .download import router as download_router
-from .torrents import router as torrents_router
 from .health import router as health_router
+from .search import router as search_router
+from .torrents import router as torrents_router
 
 __all__ = [
     "search_router",

@@ -3,8 +3,6 @@ Torrent management endpoints for flacfetch HTTP API.
 """
 import logging
 import os
-from datetime import datetime
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -26,10 +24,10 @@ def _get_transmission_client():
     """Get Transmission RPC client."""
     try:
         import transmission_rpc
-        
+
         host = os.environ.get("TRANSMISSION_HOST", "localhost")
         port = int(os.environ.get("TRANSMISSION_PORT", "9091"))
-        
+
         return transmission_rpc.Client(host=host, port=port, timeout=10)
     except ImportError:
         raise HTTPException(status_code=500, detail="transmission-rpc not installed")
@@ -43,24 +41,24 @@ async def list_torrents(
 ) -> TorrentListResponse:
     """
     List all torrents in Transmission.
-    
+
     Shows status, progress, size, and seeding stats for each torrent.
     """
     client = _get_transmission_client()
-    
+
     try:
         torrents = client.get_torrents()
     except Exception as e:
         logger.error(f"Failed to list torrents: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to list torrents: {e}")
-    
+
     torrent_list = []
     total_size = 0
-    
+
     for t in torrents:
         # Get status string
         status_str = str(t.status) if hasattr(t, 'status') else "unknown"
-        
+
         # Get dates
         added_at = None
         done_at = None
@@ -68,10 +66,10 @@ async def list_torrents(
             added_at = t.date_added
         if hasattr(t, 'date_done') and t.date_done:
             done_at = t.date_done
-        
+
         size = t.total_size if hasattr(t, 'total_size') else 0
         total_size += size
-        
+
         torrent_list.append(TorrentInfo(
             id=t.id,
             name=t.name,
@@ -87,7 +85,7 @@ async def list_torrents(
             added_at=added_at,
             done_at=done_at,
         ))
-    
+
     return TorrentListResponse(
         torrents=torrent_list,
         total_size_bytes=total_size,
@@ -103,25 +101,25 @@ async def delete_torrent(
 ) -> TorrentDeleteResponse:
     """
     Delete a torrent from Transmission.
-    
+
     By default, also deletes the downloaded files. Set delete_data=false to keep files.
     """
     client = _get_transmission_client()
-    
+
     try:
         # Verify torrent exists
         torrent = client.get_torrent(torrent_id)
         name = torrent.name
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=404, detail=f"Torrent not found: {torrent_id}")
-    
+
     try:
         client.remove_torrent(torrent_id, delete_data=delete_data)
         logger.info(f"Deleted torrent {torrent_id}: {name} (delete_data={delete_data})")
     except Exception as e:
         logger.error(f"Failed to delete torrent {torrent_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to delete torrent: {e}")
-    
+
     return TorrentDeleteResponse(
         status="deleted",
         message=f"Deleted torrent: {name}" + (" (including files)" if delete_data else ""),
@@ -135,7 +133,7 @@ async def cleanup_torrents(
 ) -> CleanupResponse:
     """
     Clean up torrents to free disk space.
-    
+
     Strategies:
     - oldest: Remove oldest torrents first
     - largest: Remove largest torrents first
@@ -143,9 +141,9 @@ async def cleanup_torrents(
     """
     client = _get_transmission_client()
     disk_manager = get_disk_manager()
-    
+
     strategy = request.strategy.lower()
-    
+
     if strategy == "oldest":
         removed_count, freed_bytes = disk_manager.cleanup_oldest(
             client, target_free_gb=request.target_free_gb
@@ -163,9 +161,9 @@ async def cleanup_torrents(
             status_code=400,
             detail=f"Unknown strategy: {strategy}. Valid: oldest, largest, lowest_ratio"
         )
-    
+
     _, _, free_gb = disk_manager.get_disk_usage()
-    
+
     return CleanupResponse(
         removed_count=removed_count,
         freed_bytes=freed_bytes,

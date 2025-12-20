@@ -22,17 +22,17 @@ async def search_audio(
 ) -> SearchResponse:
     """
     Search for audio matching artist and title.
-    
+
     Returns a list of results from all configured providers (Redacted, OPS, YouTube).
     Results are sorted by quality with lossless sources prioritized.
-    
+
     The search_id in the response can be used with POST /download to download a result.
     """
     manager = get_download_manager()
     fetch_manager = manager._get_fetch_manager()
-    
+
     logger.info(f"Searching for: {request.artist} - {request.title}")
-    
+
     try:
         from flacfetch.core.models import TrackQuery
         query = TrackQuery(artist=request.artist, title=request.title)
@@ -40,16 +40,16 @@ async def search_audio(
     except Exception as e:
         logger.error(f"Search failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Search failed: {e}")
-    
+
     if not releases:
         raise HTTPException(status_code=404, detail=f"No results found for: {request.artist} - {request.title}")
-    
+
     logger.info(f"Found {len(releases)} results")
-    
+
     # Generate search ID and cache results
     search_id = f"search_{uuid.uuid4().hex[:12]}"
     manager.cache_search(search_id, request.artist, request.title, releases)
-    
+
     # Convert to response format
     results: List[SearchResultItem] = []
     for idx, release in enumerate(releases):
@@ -66,7 +66,7 @@ async def search_audio(
                 "media": release.quality.media.name,
             }
             is_lossless = release.quality.is_lossless()
-        
+
         results.append(SearchResultItem(
             index=idx,
             title=release.title,
@@ -90,7 +90,7 @@ async def search_audio(
             formatted_duration=release.formatted_duration,
             is_lossless=is_lossless,
         ))
-    
+
     return SearchResponse(
         search_id=search_id,
         artist=request.artist,

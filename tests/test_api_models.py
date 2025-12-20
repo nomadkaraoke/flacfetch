@@ -1,45 +1,45 @@
 """
 Tests for flacfetch API Pydantic models.
 """
+
 import pytest
-from datetime import datetime
 
 from flacfetch.api.models import (
+    CleanupRequest,
+    CleanupResponse,
+    DiskHealth,
+    DownloadRequest,
+    DownloadStartResponse,
+    DownloadStatus,
+    DownloadStatusResponse,
+    HealthResponse,
+    ProvidersHealth,
     SearchRequest,
     SearchResponse,
     SearchResultItem,
-    DownloadRequest,
-    DownloadStatus,
-    DownloadStartResponse,
-    DownloadStatusResponse,
     TorrentInfo,
     TorrentListResponse,
-    CleanupRequest,
-    CleanupResponse,
-    HealthResponse,
     TransmissionHealth,
-    DiskHealth,
-    ProvidersHealth,
 )
 
 
 class TestSearchModels:
     """Tests for search-related models."""
-    
+
     def test_search_request_valid(self):
         """Test valid search request."""
         req = SearchRequest(artist="ABBA", title="Waterloo")
         assert req.artist == "ABBA"
         assert req.title == "Waterloo"
-    
+
     def test_search_request_requires_fields(self):
         """Test that search request requires both fields."""
         with pytest.raises(ValueError):
             SearchRequest(artist="ABBA")  # Missing title
-        
+
         with pytest.raises(ValueError):
             SearchRequest(title="Waterloo")  # Missing artist
-    
+
     def test_search_result_item(self):
         """Test search result item model."""
         item = SearchResultItem(
@@ -55,7 +55,7 @@ class TestSearchModels:
         assert item.index == 0
         assert item.provider == "Redacted"
         assert item.is_lossless is True
-    
+
     def test_search_response(self):
         """Test search response model."""
         resp = SearchResponse(
@@ -81,7 +81,7 @@ class TestSearchModels:
 
 class TestDownloadModels:
     """Tests for download-related models."""
-    
+
     def test_download_request_basic(self):
         """Test basic download request."""
         req = DownloadRequest(
@@ -91,7 +91,7 @@ class TestDownloadModels:
         assert req.search_id == "abc123"
         assert req.result_index == 0
         assert req.upload_to_gcs is False
-    
+
     def test_download_request_with_gcs(self):
         """Test download request with GCS upload."""
         req = DownloadRequest(
@@ -102,7 +102,7 @@ class TestDownloadModels:
         )
         assert req.upload_to_gcs is True
         assert req.gcs_path == "uploads/job123/audio/"
-    
+
     def test_download_status_enum(self):
         """Test download status enum values."""
         assert DownloadStatus.QUEUED == "queued"
@@ -112,7 +112,7 @@ class TestDownloadModels:
         assert DownloadStatus.COMPLETE == "complete"
         assert DownloadStatus.FAILED == "failed"
         assert DownloadStatus.CANCELLED == "cancelled"
-    
+
     def test_download_start_response(self):
         """Test download start response."""
         resp = DownloadStartResponse(
@@ -121,7 +121,7 @@ class TestDownloadModels:
         )
         assert resp.download_id == "dl_xyz789"
         assert resp.status == DownloadStatus.QUEUED
-    
+
     def test_download_status_response_full(self):
         """Test full download status response."""
         resp = DownloadStatusResponse(
@@ -142,7 +142,7 @@ class TestDownloadModels:
 
 class TestTorrentModels:
     """Tests for torrent management models."""
-    
+
     def test_torrent_info(self):
         """Test torrent info model."""
         info = TorrentInfo(
@@ -160,7 +160,7 @@ class TestTorrentModels:
         )
         assert info.ratio == 2.0
         assert info.peers == 5
-    
+
     def test_torrent_list_response(self):
         """Test torrent list response."""
         resp = TorrentListResponse(
@@ -184,19 +184,19 @@ class TestTorrentModels:
         )
         assert resp.count == 1
         assert len(resp.torrents) == 1
-    
+
     def test_cleanup_request(self):
         """Test cleanup request model."""
         req = CleanupRequest(strategy="oldest", target_free_gb=15.0)
         assert req.strategy == "oldest"
         assert req.target_free_gb == 15.0
-    
+
     def test_cleanup_request_defaults(self):
         """Test cleanup request defaults."""
         req = CleanupRequest()
         assert req.strategy == "oldest"
         assert req.target_free_gb == 10.0
-    
+
     def test_cleanup_response(self):
         """Test cleanup response model."""
         resp = CleanupResponse(
@@ -210,7 +210,7 @@ class TestTorrentModels:
 
 class TestHealthModels:
     """Tests for health check models."""
-    
+
     def test_transmission_health_available(self):
         """Test transmission health when available."""
         health = TransmissionHealth(
@@ -221,7 +221,7 @@ class TestHealthModels:
         assert health.available is True
         assert health.version == "4.0.5"
         assert health.error is None
-    
+
     def test_transmission_health_unavailable(self):
         """Test transmission health when unavailable."""
         health = TransmissionHealth(
@@ -230,7 +230,7 @@ class TestHealthModels:
         )
         assert health.available is False
         assert health.error == "Connection refused"
-    
+
     def test_disk_health(self):
         """Test disk health model."""
         disk = DiskHealth(
@@ -240,7 +240,7 @@ class TestHealthModels:
         )
         assert disk.total_gb == 30.0
         assert disk.free_gb == 11.5
-    
+
     def test_providers_health(self):
         """Test providers health model."""
         providers = ProvidersHealth(
@@ -251,7 +251,7 @@ class TestHealthModels:
         assert providers.redacted is True
         assert providers.ops is False
         assert providers.youtube is True
-    
+
     def test_health_response_full(self):
         """Test full health response."""
         resp = HealthResponse(
