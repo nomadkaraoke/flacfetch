@@ -2,7 +2,7 @@ import argparse
 import os
 import re
 import sys
-from typing import Optional
+from typing import Optional, Union, List, Any, Callable
 
 from ..core.interfaces import InteractionHandler
 from ..core.log import setup_logging
@@ -32,14 +32,223 @@ class Colors:
     BRIGHT_MAGENTA = "\033[95m" # Lighter/Brighter Pink/Purple
     ORANGE = "\033[38;5;208m" # Roughly orange
 
+
+def _get_release_field(release: Union[Release, dict], field: str, default: Any = None) -> Any:
+    """Get a field from a Release object or dict."""
+    if isinstance(release, dict):
+        return release.get(field, default)
+    return getattr(release, field, default)
+
+
+def format_release_line(
+    idx: int,
+    release: Union[Release, dict],
+    target_artist: Optional[str] = None,
+    use_colors: bool = True,
+) -> str:
+    """
+    Format a single release for display.
+    
+    This is the shared formatting function that can work with either:
+    - Release objects (local CLI)
+    - Dicts from Release.to_dict() (remote CLI via API)
+    
+    Args:
+        idx: 1-based display index
+        release: Release object or dict from Release.to_dict()
+        target_artist: Artist name for highlighting matches
+        use_colors: Whether to use ANSI color codes
+        
+    Returns:
+        Formatted string for display (without trailing newline)
+    """
+    # Color setup
+    if use_colors:
+        C = Colors
+    else:
+        # No-op colors
+        class NoColors:
+            RESET = BOLD = DIM = CYAN = GREEN = YELLOW = MAGENTA = BLUE = RED = ""
+            BRIGHT_MAGENTA = ORANGE = ""
+        C = NoColors
+    
+    # Extract fields (works with both Release and dict)
+    source_name = _get_release_field(release, "source_name", "Unknown")
+    title = _get_release_field(release, "title", "Unknown")
+    artist = _get_release_field(release, "artist", "Unknown")
+    year = _get_release_field(release, "year")
+    label = _get_release_field(release, "label")
+    edition_info = _get_release_field(release, "edition_info")
+    release_type = _get_release_field(release, "release_type")
+    seeders = _get_release_field(release, "seeders")
+    channel = _get_release_field(release, "channel")
+    view_count = _get_release_field(release, "view_count")
+    target_file = _get_release_field(release, "target_file")
+    track_pattern = _get_release_field(release, "track_pattern")
+    download_url = _get_release_field(release, "download_url")
+    
+    # Get quality info - handle both Release and dict
+    if isinstance(release, Release):
+        is_lossless = release.quality.is_lossless()
+        quality_str = str(release.quality)
+        media_name = release.quality.media.name
+        formatted_size = release.formatted_size
+        formatted_duration = release.formatted_duration
+        formatted_views = release.formatted_views
+    else:
+        # Dict from to_dict()
+        is_lossless = release.get("is_lossless", False)
+        quality_str = release.get("quality_str", "")
+        quality_data = release.get("quality", {})
+        media_name = quality_data.get("media", "OTHER") if isinstance(quality_data, dict) else "OTHER"
+        formatted_size = release.get("formatted_size", "?")
+        formatted_duration = release.get("formatted_duration")
+        formatted_views = release.get("formatted_views")
+    
+    # 1. Format indicator (lossless vs lossy)
+    if is_lossless:
+        format_indicator = f"{C.GREEN}[LOSSLESS]{C.RESET}"
+    else:
+        format_indicator = f"{C.DIM}[lossy]{C.RESET}"
+    
+    # 2. Source Name
+    source_tag = f"[{C.CYAN}{source_name}{C.RESET}]"
+    
+    # Title/Artist Display
+    if source_name == "YouTube":
+        subject = channel
+        color = C.ORANGE
+        if subject and target_artist and subject.lower() == target_artist.lower():
+            color = C.GREEN
+        subject_str = f"{color}{subject}{C.RESET}" if subject else "Unknown"
+        title_str = f"{C.BOLD}{title}{C.RESET}"
+        main_info = f"{subject_str}: {title_str}"
+    else:
+        subject = artist
+        color = C.ORANGE
+        if subject and target_artist and subject.lower() == target_artist.lower():
+            color = C.GREEN
+        subject_str = f"{color}{subject}{C.RESET}" if subject else "Unknown"
+        title_str = f"{C.BOLD}{title}{C.RESET}"
+        main_info = f"{subject_str} - {title_str}"
+    
+    header = f"{idx}. {format_indicator} {source_tag} {main_info}"
+    
+    # Metadata
+    meta_parts = []
+    if source_name == "YouTube":
+        if formatted_duration:
+            meta_parts.append(formatted_duration)
+        if year:
+            if year >= 2020:
+                c = C.GREEN
+            elif year >= 2015:
+                c = C.YELLOW
+            else:
+                c = C.RED
+            meta_parts.append(f"{c}{year}{C.RESET}")
+        if download_url:
+            short_url = download_url
+            if "youtube.com/watch?v=" in short_url:
+                try:
+                    vid_id = short_url.split("v=")[1].split("&")[0]
+                    short_url = f"youtu.be/{vid_id}"
+                except IndexError:
+                    pass
+            elif "googlevideo.com" in short_url:
+                short_url = "Stream"
+            meta_parts.append(short_url)
+    else:
+        if release_type:
+            meta_parts.append(f"{C.MAGENTA}{release_type}{C.RESET}")
+        if year:
+            meta_parts.append(f"{C.YELLOW}{year}{C.RESET}")
+        if label:
+            meta_parts.append(label)
+        if edition_info:
+            meta_parts.append(edition_info)
+        meta_parts.append(media_name)
+    
+    meta_str = f" [{' / '.join(meta_parts)}]" if meta_parts else ""
+    
+    # Quality
+    qual_str = ""
+    if source_name != "YouTube":
+        qual_text = quality_str
+        if qual_text.endswith(media_name):
+            qual_text = qual_text[:-len(media_name)].strip()
+        if "24bit" in qual_text:
+            qual_str = f" ({C.YELLOW}{qual_text}{C.RESET})"
+        else:
+            qual_str = f" ({C.GREEN}{qual_text}{C.RESET})"
+    
+    # Stats (Size, Seeders/Views)
+    stats_parts = []
+    if formatted_size and formatted_size != "?":
+        stats_parts.append(formatted_size)
+    
+    if seeders is not None:
+        if seeders > 50:
+            s_color = C.GREEN
+        elif seeders >= 10:
+            s_color = C.YELLOW
+        else:
+            s_color = C.RED
+        stats_parts.append(f"Seeders: {s_color}{seeders}{C.RESET}")
+    
+    if view_count is not None:
+        if view_count > 1_000_000:
+            v_color = C.GREEN
+        elif view_count >= 10_000:
+            v_color = C.YELLOW
+        else:
+            v_color = C.RED
+        stats_parts.append(f"Views: {v_color}{formatted_views}{C.RESET}")
+    
+    stats_str = f" - {', '.join(stats_parts)}" if stats_parts else ""
+    
+    # Target File with highlighting
+    file_str = ""
+    if target_file:
+        fname = target_file
+        fname = re.sub(r'^\d+[\.\-\s]+', '', fname)
+        if track_pattern and use_colors:
+            pattern = re.escape(track_pattern)
+            fname = re.sub(f"({pattern})", f"{C.YELLOW}\\1{C.RESET}", fname, flags=re.IGNORECASE)
+        file_str = f', "{fname}"'
+    
+    return f"{header}{meta_str}{qual_str}{stats_str}{file_str}"
+
+
+def print_releases(
+    releases: List[Union[Release, dict]],
+    target_artist: Optional[str] = None,
+    use_colors: bool = True,
+    output_func: Callable[[str], None] = print,
+) -> None:
+    """
+    Print formatted release list for user selection.
+    
+    This is the shared display function usable by both local and remote CLIs.
+    
+    Args:
+        releases: List of Release objects or dicts from Release.to_dict()
+        target_artist: Artist name for highlighting matches
+        use_colors: Whether to use ANSI color codes
+        output_func: Function to use for output (default: print)
+    """
+    output_func(f"\nFound {len(releases)} releases:\n")
+    for idx, release in enumerate(releases, 1):
+        line = format_release_line(idx, release, target_artist, use_colors)
+        output_func(line)
+
 class CLIHandler(InteractionHandler):
     def __init__(self, target_artist: Optional[str] = None):
         self.target_artist = target_artist
 
     def select_release(self, releases: list[Release]) -> Optional[Release]:
-        print(f"\nFound {len(releases)} releases:\n")
-        for idx, r in enumerate(releases):
-            self._print_release(idx + 1, r)
+        # Use the shared display function
+        print_releases(releases, self.target_artist, use_colors=True)
 
         while True:
             choice = input(f"\n{Colors.BOLD}Select a release (1-{len(releases)}, 0 to cancel): {Colors.RESET}")
@@ -52,143 +261,6 @@ class CLIHandler(InteractionHandler):
                 print(f"{Colors.RED}Invalid selection.{Colors.RESET}")
             except ValueError:
                 print(f"{Colors.RED}Please enter a number.{Colors.RESET}")
-
-    def _print_release(self, idx: int, r: Release):
-        # 1. Format indicator (lossless vs lossy)
-        if r.quality.is_lossless():
-            format_indicator = f"{Colors.GREEN}[LOSSLESS]{Colors.RESET}"
-        else:
-            format_indicator = f"{Colors.DIM}[lossy]{Colors.RESET}"
-
-        # 2. Source Name
-        source_tag = f"[{Colors.CYAN}{r.source_name}{Colors.RESET}]"
-
-        # Title/Artist Display
-        if r.source_name == "YouTube":
-            # Channel: Title
-            subject = r.channel
-            color = Colors.ORANGE
-            if subject and self.target_artist and subject.lower() == self.target_artist.lower():
-                color = Colors.GREEN
-
-            subject_str = f"{color}{subject}{Colors.RESET}" if subject else "Unknown"
-            title_str = f"{Colors.BOLD}{r.title}{Colors.RESET}"
-            main_info = f"{subject_str}: {title_str}"
-        else:
-            # Torrent trackers (Redacted/OPS): Artist - Title
-            subject = r.artist
-            color = Colors.ORANGE
-            if subject and self.target_artist and subject.lower() == self.target_artist.lower():
-                color = Colors.GREEN
-
-            subject_str = f"{color}{subject}{Colors.RESET}" if subject else "Unknown"
-            title_str = f"{Colors.BOLD}{r.title}{Colors.RESET}"
-            main_info = f"{subject_str} - {title_str}"
-
-        header = f"{idx}. {format_indicator} {source_tag} {main_info}"
-
-        # Metadata
-        meta_parts = []
-
-        if r.source_name == "YouTube":
-            # YouTube Metadata: [Duration | Year (colored) | URL]
-            if r.formatted_duration:
-                meta_parts.append(r.formatted_duration)
-
-            if r.year:
-                y = r.year
-                if y >= 2020:
-                    c = Colors.GREEN
-                elif y >= 2015:
-                    c = Colors.YELLOW
-                else:
-                    c = Colors.RED
-                meta_parts.append(f"{c}{y}{Colors.RESET}")
-
-            # Shorten URL: https://www.youtube.com/watch?v=ID -> youtu.be/ID
-            if r.download_url:
-                short_url = r.download_url
-                if "youtube.com/watch?v=" in short_url:
-                    try:
-                        vid_id = short_url.split("v=")[1].split("&")[0]
-                        short_url = f"youtu.be/{vid_id}"
-                    except IndexError:
-                        pass # Keep original if format unexpected
-                elif "googlevideo.com" in short_url:
-                    # Fallback if ID extraction failed before, though provider tries to fix it now.
-                    short_url = "Stream"
-                meta_parts.append(short_url)
-        else:
-            # Torrent tracker Metadata: [Album, 2014 / Label / WEB]
-            if r.release_type: meta_parts.append(f"{Colors.MAGENTA}{r.release_type}{Colors.RESET}")
-            if r.year: meta_parts.append(f"{Colors.YELLOW}{r.year}{Colors.RESET}")
-            if r.label: meta_parts.append(r.label)
-            if r.edition_info: meta_parts.append(r.edition_info)
-            meta_parts.append(r.quality.media.name)
-
-        meta_str = f" [{ ' / '.join(meta_parts) }]" if meta_parts else ""
-
-        # Quality
-        qual_str = ""
-        if r.source_name != "YouTube":
-            qual_text = str(r.quality)
-            media_name = r.quality.media.name
-            if qual_text.endswith(media_name):
-                qual_text = qual_text[:-len(media_name)].strip()
-
-            if "24bit" in qual_text:
-                qual_str = f" ({Colors.YELLOW}{qual_text}{Colors.RESET})"
-            else:
-                qual_str = f" ({Colors.GREEN}{qual_text}{Colors.RESET})"
-
-        # Stats (Size, Seeders/Views)
-        stats_parts = []
-
-        # Size
-        size_str = r.formatted_size
-        if size_str != "?":
-            stats_parts.append(size_str)
-
-        # Seeders (Redacted)
-        if r.seeders is not None:
-            s = r.seeders
-            if s > 50:
-                s_color = Colors.GREEN
-            elif s >= 10:
-                s_color = Colors.YELLOW
-            else:
-                s_color = Colors.RED
-            stats_parts.append(f"Seeders: {s_color}{s}{Colors.RESET}")
-
-        # Views (YouTube)
-        if r.view_count is not None:
-            v = r.view_count
-            if v > 1_000_000:
-                v_color = Colors.GREEN
-            elif v >= 10_000:
-                v_color = Colors.YELLOW
-            else:
-                v_color = Colors.RED
-            stats_parts.append(f"Views: {v_color}{r.formatted_views}{Colors.RESET}")
-
-        stats_str = f" - {', '.join(stats_parts)}" if stats_parts else ""
-
-        # Target File (Redacted) with highlighting - moved to end of line
-        file_str = ""
-        if r.target_file:
-            fname = r.target_file
-
-            # Strip track numbers (e.g., "12. " or "1.12 - " or "05 - ")
-            fname = re.sub(r'^\d+[\.\-\s]+', '', fname)
-
-            if r.track_pattern:
-                # Highlight match
-                pattern = re.escape(r.track_pattern)
-                fname = re.sub(f"({pattern})", f"{Colors.YELLOW}\\1{Colors.RESET}", fname, flags=re.IGNORECASE)
-
-            file_str = f', "{fname}"'
-
-        print(f"{header}{meta_str}{qual_str}{stats_str}{file_str}")
 
 def main():
     # Custom formatter with wider width to prevent awkward wrapping

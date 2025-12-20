@@ -111,6 +111,94 @@ class Release:
     track_pattern: Optional[str] = None # The track title to search for if target_file is not yet resolved
     match_score: float = 0.0 # 0.0 to 1.0, higher is better match for the track title
 
+    def to_dict(self) -> dict:
+        """
+        Serialize Release to a dictionary for API/JSON transmission.
+        
+        This enables remote CLIs to receive full release data and display
+        it with the same rich formatting as local CLIs.
+        """
+        return {
+            "title": self.title,
+            "artist": self.artist,
+            "source_name": self.source_name,
+            "download_url": self.download_url,
+            "info_hash": self.info_hash,
+            "size_bytes": self.size_bytes,
+            "year": self.year,
+            "edition_info": self.edition_info,
+            "label": self.label,
+            "catalogue_number": self.catalogue_number,
+            "release_type": self.release_type,
+            "seeders": self.seeders,
+            "channel": self.channel,
+            "view_count": self.view_count,
+            "duration_seconds": self.duration_seconds,
+            "target_file": self.target_file,
+            "target_file_size": self.target_file_size,
+            "track_pattern": self.track_pattern,
+            "match_score": self.match_score,
+            # Quality as nested dict
+            "quality": {
+                "format": self.quality.format.name,
+                "bit_depth": self.quality.bit_depth,
+                "sample_rate": self.quality.sample_rate,
+                "bitrate": self.quality.bitrate,
+                "media": self.quality.media.name,
+            },
+            # Computed properties for convenience
+            "formatted_size": self.formatted_size,
+            "formatted_duration": self.formatted_duration,
+            "formatted_views": self.formatted_views,
+            "is_lossless": self.quality.is_lossless(),
+            "quality_str": str(self.quality),
+        }
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> "Release":
+        """
+        Reconstruct a Release from a dictionary.
+        
+        This enables remote CLIs to reconstruct Release objects from API data
+        for display with full formatting.
+        """
+        # Parse quality
+        quality_data = data.get("quality", {})
+        if isinstance(quality_data, dict):
+            quality = Quality(
+                format=AudioFormat[quality_data.get("format", "OTHER")],
+                bit_depth=quality_data.get("bit_depth"),
+                sample_rate=quality_data.get("sample_rate"),
+                bitrate=quality_data.get("bitrate"),
+                media=MediaSource[quality_data.get("media", "OTHER")],
+            )
+        else:
+            # Fallback for legacy data
+            quality = Quality(format=AudioFormat.OTHER)
+        
+        return cls(
+            title=data.get("title", ""),
+            artist=data.get("artist", ""),
+            quality=quality,
+            source_name=data.get("source_name", "Unknown"),
+            download_url=data.get("download_url"),
+            info_hash=data.get("info_hash"),
+            size_bytes=data.get("size_bytes"),
+            year=data.get("year"),
+            edition_info=data.get("edition_info"),
+            label=data.get("label"),
+            catalogue_number=data.get("catalogue_number"),
+            release_type=data.get("release_type"),
+            seeders=data.get("seeders"),
+            channel=data.get("channel"),
+            view_count=data.get("view_count"),
+            duration_seconds=data.get("duration_seconds"),
+            target_file=data.get("target_file"),
+            target_file_size=data.get("target_file_size"),
+            track_pattern=data.get("track_pattern"),
+            match_score=data.get("match_score", 0.0),
+        )
+
     @property
     def formatted_size(self) -> str:
         size = self.target_file_size if self.target_file_size is not None else self.size_bytes
