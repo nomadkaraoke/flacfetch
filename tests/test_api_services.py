@@ -208,10 +208,13 @@ class TestDownloadManager:
 
     def test_get_search_expired(self):
         """Test that expired searches return None."""
+        import time
+
         dm = DownloadManager()
-        dm._search_ttl_seconds = 0  # Expire immediately
+        dm._search_ttl_seconds = 0.01  # Expire after 10ms
 
         dm.cache_search("search_123", "ABBA", "Waterloo", [])
+        time.sleep(0.02)  # Wait for expiration
 
         # Should return None because TTL expired
         cache = dm.get_search("search_123")
