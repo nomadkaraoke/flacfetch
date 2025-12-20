@@ -1,0 +1,360 @@
+"""
+Download manager for flacfetch HTTP API.
+
+Manages active downloads, tracks their status, and handles GCS uploads.
+"""
+import asyncio
+import logging
+import os
+import tempfile
+import threading
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from ..models import DownloadStatus
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class DownloadTask:
+    """Represents an active or completed download task."""
+    download_id: str
+    search_id: str
+    result_index: int
+    status: DownloadStatus = DownloadStatus.QUEUED
+    progress: float = 0.0
+    peers: int = 0
+    download_speed_kbps: float = 0.0
+    upload_speed_kbps: float = 0.0
+    eta_seconds: Optional[int] = None
+    provider: Optional[str] = None
+    title: Optional[str] = None
+    artist: Optional[str] = None
+    output_filename: Optional[str] = None
+    output_path: Optional[str] = None
+    gcs_path: Optional[str] = None
+    upload_to_gcs: bool = False
+    gcs_destination: Optional[str] = None
+    error: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    torrent_id: Optional[int] = None  # Transmission torrent ID
+
+
+@dataclass
+class SearchCache:
+    """Cached search results for download reference."""
+    search_id: str
+    artist: str
+    title: str
+    results: List[Any]  # List of Release objects
+    created_at: datetime = field(default_factory=datetime.utcnow)
+
+
+class DownloadManager:
+    """
+    Manages download tasks and search result caching.
+    
+    Thread-safe for use with async background tasks.
+    """
+    
+    def __init__(
+        self,
+        keep_seeding: bool = True,
+        download_dir: Optional[str] = None,
+        gcs_bucket: Optional[str] = None,
+    ):
+        """
+        Initialize download manager.
+        
+        Args:
+            keep_seeding: Keep torrents seeding after download completes
+            download_dir: Directory for downloads
+            gcs_bucket: GCS bucket for uploads
+        """
+        self.keep_seeding = keep_seeding
+        self.download_dir = download_dir or os.environ.get(
+            "FLACFETCH_DOWNLOAD_DIR",
+            tempfile.gettempdir()
+        )
+        self.gcs_bucket = gcs_bucket or os.environ.get("GCS_BUCKET")
+        
+        # Thread-safe storage
+        self._lock = threading.Lock()
+        self._downloads: Dict[str, DownloadTask] = {}
+        self._searches: Dict[str, SearchCache] = {}
+        
+        # FetchManager instance (lazily initialized)
+        self._fetch_manager = None
+        
+        # Search cache TTL (1 hour)
+        self._search_ttl_seconds = 3600
+    
+    def _get_fetch_manager(self):
+        """Lazily initialize and return the FetchManager."""
+        if self._fetch_manager is None:
+            from flacfetch.core.manager import FetchManager
+            from flacfetch.providers.youtube import YoutubeProvider
+            from flacfetch.downloaders.youtube import YoutubeDownloader
+            
+            self._fetch_manager = FetchManager()
+            
+            # Add YouTube provider (always available)
+            self._fetch_manager.add_provider(YoutubeProvider())
+            self._fetch_manager.register_downloader("YouTube", YoutubeDownloader())
+            
+            # Add Redacted provider if configured
+            redacted_key = os.environ.get("REDACTED_API_KEY")
+            if redacted_key:
+                try:
+                    from flacfetch.providers.redacted import RedactedProvider
+                    from flacfetch.downloaders.torrent import TorrentDownloader
+                    
+                    self._fetch_manager.add_provider(RedactedProvider(api_key=redacted_key))
+                    self._fetch_manager.register_downloader(
+                        "Redacted",
+                        TorrentDownloader(keep_seeding=self.keep_seeding)
+                    )
+                    logger.info("Redacted provider initialized")
+                except ImportError as e:
+                    logger.warning(f"Could not initialize Redacted provider: {e}")
+            
+            # Add OPS provider if configured
+            ops_key = os.environ.get("OPS_API_KEY")
+            if ops_key:
+                try:
+                    from flacfetch.providers.ops import OPSProvider
+                    from flacfetch.downloaders.torrent import TorrentDownloader
+                    
+                    self._fetch_manager.add_provider(OPSProvider(api_key=ops_key))
+                    self._fetch_manager.register_downloader(
+                        "OPS",
+                        TorrentDownloader(keep_seeding=self.keep_seeding)
+                    )
+                    logger.info("OPS provider initialized")
+                except ImportError as e:
+                    logger.warning(f"Could not initialize OPS provider: {e}")
+            
+            # Set default provider priority
+            available = [p.name for p in self._fetch_manager.providers]
+            priority = [n for n in ["Redacted", "OPS", "YouTube"] if n in available]
+            if priority:
+                self._fetch_manager.set_provider_priority(priority)
+        
+        return self._fetch_manager
+    
+    def cache_search(
+        self,
+        search_id: str,
+        artist: str,
+        title: str,
+        results: List[Any],
+    ) -> None:
+        """Cache search results for later download."""
+        with self._lock:
+            self._searches[search_id] = SearchCache(
+                search_id=search_id,
+                artist=artist,
+                title=title,
+                results=results,
+            )
+    
+    def get_search(self, search_id: str) -> Optional[SearchCache]:
+        """Get cached search results."""
+        with self._lock:
+            cache = self._searches.get(search_id)
+            if cache:
+                # Check TTL
+                age = (datetime.utcnow() - cache.created_at).total_seconds()
+                if age > self._search_ttl_seconds:
+                    del self._searches[search_id]
+                    return None
+            return cache
+    
+    def create_download(
+        self,
+        search_id: str,
+        result_index: int,
+        output_filename: Optional[str] = None,
+        upload_to_gcs: bool = False,
+        gcs_destination: Optional[str] = None,
+    ) -> DownloadTask:
+        """
+        Create a new download task.
+        
+        Returns the task (queued, not started yet).
+        """
+        download_id = f"dl_{uuid.uuid4().hex[:12]}"
+        
+        # Get search cache for metadata
+        search = self.get_search(search_id)
+        provider = None
+        title = None
+        artist = None
+        if search and 0 <= result_index < len(search.results):
+            release = search.results[result_index]
+            provider = getattr(release, 'source_name', None)
+            title = getattr(release, 'title', None)
+            artist = search.artist
+        
+        task = DownloadTask(
+            download_id=download_id,
+            search_id=search_id,
+            result_index=result_index,
+            output_filename=output_filename,
+            upload_to_gcs=upload_to_gcs,
+            gcs_destination=gcs_destination,
+            provider=provider,
+            title=title,
+            artist=artist,
+            started_at=datetime.utcnow(),
+        )
+        
+        with self._lock:
+            self._downloads[download_id] = task
+        
+        return task
+    
+    def get_download(self, download_id: str) -> Optional[DownloadTask]:
+        """Get a download task by ID."""
+        with self._lock:
+            return self._downloads.get(download_id)
+    
+    def update_download(self, download_id: str, **updates) -> None:
+        """Update a download task."""
+        with self._lock:
+            if download_id in self._downloads:
+                task = self._downloads[download_id]
+                for key, value in updates.items():
+                    if hasattr(task, key):
+                        setattr(task, key, value)
+    
+    def list_downloads(self) -> List[DownloadTask]:
+        """List all download tasks."""
+        with self._lock:
+            return list(self._downloads.values())
+    
+    async def execute_download(self, download_id: str) -> None:
+        """
+        Execute a download task (runs in background).
+        
+        This is the main download logic that:
+        1. Gets the release from cache
+        2. Downloads via FetchManager
+        3. Optionally uploads to GCS
+        4. Updates task status throughout
+        """
+        task = self.get_download(download_id)
+        if not task:
+            logger.error(f"Download task not found: {download_id}")
+            return
+        
+        try:
+            self.update_download(download_id, status=DownloadStatus.DOWNLOADING)
+            
+            # Get search cache
+            search = self.get_search(task.search_id)
+            if not search:
+                raise ValueError(f"Search not found or expired: {task.search_id}")
+            
+            if task.result_index < 0 or task.result_index >= len(search.results):
+                raise ValueError(f"Invalid result index: {task.result_index}")
+            
+            release = search.results[task.result_index]
+            logger.info(f"Starting download: {release.artist} - {release.title} from {release.source_name}")
+            
+            # Determine output filename
+            output_filename = task.output_filename
+            if not output_filename:
+                output_filename = f"{search.artist} - {search.title}"
+            
+            # Execute download
+            manager = self._get_fetch_manager()
+            output_path = manager.download(
+                release,
+                self.download_dir,
+                output_filename=output_filename,
+            )
+            
+            self.update_download(
+                download_id,
+                output_path=output_path,
+                progress=100.0,
+            )
+            
+            logger.info(f"Download complete: {output_path}")
+            
+            # Upload to GCS if requested
+            if task.upload_to_gcs and task.gcs_destination:
+                self.update_download(download_id, status=DownloadStatus.UPLOADING)
+                gcs_path = await self._upload_to_gcs(output_path, task.gcs_destination)
+                self.update_download(download_id, gcs_path=gcs_path)
+                logger.info(f"Uploaded to GCS: {gcs_path}")
+            
+            # Final status depends on whether it's a torrent (seeding) or not
+            if release.source_name in ["Redacted", "OPS"] and self.keep_seeding:
+                self.update_download(download_id, status=DownloadStatus.SEEDING)
+            else:
+                self.update_download(download_id, status=DownloadStatus.COMPLETE)
+            
+            self.update_download(download_id, completed_at=datetime.utcnow())
+            
+        except Exception as e:
+            logger.error(f"Download failed: {e}", exc_info=True)
+            self.update_download(
+                download_id,
+                status=DownloadStatus.FAILED,
+                error=str(e),
+            )
+    
+    async def _upload_to_gcs(self, local_path: str, gcs_destination: str) -> str:
+        """
+        Upload a file to GCS.
+        
+        Args:
+            local_path: Local file path
+            gcs_destination: GCS path prefix (e.g., "uploads/job123/audio/")
+            
+        Returns:
+            Full GCS path (gs://bucket/path)
+        """
+        if not self.gcs_bucket:
+            raise ValueError("GCS_BUCKET not configured")
+        
+        from google.cloud import storage
+        
+        client = storage.Client()
+        bucket = client.bucket(self.gcs_bucket)
+        
+        # Build GCS path
+        filename = os.path.basename(local_path)
+        gcs_path = gcs_destination.rstrip('/') + '/' + filename
+        
+        blob = bucket.blob(gcs_path)
+        
+        # Upload in executor to not block
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            blob.upload_from_filename,
+            local_path,
+        )
+        
+        return f"gs://{self.gcs_bucket}/{gcs_path}"
+
+
+# Singleton instance
+_download_manager: Optional[DownloadManager] = None
+
+
+def get_download_manager() -> DownloadManager:
+    """Get the singleton DownloadManager instance."""
+    global _download_manager
+    if _download_manager is None:
+        keep_seeding = os.environ.get("FLACFETCH_KEEP_SEEDING", "true").lower() == "true"
+        _download_manager = DownloadManager(keep_seeding=keep_seeding)
+    return _download_manager
+

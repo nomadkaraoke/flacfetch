@@ -29,7 +29,8 @@ class TorrentDownloader(Downloader):
                  host: str = 'localhost',
                  port: int = 9091,
                  username: Optional[str] = None,
-                 password: Optional[str] = None):
+                 password: Optional[str] = None,
+                 keep_seeding: bool = False):
         """
         Initialize Transmission RPC client.
 
@@ -38,17 +39,27 @@ class TorrentDownloader(Downloader):
             port: Transmission RPC port (default: 9091)
             username: Optional RPC username
             password: Optional RPC password
+            keep_seeding: If True, keep torrents seeding after download completes.
+                          Used in server mode for indefinite seeding.
         """
         if transmission_rpc is None:
             raise ImportError(
                 "transmission-rpc not installed. Install with: pip install transmission-rpc"
             )
 
-        self.host = host
-        self.port = port
+        # Use environment variables if not specified
+        self.host = host or os.environ.get("TRANSMISSION_HOST", "localhost")
+        self.port = port or int(os.environ.get("TRANSMISSION_PORT", "9091"))
         self.username = username
         self.password = password
+        self.keep_seeding = keep_seeding
         self.client = None
+        
+        # Download directory for keep_seeding mode
+        self._download_dir = os.environ.get(
+            "FLACFETCH_DOWNLOAD_DIR",
+            "/var/lib/transmission-daemon/downloads"
+        )
 
     def _ensure_daemon_running(self) -> bool:
         """Check if transmission-daemon is running, attempt to start if not."""
@@ -113,13 +124,22 @@ class TorrentDownloader(Downloader):
         if not self._ensure_daemon_running():
             raise RuntimeError("Cannot connect to Transmission daemon")
 
-        # Use a temp directory for the actual download
-        temp_dir = tempfile.mkdtemp(prefix="flacfetch_torrent_")
-        logger.debug(f"Using temporary download directory: {temp_dir}")
+        # Determine download directory
+        # In keep_seeding mode, use persistent download dir
+        # Otherwise use temp dir (will be cleaned up)
+        if self.keep_seeding:
+            download_dir = self._download_dir
+            use_temp = False
+            logger.debug(f"Using persistent download directory: {download_dir}")
+        else:
+            download_dir = tempfile.mkdtemp(prefix="flacfetch_torrent_")
+            use_temp = True
+            logger.debug(f"Using temporary download directory: {download_dir}")
 
         # Prepare final output path
         abs_output_path = os.path.abspath(output_path)
         os.makedirs(abs_output_path, exist_ok=True)
+        os.makedirs(download_dir, exist_ok=True)
 
         # Check if it's a local torrent file
         if not os.path.exists(release.download_url):
@@ -135,13 +155,14 @@ class TorrentDownloader(Downloader):
 
         target_file_path = None
         downloaded_file_path = None
+        torrent = None
 
         try:
             # Add torrent to Transmission in PAUSED state first
             # This prevents it from starting download before we set file priorities
             torrent = self.client.add_torrent(
                 release.download_url,
-                download_dir=temp_dir,  # Download to temp directory
+                download_dir=download_dir,
                 paused=True  # Critical: add in paused state
             )
 
@@ -223,46 +244,45 @@ class TorrentDownloader(Downloader):
                     print("\n✓ Download complete")
                     logger.info(f"Torrent finished: {torrent.name}")
 
-                    # Stop the torrent (stop seeding)
-                    self.client.stop_torrent(torrent.id)
-                    logger.info(f"Stopped seeding torrent {torrent.id}")
-
-                    # Find and move the downloaded file
+                    # Get the files info
                     torrent = self.client.get_torrent(torrent.id)
                     files = torrent.get_files()
 
-                    # If we have a target file, find it and move it
+                    # Find the downloaded file
+                    source_path = None
                     if release.target_file and files:
                         for file_obj in files:
                             if file_obj.selected and release.target_file in file_obj.name:
-                                # Construct the full path to the downloaded file
-                                source_path = Path(temp_dir) / file_obj.name
-                                logger.debug(f"Looking for downloaded file at: {source_path}")
+                                source_path = Path(download_dir) / file_obj.name
+                                break
+                    
+                    if source_path and source_path.exists():
+                        # Determine output filename
+                        if output_filename:
+                            original_ext = source_path.suffix
+                            if not output_filename.endswith(original_ext):
+                                final_filename = output_filename + original_ext
+                            else:
+                                final_filename = output_filename
+                        else:
+                            final_filename = source_path.name
 
-                                if source_path.exists():
-                                    # Determine output filename
-                                    if output_filename:
-                                        # Keep the extension from the original file
-                                        original_ext = source_path.suffix
-                                        if not output_filename.endswith(original_ext):
-                                            final_filename = output_filename + original_ext
-                                        else:
-                                            final_filename = output_filename
-                                    else:
-                                        # Use the original filename (just the basename)
-                                        final_filename = source_path.name
-
-                                    target_file_path = Path(abs_output_path) / final_filename
-                                    logger.info(f"Moving file to: {target_file_path}")
-
-                                    # Move the file
-                                    shutil.move(str(source_path), str(target_file_path))
-                                    downloaded_file_path = str(target_file_path)
-                                    logger.info("File moved successfully")
-                                    break
-
-                        if not downloaded_file_path:
-                            logger.warning("Could not find downloaded file to move")
+                        target_file_path = Path(abs_output_path) / final_filename
+                        
+                        if self.keep_seeding:
+                            # Copy file instead of move (keep original for seeding)
+                            logger.info(f"Copying file to: {target_file_path}")
+                            shutil.copy2(str(source_path), str(target_file_path))
+                            downloaded_file_path = str(target_file_path)
+                            logger.info(f"File copied successfully. Torrent continues seeding.")
+                        else:
+                            # Move file (original behavior)
+                            logger.info(f"Moving file to: {target_file_path}")
+                            shutil.move(str(source_path), str(target_file_path))
+                            downloaded_file_path = str(target_file_path)
+                            logger.info("File moved successfully")
+                    else:
+                        logger.warning("Could not find downloaded file")
 
                     break
 
@@ -312,19 +332,25 @@ class TorrentDownloader(Downloader):
             logger.error(f"Download failed: {e}")
             raise
         finally:
-            # Clean up: remove torrent from Transmission and delete temp directory
-            try:
-                if 'torrent' in locals():
-                    logger.debug(f"Removing torrent {torrent.id} from Transmission")
-                    self.client.remove_torrent(torrent.id, delete_data=True)
-            except Exception as e:
-                logger.warning(f"Failed to remove torrent: {e}")
+            # Clean up based on mode
+            if self.keep_seeding:
+                # In keep_seeding mode, don't remove torrent - let it seed
+                if torrent:
+                    logger.info(f"Torrent {torrent.id} ({torrent.name}) will continue seeding")
+            else:
+                # Original behavior: remove torrent and clean up temp directory
+                try:
+                    if torrent:
+                        logger.debug(f"Removing torrent {torrent.id} from Transmission")
+                        self.client.remove_torrent(torrent.id, delete_data=True)
+                except Exception as e:
+                    logger.warning(f"Failed to remove torrent: {e}")
 
-            try:
-                if os.path.exists(temp_dir):
-                    logger.debug(f"Cleaning up temporary directory: {temp_dir}")
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-            except Exception as e:
-                logger.warning(f"Failed to clean up temp directory: {e}")
+                try:
+                    if use_temp and os.path.exists(download_dir):
+                        logger.debug(f"Cleaning up temporary directory: {download_dir}")
+                        shutil.rmtree(download_dir, ignore_errors=True)
+                except Exception as e:
+                    logger.warning(f"Failed to clean up temp directory: {e}")
 
         return downloaded_file_path or ""

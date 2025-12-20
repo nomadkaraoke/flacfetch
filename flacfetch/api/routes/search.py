@@ -1,0 +1,101 @@
+"""
+Search endpoint for flacfetch HTTP API.
+"""
+import logging
+import uuid
+from typing import List
+
+from fastapi import APIRouter, Depends, HTTPException
+
+from ..auth import verify_api_key
+from ..models import SearchRequest, SearchResponse, SearchResultItem
+from ..services import get_download_manager
+
+logger = logging.getLogger(__name__)
+router = APIRouter(tags=["search"])
+
+
+@router.post("/search", response_model=SearchResponse)
+async def search_audio(
+    request: SearchRequest,
+    api_key: str = Depends(verify_api_key),
+) -> SearchResponse:
+    """
+    Search for audio matching artist and title.
+    
+    Returns a list of results from all configured providers (Redacted, OPS, YouTube).
+    Results are sorted by quality with lossless sources prioritized.
+    
+    The search_id in the response can be used with POST /download to download a result.
+    """
+    manager = get_download_manager()
+    fetch_manager = manager._get_fetch_manager()
+    
+    logger.info(f"Searching for: {request.artist} - {request.title}")
+    
+    try:
+        from flacfetch.core.models import TrackQuery
+        query = TrackQuery(artist=request.artist, title=request.title)
+        releases = fetch_manager.search(query)
+    except Exception as e:
+        logger.error(f"Search failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Search failed: {e}")
+    
+    if not releases:
+        raise HTTPException(status_code=404, detail=f"No results found for: {request.artist} - {request.title}")
+    
+    logger.info(f"Found {len(releases)} results")
+    
+    # Generate search ID and cache results
+    search_id = f"search_{uuid.uuid4().hex[:12]}"
+    manager.cache_search(search_id, request.artist, request.title, releases)
+    
+    # Convert to response format
+    results: List[SearchResultItem] = []
+    for idx, release in enumerate(releases):
+        # Get quality info
+        quality_str = str(release.quality) if release.quality else ""
+        quality_data = None
+        is_lossless = False
+        if release.quality:
+            quality_data = {
+                "format": release.quality.format.name,
+                "bit_depth": release.quality.bit_depth,
+                "sample_rate": release.quality.sample_rate,
+                "bitrate": release.quality.bitrate,
+                "media": release.quality.media.name,
+            }
+            is_lossless = release.quality.is_lossless()
+        
+        results.append(SearchResultItem(
+            index=idx,
+            title=release.title,
+            artist=release.artist,
+            provider=release.source_name,
+            quality=quality_str,
+            quality_data=quality_data,
+            seeders=release.seeders,
+            size_bytes=release.size_bytes,
+            target_file=release.target_file,
+            target_file_size=release.target_file_size,
+            year=release.year,
+            label=release.label,
+            edition_info=release.edition_info,
+            release_type=release.release_type,
+            channel=release.channel,
+            view_count=release.view_count,
+            duration_seconds=release.duration_seconds,
+            match_score=release.match_score,
+            formatted_size=release.formatted_size,
+            formatted_duration=release.formatted_duration,
+            is_lossless=is_lossless,
+        ))
+    
+    return SearchResponse(
+        search_id=search_id,
+        artist=request.artist,
+        title=request.title,
+        results=results,
+        results_count=len(results),
+    )
+
