@@ -33,7 +33,8 @@ class TestDiskManager:
         assert total > 0
         assert used >= 0
         assert free >= 0
-        assert total == used + free
+        # On Linux, total >= used + free due to reserved blocks for root
+        assert total >= used + free
 
     def test_get_disk_usage_invalid_path(self):
         """Test disk usage with invalid path returns zeros."""
