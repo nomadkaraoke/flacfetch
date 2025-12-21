@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flacfetch"
-version = "0.4.0"
+version = "0.5.0"
 description = "Search and download high-quality audio from multiple sources"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,13 +33,25 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+api = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.0.0",
+    "httpx>=0.25.0",
+    "google-cloud-storage>=2.13.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-mock>=3.10.0",
     "pytest-cov>=4.0.0",
+    "pytest-asyncio>=0.23.0",
     "ruff>=0.1.0",
     "mypy>=1.0.0",
     "types-requests>=2.28.0",
+]
+all = [
+    "flacfetch[api]",
+    "flacfetch[dev]",
 ]
 
 [project.urls]
@@ -51,11 +63,13 @@ Issues = "https://github.com/nomadkaraoke/flacfetch/issues"
 flacfetch = "flacfetch.interface.cli:main"
 
 [tool.setuptools]
-packages = ["flacfetch", "flacfetch.core", "flacfetch.providers", "flacfetch.downloaders", "flacfetch.interface"]
+packages = ["flacfetch", "flacfetch.core", "flacfetch.providers", "flacfetch.downloaders", "flacfetch.interface", "flacfetch.api", "flacfetch.api.routes", "flacfetch.api.services"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 addopts = [
     "--verbose",
     "--cov=flacfetch",

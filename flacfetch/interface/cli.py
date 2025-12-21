@@ -18,6 +18,24 @@ try:
 except ImportError:
     TorrentDownloader = None
 
+
+def serve_command(args):
+    """Run the flacfetch HTTP API server."""
+    try:
+        from ..api import run_server
+    except ImportError as e:
+        print("Error: API dependencies not installed. Install with: pip install flacfetch[api]")
+        print(f"Details: {e}")
+        sys.exit(1)
+
+    setup_logging(args.verbose)
+
+    run_server(
+        host=args.host,
+        port=args.port,
+        log_level="debug" if args.verbose else "info",
+    )
+
 # ANSI Color Codes
 class Colors:
     RESET = "\033[0m"
@@ -268,6 +286,33 @@ def main():
         def __init__(self, prog, max_help_position=35, width=100):
             super().__init__(prog, max_help_position=max_help_position, width=width)
 
+    # Check for 'serve' subcommand first (special handling)
+    if len(sys.argv) > 1 and sys.argv[1] == "serve":
+        serve_parser = argparse.ArgumentParser(
+            prog="flacfetch serve",
+            description="Run the flacfetch HTTP API server",
+            formatter_class=WideHelpFormatter,
+        )
+        serve_parser.add_argument(
+            "--host",
+            default=os.environ.get("FLACFETCH_API_HOST", "0.0.0.0"),
+            help="Host to bind to (default: 0.0.0.0)"
+        )
+        serve_parser.add_argument(
+            "--port", "-p",
+            type=int,
+            default=int(os.environ.get("FLACFETCH_API_PORT", "8080")),
+            help="Port to listen on (default: 8080)"
+        )
+        serve_parser.add_argument(
+            "-v", "--verbose",
+            action="store_true",
+            help="Enable verbose/debug logging"
+        )
+        serve_args = serve_parser.parse_args(sys.argv[2:])
+        serve_command(serve_args)
+        return
+
     parser = argparse.ArgumentParser(
         prog="flacfetch",
         description="""
@@ -294,10 +339,15 @@ Examples:
   flacfetch -t "Title"
       Search YouTube only (no artist required)
 
+  flacfetch serve --port 8080
+      Run as HTTP API server
+
 Environment Variables:
   REDACTED_API_KEY             API key for Redacted (lossless FLAC source)
   OPS_API_KEY                  API key for OPS (lossless FLAC source)
   FLACFETCH_PROVIDER_PRIORITY  Provider priority (e.g. 'Redacted,OPS,YouTube')
+  FLACFETCH_API_KEY            API key for HTTP API authentication (serve mode)
+  FLACFETCH_API_PORT           HTTP API port (serve mode, default: 8080)
         """.strip(),
         formatter_class=WideHelpFormatter
     )
