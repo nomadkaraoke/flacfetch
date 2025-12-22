@@ -223,6 +223,8 @@ class FetchManager:
                 fd, path = tempfile.mkstemp(suffix=".torrent")
                 with os.fdopen(fd, 'wb') as tmp:
                     tmp.write(artifact)
+                # Make file readable by other users (Transmission daemon runs as different user)
+                os.chmod(path, 0o644)
 
                 logger.debug(f"Saved temporary torrent file to {path}")
                 release.download_url = path
