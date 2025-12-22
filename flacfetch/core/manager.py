@@ -122,7 +122,8 @@ class FetchManager:
         def is_lossless(r: Release) -> int:
             """Lossless formats should always come first."""
             if r.quality and r.quality.format:
-                fmt = r.quality.format.upper()
+                # r.quality.format is an AudioFormat enum, use .name to get string
+                fmt = r.quality.format.name
                 if fmt in ("FLAC", "WAV", "ALAC", "APE"):
                     return 1
             return 0
@@ -228,15 +229,23 @@ class FetchManager:
                 return 0
             score = 0
 
-            # Channel matching
-            if r.channel and searched_artist:
-                channel_lower = r.channel.lower()
-                if searched_artist in channel_lower:
-                    score += 50
+            if r.channel:
+                # Use searched_artist if available, otherwise fall back to release's artist
+                artist_to_match = searched_artist or (r.artist.lower() if r.artist else None)
+
+                # Channel matching
+                if artist_to_match:
+                    channel_lower = r.channel.lower()
+                    if channel_lower == artist_to_match:
+                        score += 100  # Exact match (likely official channel)
+                    elif artist_to_match in channel_lower:
+                        score += 30  # Partial match
+
+                # Official channel indicators (independent of artist match)
                 if " - Topic" in r.channel:
-                    score += 30  # Auto-generated official
+                    score += 40  # Auto-generated official
                 if "VEVO" in r.channel.upper():
-                    score += 25
+                    score += 35
 
             # Title keywords
             if r.title:
@@ -273,6 +282,7 @@ class FetchManager:
             quality_detail_score(r),  # 5. 24bit > 16bit, CD/WEB > VINYL
             youtube_score(r),         # 6. Official YouTube channels
             year_score(r),            # 7. Original releases preferred
+            r.match_score or 0,       # 8. Provider-calculated match score (tie-breaker)
         ), reverse=True)
 
     def select_best(self, releases: list[Release]) -> Optional[Release]:
