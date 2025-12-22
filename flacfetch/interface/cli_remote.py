@@ -154,7 +154,7 @@ class RemoteClient:
 
         Args:
             download_id: Download ID
-            output_path: Local path to save the file
+            output_path: Local path (file or directory) to save the file
             progress_callback: Optional callback(downloaded_bytes, total_bytes) for progress
 
         Returns:
@@ -172,27 +172,44 @@ class RemoteClient:
             # Get total size from Content-Length header
             total_size = int(response.headers.get("content-length", 0))
 
-            # Get filename from Content-Disposition if available
+            # Get filename from Content-Disposition header
+            # Formats:
+            #   attachment; filename="Avril Lavigne - Unwanted.flac"
+            #   attachment; filename*=utf-8''Avril%20Lavigne%20-%20Unwanted.flac
+            filename = None
             content_disp = response.headers.get("content-disposition", "")
-            if "filename=" in content_disp:
-                # Extract filename from header
-                filename = content_disp.split("filename=")[-1].strip('"')
-                # If output_path is a directory, append filename
-                if os.path.isdir(output_path):
-                    output_path = os.path.join(output_path, filename)
-                elif output_path.endswith("/"):
-                    os.makedirs(output_path, exist_ok=True)
-                    output_path = os.path.join(output_path, filename)
+            if "filename" in content_disp:
+                import re
+                from urllib.parse import unquote
+
+                # Try RFC 5987 format first: filename*=utf-8''encoded%20name
+                match = re.search(r"filename\*=(?:utf-8''|UTF-8'')([^;\s]+)", content_disp)
+                if match:
+                    filename = unquote(match.group(1))
+                else:
+                    # Standard format: filename="name" or filename=name
+                    match = re.search(r'filename="?([^";\n]+)"?', content_disp)
+                    if match:
+                        filename = match.group(1).strip()
+
+            # Determine final output path
+            final_path = output_path
+            if os.path.isdir(output_path) or output_path.endswith("/"):
+                # output_path is a directory - need filename
+                if not filename:
+                    filename = f"download_{download_id}.flac"
+                os.makedirs(output_path, exist_ok=True)
+                final_path = os.path.join(output_path.rstrip("/"), filename)
 
             downloaded = 0
-            with open(output_path, "wb") as f:
+            with open(final_path, "wb") as f:
                 for chunk in response.iter_bytes(chunk_size=8192):
                     f.write(chunk)
                     downloaded += len(chunk)
                     if progress_callback and total_size > 0:
                         progress_callback(downloaded, total_size)
 
-        return output_path
+        return final_path
 
 
 def convert_api_result_to_display(result: Dict[str, Any]) -> Dict[str, Any]:
