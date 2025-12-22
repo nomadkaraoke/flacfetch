@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flacfetch"
-version = "0.5.2"
+version = "0.6.0"
 description = "Search and download high-quality audio from multiple sources"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,6 +33,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+remote = [
+    "httpx>=0.25.0",
+]
 api = [
     "fastapi>=0.104.0",
     "uvicorn[standard]>=0.24.0",
@@ -51,6 +54,7 @@ dev = [
 ]
 all = [
     "flacfetch[api]",
+    "flacfetch[remote]",
     "flacfetch[dev]",
 ]
 
@@ -61,6 +65,7 @@ Issues = "https://github.com/nomadkaraoke/flacfetch/issues"
 
 [project.scripts]
 flacfetch = "flacfetch.interface.cli:main"
+flacfetch-remote = "flacfetch.interface.cli_remote:main"
 
 [tool.setuptools]
 packages = ["flacfetch", "flacfetch.core", "flacfetch.providers", "flacfetch.downloaders", "flacfetch.interface", "flacfetch.api", "flacfetch.api.routes", "flacfetch.api.services"]

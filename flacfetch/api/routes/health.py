@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["health"])
 
 # Version - should match pyproject.toml
-VERSION = "0.5.2"
+VERSION = "0.6.0"
 
 
 @router.get("/health", response_model=HealthResponse)
