@@ -245,7 +245,7 @@ Environment Variables (required):
   FLACFETCH_API_KEY      API key for authentication
 
 Optional:
-  FLACFETCH_TIMEOUT      API timeout in seconds (default: 30)
+  FLACFETCH_TIMEOUT      API timeout in seconds (default: 120)
         """.strip(),
         formatter_class=WideHelpFormatter
     )
@@ -310,9 +310,9 @@ Optional:
     conn_group.add_argument(
         "--timeout",
         type=int,
-        default=int(os.environ.get("FLACFETCH_TIMEOUT", "30")),
+        default=int(os.environ.get("FLACFETCH_TIMEOUT", "120")),
         metavar="SECS",
-        help="API timeout in seconds (default: 30)"
+        help="API timeout in seconds (default: 120)"
     )
 
     # General options
