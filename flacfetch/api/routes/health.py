@@ -3,6 +3,7 @@ Health check endpoints for flacfetch HTTP API.
 """
 import logging
 import os
+from importlib.metadata import PackageNotFoundError, version
 
 from fastapi import APIRouter
 
@@ -17,8 +18,13 @@ from ..services import get_disk_manager
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["health"])
 
-# Version - should match pyproject.toml
-VERSION = "0.6.0"
+
+def get_version() -> str:
+    """Get package version from installed metadata."""
+    try:
+        return version("flacfetch")
+    except PackageNotFoundError:
+        return "0.0.0-dev"
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -55,7 +61,7 @@ async def health_check() -> HealthResponse:
 
     return HealthResponse(
         status=status,
-        version=VERSION,
+        version=get_version(),
         transmission=transmission,
         disk=disk,
         providers=providers,

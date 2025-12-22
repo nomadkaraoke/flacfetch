@@ -236,17 +236,31 @@ jobs:
           echo "✅ Deployment complete!"
 
       - name: Verify deployment
+        env:
+          EXPECTED_VERSION: ${{ needs.check-version-change.outputs.new_version }}
         run: |
           echo "🔍 Verifying deployment..."
           sleep 5
           
-          # Check health endpoint
-          HEALTH=$(curl -s -o /dev/null -w "%{http_code}" http://104.198.214.26:8080/health || echo "failed")
+          # Check health endpoint and version
+          RESPONSE=$(curl -s http://104.198.214.26:8080/health || echo '{"error": "failed"}')
+          DEPLOYED_VERSION=$(echo "$RESPONSE" | jq -r '.version // "unknown"')
           
-          if [ "$HEALTH" = "200" ]; then
-            echo "✅ Health check passed!"
+          echo "Expected version: $EXPECTED_VERSION"
+          echo "Deployed version: $DEPLOYED_VERSION"
+          
+          if [ "$DEPLOYED_VERSION" = "$EXPECTED_VERSION" ]; then
+            echo "✅ Version verified: $DEPLOYED_VERSION"
           else
-            echo "⚠️ Health check returned: $HEALTH"
-            echo "Service may still be starting up..."
+            echo "⚠️ Version mismatch! Expected $EXPECTED_VERSION but got $DEPLOYED_VERSION"
+            echo "This may be due to caching. The service is running but may need a manual restart."
+          fi
+          
+          # Check if service is responding
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://104.198.214.26:8080/health)
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Health check passed (HTTP $HTTP_CODE)"
+          else
+            echo "⚠️ Health check returned HTTP $HTTP_CODE"
           fi
 
