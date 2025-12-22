@@ -187,3 +187,66 @@ jobs:
           echo "✅ GitHub Release: https://github.com/${{ github.repository }}/releases/tag/v${{ needs.check-version-change.outputs.new_version }}"
           echo "✅ PyPI: https://pypi.org/project/flacfetch/${{ needs.check-version-change.outputs.new_version }}/"
 
+  deploy-to-gcp:
+    needs: [check-version-change, publish-to-pypi]
+    if: needs.check-version-change.outputs.tag_exists == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write  # Required for Workload Identity Federation
+
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: 'projects/718638054799/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider'
+          service_account: 'github-actions-deployer@nomadkaraoke.iam.gserviceaccount.com'
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy to flacfetch VM
+        run: |
+          echo "🚀 Deploying to flacfetch VM..."
+          
+          # SSH to VM and update
+          gcloud compute ssh flacfetch-service \
+            --zone=us-central1-a \
+            --command="
+              sudo su -c '
+                cd /opt/flacfetch
+                source venv/bin/activate
+                
+                echo \"📥 Pulling latest code...\"
+                git pull
+                
+                echo \"📦 Installing dependencies...\"
+                pip install -e \".[api]\" --quiet
+                
+                echo \"🔄 Restarting service...\"
+                systemctl restart flacfetch
+                
+                sleep 3
+                
+                echo \"✅ Checking service status...\"
+                systemctl is-active flacfetch
+              '
+            "
+          
+          echo "✅ Deployment complete!"
+
+      - name: Verify deployment
+        run: |
+          echo "🔍 Verifying deployment..."
+          sleep 5
+          
+          # Check health endpoint
+          HEALTH=$(curl -s -o /dev/null -w "%{http_code}" http://104.198.214.26:8080/health || echo "failed")
+          
+          if [ "$HEALTH" = "200" ]; then
+            echo "✅ Health check passed!"
+          else
+            echo "⚠️ Health check returned: $HEALTH"
+            echo "Service may still be starting up..."
+          fi
+
