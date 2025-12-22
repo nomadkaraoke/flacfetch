@@ -54,6 +54,71 @@ class SearchCache:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+def _generate_descriptive_filename(search: SearchCache, release: Any) -> str:
+    """
+    Generate a descriptive filename that distinguishes different versions.
+
+    Format: Artist - Title (Type, Year, Media, Quality, Provider).ext
+
+    Examples:
+        Avril Lavigne - Unwanted (Album, 2002, CD, 16bit, Redacted)
+        Avril Lavigne - Unwanted (Album, 2002, WEB, 24bit, OPS)
+        Avril Lavigne - Unwanted (Live album, 2003, CD, 16bit, Redacted)
+    """
+    import re
+
+    parts = []
+
+    # Base: Artist - Title
+    artist = search.artist or "Unknown Artist"
+    title = search.title or "Unknown Title"
+    base = f"{artist} - {title}"
+
+    # Release type (Album, Single, EP, Live album, etc.)
+    release_type = getattr(release, 'release_type', None)
+    if release_type:
+        parts.append(release_type)
+
+    # Year
+    year = getattr(release, 'year', None)
+    if year:
+        parts.append(str(year))
+
+    # Media (CD, WEB, VINYL)
+    quality = getattr(release, 'quality', None)
+    if quality:
+        media = getattr(quality, 'media', None)
+        if media:
+            media_name = media.name if hasattr(media, 'name') else str(media)
+            if media_name != "OTHER":
+                parts.append(media_name)
+
+        # Bit depth (16bit, 24bit)
+        bit_depth = getattr(quality, 'bit_depth', None)
+        if bit_depth:
+            parts.append(f"{bit_depth}bit")
+
+    # Provider (Redacted, OPS, YouTube)
+    source = getattr(release, 'source_name', None)
+    if source:
+        parts.append(source)
+
+    # Build final filename
+    if parts:
+        suffix = f" ({', '.join(parts)})"
+    else:
+        suffix = ""
+
+    filename = f"{base}{suffix}"
+
+    # Sanitize filename (remove/replace invalid characters)
+    # Keep alphanumeric, spaces, hyphens, underscores, parentheses, commas
+    filename = re.sub(r'[<>:"/\\|?*]', '', filename)
+    filename = re.sub(r'\s+', ' ', filename).strip()
+
+    return filename
+
+
 class DownloadManager:
     """
     Manages download tasks and search result caching.
@@ -269,7 +334,7 @@ class DownloadManager:
             # Determine output filename
             output_filename = task.output_filename
             if not output_filename:
-                output_filename = f"{search.artist} - {search.title}"
+                output_filename = _generate_descriptive_filename(search, release)
 
             # Execute download
             manager = self._get_fetch_manager()
