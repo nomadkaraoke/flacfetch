@@ -77,6 +77,10 @@ class FetchManager:
                     logger.info(f"Provider {provider.name} failed and fallback disabled, stopping search")
                     break
 
+        # Sort results by quality and relevance
+        if all_releases:
+            all_releases = self._sort_releases(all_releases, query)
+
         return all_releases
 
     def _get_ordered_providers(self) -> list[Provider]:
@@ -100,92 +104,175 @@ class FetchManager:
 
         return ordered
 
-    def _sort_releases(self, releases: list[Release]) -> list[Release]:
-        # Sorting Logic:
-        # 1. Match Score (Redacted only, mostly)
-        # 2. Channel Match (YouTube artist matching)
-        # 3. Official/Topic (YouTube)
-        # 4. Release Type (Redacted)
-        # 5. Seeders (Redacted) / Views (YouTube)
-        # 6. Quality (Bitrate/Lossless)
-        # 7. Year (Context dependent)
+    def _sort_releases(self, releases: list[Release], query: TrackQuery = None) -> list[Release]:
+        """
+        Sort releases by quality and relevance.
+
+        Priority order:
+        1. Lossless over lossy
+        2. Artist match (exact match with searched artist)
+        3. Release type (Album > Single > EP > Compilation)
+        4. Seeders/availability (higher is better)
+        5. Quality details (24bit > 16bit, CD/WEB > VINYL)
+        6. YouTube-specific (official channels, Topic releases)
+        7. Year (prefer original releases)
+        """
+        searched_artist = query.artist.lower() if query and query.artist else None
+
+        def is_lossless(r: Release) -> int:
+            """Lossless formats should always come first."""
+            if r.quality and r.quality.format:
+                fmt = r.quality.format.upper()
+                if fmt in ("FLAC", "WAV", "ALAC", "APE"):
+                    return 1
+            return 0
+
+        def artist_match_score(r: Release) -> int:
+            """
+            Prioritize releases where the artist matches the searched artist.
+            Compilations often have a different artist (VA or first artist).
+            """
+            if not searched_artist or not r.artist:
+                return 0
+
+            release_artist = r.artist.lower()
+
+            # Exact match
+            if release_artist == searched_artist:
+                return 100
+            # Searched artist in release artist
+            if searched_artist in release_artist:
+                return 80
+            # Release artist in searched artist
+            if release_artist in searched_artist:
+                return 60
+            # No match - this is likely a compilation appearance
+            return 0
 
         def release_type_score(r: Release) -> int:
-            if not r.release_type: return 0
+            """Albums > Singles > EPs > Compilations."""
+            if not r.release_type:
+                return 0
             priority = {
-                "Album": 10,
-                "Single": 9,
-                "EP": 8,
-                "Soundtrack": 7,
-                "Compilation": 5,
-                "Anthology": 5,
-                "Remix": 1
+                "Album": 100,
+                "Single": 80,
+                "EP": 70,
+                "Soundtrack": 60,
+                "Live album": 50,
+                "Anthology": 30,
+                "Compilation": 20,
+                "Remix": 10,
+                "Bootleg": 5,
+                "Demo": 5,
             }
             return priority.get(r.release_type, 0)
 
-        def channel_match_score(r: Release) -> int:
-            """Score based on how well the channel name matches the artist name (YouTube only)"""
-            if r.source_name != "YouTube":
-                return 0
-            if not r.channel or not r.artist:
-                return 0
-
-            channel_lower = r.channel.lower()
-            artist_lower = r.artist.lower()
-
-            # Exact match (highest priority)
-            if channel_lower == artist_lower:
+        def seeder_score(r: Release) -> int:
+            """More seeders = more reliable download."""
+            if r.source_name == "YouTube":
+                # YouTube doesn't have seeders, use view count bucketed
+                views = r.view_count or 0
+                if views > 10_000_000:
+                    return 100
+                elif views > 1_000_000:
+                    return 80
+                elif views > 100_000:
+                    return 60
+                elif views > 10_000:
+                    return 40
+                return 20
+            # Torrent seeders - scale logarithmically
+            seeders = r.seeders or 0
+            if seeders >= 100:
                 return 100
-            # Artist name in channel (e.g., "salute - Topic")
-            elif artist_lower in channel_lower:
+            elif seeders >= 50:
+                return 90
+            elif seeders >= 20:
                 return 80
-            # Channel in artist name
-            elif channel_lower in artist_lower:
-                return 60
-            # No match
+            elif seeders >= 10:
+                return 70
+            elif seeders >= 5:
+                return 50
+            elif seeders >= 1:
+                return 30
             return 0
 
-        def is_official_score(r: Release) -> int:
+        def quality_detail_score(r: Release) -> int:
+            """24bit > 16bit, prefer CD/WEB over VINYL for consistency."""
+            score = 0
+            if r.quality:
+                # Bit depth
+                if r.quality.bit_depth:
+                    if r.quality.bit_depth >= 24:
+                        score += 20
+                    elif r.quality.bit_depth >= 16:
+                        score += 10
+                # Media type
+                if r.quality.media:
+                    media_name = r.quality.media.name if hasattr(r.quality.media, 'name') else str(r.quality.media)
+                    media_priority = {
+                        "WEB": 15,  # Consistent quality
+                        "CD": 14,
+                        "SACD": 13,
+                        "DVD": 12,
+                        "BLURAY": 11,
+                        "VINYL": 5,  # Variable quality
+                        "OTHER": 0,
+                    }
+                    score += media_priority.get(media_name, 0)
+            return score
+
+        def youtube_score(r: Release) -> int:
+            """Score YouTube results by official-ness."""
             if r.source_name != "YouTube":
                 return 0
             score = 0
-            # "Topic" channels are auto-generated official audio
-            if r.channel and " - Topic" in r.channel:
-                score += 20
-            # VEVO
-            if r.channel and "VEVO" in r.channel.upper():
-                score += 15
+
+            # Channel matching
+            if r.channel and searched_artist:
+                channel_lower = r.channel.lower()
+                if searched_artist in channel_lower:
+                    score += 50
+                if " - Topic" in r.channel:
+                    score += 30  # Auto-generated official
+                if "VEVO" in r.channel.upper():
+                    score += 25
+
             # Title keywords
-            title_lower = r.title.lower()
-            if "official audio" in title_lower:
-                score += 10
-            elif "official video" in title_lower:
-                score += 5
-            elif "official music video" in title_lower:
-                score += 5
-            elif "lyric video" in title_lower:
-                score += 2
+            if r.title:
+                title_lower = r.title.lower()
+                if "official audio" in title_lower:
+                    score += 20
+                elif "official video" in title_lower:
+                    score += 15
+                elif "official" in title_lower:
+                    score += 10
+                elif "lyric" in title_lower:
+                    score += 5
 
             return score
 
         def year_score(r: Release) -> int:
-            if not r.year: return 0
-            if r.source_name == "Redacted":
-                # Oldest first -> -Year
-                return -r.year
-            elif r.source_name == "YouTube":
-                # Newest first -> Year
-                return r.year
-            return -r.year
+            """Prefer original/older releases for albums, newer for YouTube."""
+            if not r.year:
+                return 0
+            if r.source_name == "YouTube":
+                # Newer is better for YouTube (better quality uploads)
+                return min(r.year - 2000, 30)  # Cap at 30
+            # For albums, prefer original year (lower year = older = original)
+            # But not too old (pre-1980 might be remaster issues)
+            if r.year >= 1980:
+                return 50 - (r.year - 1980)  # Older within reason
+            return 0
 
         return sorted(releases, key=lambda r: (
-            r.match_score,             # 1. Name Match
-            channel_match_score(r),    # 2. Channel Match (YouTube)
-            is_official_score(r),      # 3. Official (YouTube)
-            release_type_score(r),     # 4. Type (Redacted)
-            (r.seeders or r.view_count or 0),  # 5. Seeders/Views
-            r.quality,                 # 6. Quality
-            year_score(r)              # 7. Year
+            is_lossless(r),           # 1. Lossless first
+            artist_match_score(r),    # 2. Artist matches searched artist
+            release_type_score(r),    # 3. Album > Single > Compilation
+            seeder_score(r),          # 4. More seeders = more reliable
+            quality_detail_score(r),  # 5. 24bit > 16bit, CD/WEB > VINYL
+            youtube_score(r),         # 6. Official YouTube channels
+            year_score(r),            # 7. Original releases preferred
         ), reverse=True)
 
     def select_best(self, releases: list[Release]) -> Optional[Release]:

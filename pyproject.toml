@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flacfetch"
-version = "0.7.1"
+version = "0.7.2"
 description = "Search and download high-quality audio from multiple sources"
 readme = "README.md"
 requires-python = ">=3.10"
