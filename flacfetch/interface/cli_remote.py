@@ -143,6 +143,57 @@ class RemoteClient:
 
         raise RuntimeError(f"Download timed out after {timeout}s")
 
+    def fetch_file(
+        self,
+        download_id: str,
+        output_path: str,
+        progress_callback=None,
+    ) -> str:
+        """
+        Download the completed file from the server to local disk.
+
+        Args:
+            download_id: Download ID
+            output_path: Local path to save the file
+            progress_callback: Optional callback(downloaded_bytes, total_bytes) for progress
+
+        Returns:
+            Path to the downloaded file
+
+        Raises:
+            RuntimeError on failure
+        """
+        url = f"{self.base_url}/download/{download_id}/file"
+
+        with httpx.stream("GET", url, headers=self._headers(), timeout=300) as response:
+            if response.status_code != 200:
+                raise RuntimeError(f"Failed to fetch file: HTTP {response.status_code}")
+
+            # Get total size from Content-Length header
+            total_size = int(response.headers.get("content-length", 0))
+
+            # Get filename from Content-Disposition if available
+            content_disp = response.headers.get("content-disposition", "")
+            if "filename=" in content_disp:
+                # Extract filename from header
+                filename = content_disp.split("filename=")[-1].strip('"')
+                # If output_path is a directory, append filename
+                if os.path.isdir(output_path):
+                    output_path = os.path.join(output_path, filename)
+                elif output_path.endswith("/"):
+                    os.makedirs(output_path, exist_ok=True)
+                    output_path = os.path.join(output_path, filename)
+
+            downloaded = 0
+            with open(output_path, "wb") as f:
+                for chunk in response.iter_bytes(chunk_size=8192):
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if progress_callback and total_size > 0:
+                        progress_callback(downloaded, total_size)
+
+        return output_path
+
 
 def convert_api_result_to_display(result: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -279,6 +330,12 @@ Optional:
     # Output options
     output_group = parser.add_argument_group("Output Options")
     output_group.add_argument(
+        "-o", "--output",
+        metavar="DIR",
+        default=".",
+        help="Output directory (default: current directory)"
+    )
+    output_group.add_argument(
         "--rename",
         action="store_true",
         dest="auto_rename",
@@ -293,6 +350,11 @@ Optional:
         "--gcs-path",
         metavar="PATH",
         help="Upload to GCS at this path (e.g., uploads/job123/audio/)"
+    )
+    output_group.add_argument(
+        "--no-local",
+        action="store_true",
+        help="Don't download file locally (only with --gcs-path)"
     )
 
     # Connection options
@@ -484,20 +546,59 @@ Optional:
         print(f"\n{Colors.YELLOW}Download interrupted.{Colors.RESET}")
         sys.exit(1)
 
+    # Download file locally (unless --no-local and --gcs-path)
+    local_file = None
+    if not args.no_local or not args.gcs_path:
+        # Determine local output path
+        output_dir = args.output or "."
+        os.makedirs(output_dir, exist_ok=True)
+
+        print(f"\n{Colors.BOLD}Fetching file to local machine...{Colors.RESET}")
+
+        def fetch_progress(downloaded: int, total: int):
+            pct = (downloaded / total * 100) if total > 0 else 0
+            bar_width = 30
+            filled = int(bar_width * pct / 100)
+            bar = "█" * filled + "░" * (bar_width - filled)
+            mb_done = downloaded / (1024 * 1024)
+            mb_total = total / (1024 * 1024)
+            print(f"\r{Colors.BOLD}Fetching:{Colors.RESET} [{bar}] {pct:5.1f}% ({mb_done:.1f}/{mb_total:.1f} MB)   ", end="", flush=True)
+
+        try:
+            local_file = client.fetch_file(
+                download_id=download_id,
+                output_path=output_dir,
+                progress_callback=fetch_progress,
+            )
+            print()  # New line after progress bar
+        except Exception as e:
+            print()
+            print(f"\n{Colors.RED}✗ Failed to fetch file: {e}{Colors.RESET}")
+            print(f"{Colors.DIM}File is available on server at: {final_status.get('output_path')}{Colors.RESET}")
+
     # Success summary
     print(f"\n{Colors.GREEN}{'='*60}{Colors.RESET}")
     print(f"{Colors.GREEN}✓ Download Complete!{Colors.RESET}\n")
     print(f"{Colors.BOLD}Track:{Colors.RESET}     {artist} - {title}")
     print(f"{Colors.BOLD}Source:{Colors.RESET}    {final_status.get('provider', 'Unknown')}")
 
-    if final_status.get("output_path"):
-        print(f"{Colors.BOLD}File:{Colors.RESET}      {Colors.CYAN}{final_status['output_path']}{Colors.RESET}")
+    if local_file:
+        # Show local file path
+        try:
+            rel_path = os.path.relpath(local_file)
+            if len(rel_path) < len(local_file):
+                file_display = rel_path
+            else:
+                file_display = local_file
+        except ValueError:
+            file_display = local_file
+        print(f"{Colors.BOLD}Saved to:{Colors.RESET}  {Colors.CYAN}{file_display}{Colors.RESET}")
 
     if final_status.get("gcs_path"):
         print(f"{Colors.BOLD}GCS:{Colors.RESET}       {Colors.CYAN}{final_status['gcs_path']}{Colors.RESET}")
 
     if final_status.get("status") == "seeding":
-        print(f"{Colors.BOLD}Status:{Colors.RESET}    {Colors.GREEN}Seeding{Colors.RESET} (torrent will continue seeding on server)")
+        print(f"{Colors.BOLD}Server:{Colors.RESET}    {Colors.GREEN}Seeding{Colors.RESET} (torrent continues seeding on server)")
 
     print(f"{Colors.GREEN}{'='*60}{Colors.RESET}\n")
 

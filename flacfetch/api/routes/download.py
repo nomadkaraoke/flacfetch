@@ -5,6 +5,7 @@ import logging
 import os
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi.responses import FileResponse
 
 from ..auth import verify_api_key
 from ..models import (
@@ -130,6 +131,66 @@ async def get_download_status(
         gcs_path=task.gcs_path,
         error=task.error,
         started_at=task.started_at,
+    )
+
+
+@router.get("/download/{download_id}/file")
+async def download_file(
+    download_id: str,
+    api_key: str = Depends(verify_api_key),
+) -> FileResponse:
+    """
+    Download the completed file.
+
+    This endpoint streams the file from the server. The download must be
+    in 'complete' or 'seeding' status.
+
+    Returns the file with appropriate content-type and filename headers.
+    """
+    manager = get_download_manager()
+    task = manager.get_download(download_id)
+
+    if not task:
+        raise HTTPException(status_code=404, detail=f"Download not found: {download_id}")
+
+    # Check download is complete
+    if task.status not in [DownloadStatus.COMPLETE, DownloadStatus.SEEDING]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Download not ready. Status: {task.status.value}"
+        )
+
+    # Check file exists
+    if not task.output_path:
+        raise HTTPException(status_code=404, detail="No output file available")
+
+    if not os.path.exists(task.output_path):
+        raise HTTPException(
+            status_code=404,
+            detail=f"File not found on server: {task.output_path}"
+        )
+
+    # Determine filename for download
+    filename = os.path.basename(task.output_path)
+
+    # Determine media type
+    ext = os.path.splitext(filename)[1].lower()
+    media_types = {
+        ".flac": "audio/flac",
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".m4a": "audio/mp4",
+        ".ogg": "audio/ogg",
+        ".opus": "audio/opus",
+    }
+    media_type = media_types.get(ext, "application/octet-stream")
+
+    logger.info(f"Serving file: {task.output_path} ({media_type})")
+
+    return FileResponse(
+        path=task.output_path,
+        filename=filename,
+        media_type=media_type,
     )
 
 
