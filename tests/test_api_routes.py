@@ -143,7 +143,7 @@ class TestHealthRoute:
             version="0.1.0",
             transmission=TransmissionHealth(available=True, active_torrents=5),
             disk=DiskHealth(total_gb=30, used_gb=15, free_gb=15),
-            providers=ProvidersHealth(redacted=True, ops=True, youtube=True),
+            providers=ProvidersHealth(red=True, ops=True, youtube=True),
         )
 
         assert resp.status == "healthy"

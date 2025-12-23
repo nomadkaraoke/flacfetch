@@ -1,7 +1,10 @@
 from unittest.mock import MagicMock
 
 from flacfetch.core.models import AudioFormat, TrackQuery
-from flacfetch.providers.redacted import RedactedProvider
+from flacfetch.providers.red import REDProvider
+
+# Mock base URL for testing (no real tracker URL)
+MOCK_BASE_URL = "https://mock-tracker.test"
 
 # Updated Mock to include file lists and multiple qualities
 SAMPLE_GROUP_RESPONSE = {
@@ -47,8 +50,8 @@ SAMPLE_GROUP_RESPONSE = {
     }
 }
 
-def test_redacted_lossless_filtering():
-    provider = RedactedProvider(api_key="test")
+def test_red_lossless_filtering():
+    provider = REDProvider(api_key="test", base_url=MOCK_BASE_URL)
     provider.session.get = MagicMock()
 
     # Mock the browse search response
@@ -81,8 +84,8 @@ def test_redacted_lossless_filtering():
     assert releases[0].target_file == "01 - Fear Not.flac"
     assert releases[1].target_file == "01 Fear Not.flac"
 
-def test_redacted_no_match_filtered():
-    provider = RedactedProvider(api_key="test")
+def test_red_no_match_filtered():
+    provider = REDProvider(api_key="test", base_url=MOCK_BASE_URL)
     provider.session.get = MagicMock()
 
     # Response with no matching file
@@ -112,9 +115,9 @@ def test_redacted_no_match_filtered():
 
     assert len(releases) == 0
 
-def test_redacted_html_entity_decoding():
+def test_red_html_entity_decoding():
     """Test that HTML entities like &amp; are properly decoded in filenames."""
-    provider = RedactedProvider(api_key="test")
+    provider = REDProvider(api_key="test", base_url=MOCK_BASE_URL)
     provider.session.get = MagicMock()
 
     # Response with HTML entities in filename
@@ -161,10 +164,10 @@ def test_redacted_html_entity_decoding():
     assert releases[0].target_file == "05 - Salute & Piri - Luv Stuck.flac"
     assert "&amp;" not in releases[0].target_file
 
-def test_redacted_filelist_sanitization():
+def test_red_filelist_sanitization():
     """Test that special characters are removed from filelist queries.
 
-    Sphinx (the search engine used by Redacted) treats certain characters as
+    Sphinx (the search engine used by the tracker) treats certain characters as
     special operators that break the search:
     - : (colon) - field search operator
     - / (slash) - path separator
@@ -175,7 +178,7 @@ def test_redacted_filelist_sanitization():
     - . (period) - wildcard
     - ; (semicolon) - separator
     """
-    provider = RedactedProvider("fake_api_key")
+    provider = REDProvider(api_key="fake_api_key", base_url=MOCK_BASE_URL)
 
     # Test cases: (input, expected_output)
     test_cases = [
@@ -197,3 +200,23 @@ def test_redacted_filelist_sanitization():
     for input_query, expected in test_cases:
         result = provider._sanitize_filelist_query(input_query)
         assert result == expected, f"Failed for '{input_query}': got '{result}', expected '{expected}'"
+
+def test_red_requires_base_url():
+    """Test that REDProvider raises ValueError if base_url is not provided."""
+    try:
+        REDProvider(api_key="test", base_url="")
+        raise AssertionError("Should have raised ValueError")
+    except ValueError as e:
+        assert "base_url is required" in str(e)
+
+    try:
+        REDProvider(api_key="test", base_url=None)
+        raise AssertionError("Should have raised ValueError")
+    except (ValueError, TypeError):
+        pass  # Expected
+
+def test_red_provider_name():
+    """Test that REDProvider returns 'RED' as its name."""
+    provider = REDProvider(api_key="test", base_url=MOCK_BASE_URL)
+    assert provider.name == "RED"
+

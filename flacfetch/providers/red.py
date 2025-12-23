@@ -10,29 +10,44 @@ from ..core.log import get_logger
 from ..core.matching import calculate_match_score
 from ..core.models import AudioFormat, MediaSource, Quality, Release, TrackQuery
 
-logger = get_logger("RedactedProvider")
+logger = get_logger("REDProvider")
 
-class RedactedProvider(Provider):
-    BASE_URL = "https://redacted.sh"
+class REDProvider(Provider):
+    """Provider for RED private music tracker.
 
-    def __init__(self, api_key: str):
+    Requires both an API key and base URL to be provided.
+    The base URL should be set via the RED_API_URL environment variable
+    for security reasons (to avoid hardcoding tracker URLs in source code).
+    """
+
+    def __init__(self, api_key: str, base_url: str):
+        """Initialize the RED provider.
+
+        Args:
+            api_key: API key for authentication
+            base_url: Base URL of the tracker API (e.g., from RED_API_URL env var)
+        """
+        if not base_url:
+            raise ValueError("base_url is required for REDProvider. Set RED_API_URL environment variable.")
+
         self.api_key = api_key
+        self.base_url = base_url.rstrip('/')  # Remove trailing slash if present
         self.session = requests.Session()
         self.session.headers.update({"Authorization": self.api_key})
         self.search_limit = 20 # Default limit
 
         # Setup persistent cache
-        self.cache_dir = Path.home() / ".flacfetch" / "cache" / "redacted"
+        self.cache_dir = Path.home() / ".flacfetch" / "cache" / "red"
         try:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
-            logger.debug(f"Redacted cache directory: {self.cache_dir}")
+            logger.debug(f"RED cache directory: {self.cache_dir}")
         except Exception as e:
             logger.warning(f"Could not create cache directory: {e}")
             self.cache_dir = None
 
     @property
     def name(self) -> str:
-        return "Redacted"
+        return "RED"
 
     def _sanitize_filelist_query(self, query: str) -> str:
         """
@@ -65,7 +80,7 @@ class RedactedProvider(Provider):
         return sanitized
 
     def search(self, query: TrackQuery) -> list[Release]:
-        url = f"{self.BASE_URL}/ajax.php"
+        url = f"{self.base_url}/ajax.php"
 
         # Sanitize the filelist query to remove Sphinx special operators
         sanitized_title = self._sanitize_filelist_query(query.title) if query.title else ""
@@ -78,26 +93,26 @@ class RedactedProvider(Provider):
             "format": "FLAC"
         }
 
-        logger.debug(f"Searching Redacted with params: {params}")
+        logger.debug(f"Searching RED with params: {params}")
 
         try:
             resp = self.session.get(url, params=params, timeout=10)
             if resp.status_code != 200:
-                logger.error(f"Redacted API returned {resp.status_code}: {resp.text[:200]}")
+                logger.error(f"RED API returned {resp.status_code}: {resp.text[:200]}")
                 return []
 
             try:
                 data = resp.json()
             except ValueError:
-                logger.error("Redacted API returned invalid JSON")
+                logger.error("RED API returned invalid JSON")
                 return []
 
             if data["status"] != "success":
-                logger.warning(f"Redacted API status not success: {data.get('status')} - Response: {data}")
+                logger.warning(f"RED API status not success: {data.get('status')} - Response: {data}")
                 return []
 
             browse_results = data.get("response", {}).get("results", [])
-            logger.debug(f"Found {len(browse_results)} groups in Redacted response")
+            logger.debug(f"Found {len(browse_results)} groups in RED response")
 
             group_ids: set[int] = set()
             for group in browse_results:
@@ -131,17 +146,17 @@ class RedactedProvider(Provider):
                 releases.extend(group_releases)
                 time.sleep(1.1)
 
-            logger.info(f"Total matching tracks parsed from Redacted: {len(releases)}")
+            logger.info(f"Total matching tracks parsed from RED: {len(releases)}")
             return releases
         except requests.RequestException as e:
-            logger.error(f"Connection error to Redacted: {e}")
+            logger.error(f"Connection error to RED: {e}")
             return []
         except Exception as e:
-            logger.exception(f"Unexpected error in RedactedProvider: {e}")
+            logger.exception(f"Unexpected error in REDProvider: {e}")
             return []
 
     def _fetch_group_details(self, group_id: int, track_title: str) -> list[Release]:
-        url = f"{self.BASE_URL}/ajax.php"
+        url = f"{self.base_url}/ajax.php"
         params = {"action": "torrentgroup", "id": group_id}
 
         try:
@@ -184,7 +199,7 @@ class RedactedProvider(Provider):
                 if not target_file:
                     continue
 
-                dl_url = f"{self.BASE_URL}/ajax.php?action=download&id={torrent['id']}"
+                dl_url = f"{self.base_url}/ajax.php?action=download&id={torrent['id']}"
 
                 edition_parts = []
                 remaster_title = torrent.get("remasterTitle")
@@ -269,7 +284,7 @@ class RedactedProvider(Provider):
             # if "usetoken=1" not in url:
             #    url += "&usetoken=1"
 
-            # Redacted sometimes requires 'authkey' or 'passkey' for download actions if not using API key correctly,
+            # RED sometimes requires 'authkey' or 'passkey' for download actions if not using API key correctly,
             # but API key should supersede.
             # Let's ensure we are not getting a redirect that drops headers.
 
@@ -294,7 +309,7 @@ class RedactedProvider(Provider):
                     logger.debug(f"Response Body (JSON): {content}")
 
                     if content.get("status") == "failure" and "already downloaded" in content.get("error", ""):
-                        logger.error(f"Redacted Limit Reached: {content.get('error')}")
+                        logger.error(f"RED Limit Reached: {content.get('error')}")
                         logger.info("Tip: You can download the .torrent file manually from the website and place it in the cache directory:")
                         if self.cache_dir:
                             logger.info(f"  {self.cache_dir}/{torrent_id}.torrent")
@@ -304,11 +319,11 @@ class RedactedProvider(Provider):
 
             if resp.status_code in (301, 302, 303, 307, 308):
                 redirect_url = resp.headers.get("Location")
-                logger.debug(f"Redacted download redirected to: {redirect_url}")
+                logger.debug(f"RED download redirected to: {redirect_url}")
                 if redirect_url:
                     # If redirect is relative, make absolute
                     if redirect_url.startswith("/"):
-                        redirect_url = self.BASE_URL + redirect_url
+                        redirect_url = self.base_url + redirect_url
                     # Follow redirect manually to ensure headers are kept if same domain,
                     # or just let requests handle it if we didn't set allow_redirects=False.
                     # Actually, requests keeps headers for same-domain redirects.
@@ -439,3 +454,4 @@ class RedactedProvider(Provider):
             bitrate=bitrate,
             media=media
         )
+

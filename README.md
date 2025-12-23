@@ -11,12 +11,12 @@
 ## Features
 
 -   **Precise Track Search**:
-    -   **Private Music Trackers**: Redacted and OPS (API integration). Uses advanced file list filtering to find specific songs within album torrents, downloading only the required track.
+    -   **Private Music Trackers**: RED and OPS (API integration). Uses advanced file list filtering to find specific songs within album torrents, downloading only the required track.
     -   **Public Sources**: YouTube (via `yt-dlp`).
 -   **Smart Prioritization**:
     -   **Official Sources**: Automatically prioritizes "Topic" channels and "Official Audio" on YouTube.
     -   **Quality Heuristics**: 
-        -   **Trackers (Redacted/OPS)**: Prioritizes Lossless (FLAC) and healthy torrents (Seeders). Matches filename exactly to your query.
+        -   **Trackers (RED/OPS)**: Prioritizes Lossless (FLAC) and healthy torrents (Seeders). Matches filename exactly to your query.
         -   **YouTube**: Prioritizes newer uploads (Opus codec) over legacy uploads (AAC). Color-codes upload years to help you spot modern, high-quality streams (Green: 2020+, Yellow: 2015-2019, Red: <2015).
 -   **Flexible Interaction**:
     -   **Interactive Mode**: Present search results to the user for manual selection with rich, color-coded metadata (Seeders, Views, Duration).
@@ -73,7 +73,7 @@ pip install -e ".[dev]"
 
 **Standard Search (Artist - Title)**
 ```bash
-flacfetch "Seether - Tonight"
+flacfetch "Seether" "Tonight"
 ```
 
 **Explicit Arguments (Recommended for precision)**
@@ -103,41 +103,45 @@ flacfetch --artist "Seether" --title "Tonight" -o ~/Music --rename
 
 **Verbose Logging**
 ```bash
-flacfetch -v "Seether - Tonight"
+flacfetch -v "Seether" "Tonight"
 ```
 
 **Configuration**
 
-To use private music trackers, you must provide an API Key:
+To use private music trackers, you must provide both an API Key and API URL:
 ```bash
-# Redacted
-export REDACTED_API_KEY="your_api_key_here"
+# RED
+export RED_API_KEY="your_api_key_here"
+export RED_API_URL="your_tracker_url_here"
 # OR
-flacfetch "..." --redacted-key "your_key"
+flacfetch "..." --red-key "your_key" --red-url "your_url"
 
 # OPS
 export OPS_API_KEY="your_api_key_here"
+export OPS_API_URL="your_tracker_url_here"
 # OR
-flacfetch "..." --ops-key "your_key"
+flacfetch "..." --ops-key "your_key" --ops-url "your_url"
 ```
 
 **Provider Priority**
 
-When multiple providers are configured, flacfetch searches them in priority order. By default: **Redacted > OPS > YouTube**
+When multiple providers are configured, flacfetch searches them in priority order. By default: **RED > OPS > YouTube**
 
-This means Redacted is searched first, and only if it returns no results will OPS be searched, then YouTube. This is useful for conserving buffer on trackers with stricter limits.
+This means RED is searched first, and only if it returns no results will OPS be searched, then YouTube. This is useful for conserving buffer on trackers with stricter limits.
 
 ```bash
-# Use default priority (Redacted > OPS > YouTube)
-export REDACTED_API_KEY="..."
+# Use default priority (RED > OPS > YouTube)
+export RED_API_KEY="..."
+export RED_API_URL="..."
 export OPS_API_KEY="..."
+export OPS_API_URL="..."
 flacfetch "Artist" "Title" --auto
 
 # Custom priority
-flacfetch "Artist" "Title" --provider-priority "OPS,Redacted,YouTube"
+flacfetch "Artist" "Title" --provider-priority "OPS,RED,YouTube"
 
 # Or via environment variable
-export FLACFETCH_PROVIDER_PRIORITY="OPS,Redacted,YouTube"
+export FLACFETCH_PROVIDER_PRIORITY="OPS,RED,YouTube"
 flacfetch "Artist" "Title" --auto
 
 # Disable fallback (only search highest priority provider)
@@ -151,12 +155,12 @@ flacfetch "Artist" "Title" --auto --no-fallback
 ```python
 from flacfetch.core.manager import FetchManager
 from flacfetch.core.models import TrackQuery
-from flacfetch.providers.redacted import RedactedProvider
+from flacfetch.providers.red import REDProvider
 from flacfetch.providers.ops import OPSProvider
 
 manager = FetchManager()
-manager.add_provider(RedactedProvider(api_key="..."))
-manager.add_provider(OPSProvider(api_key="..."))
+manager.add_provider(REDProvider(api_key="...", base_url="..."))
+manager.add_provider(OPSProvider(api_key="...", base_url="..."))
 
 # Search for a specific track
 results = manager.search(TrackQuery(artist="Seether", title="Tonight"))

@@ -104,7 +104,7 @@ async def get_download_status(
         raise HTTPException(status_code=404, detail=f"Download not found: {download_id}")
 
     # If downloading from torrent, try to get live progress from Transmission
-    if task.status == DownloadStatus.DOWNLOADING and task.provider in ["Redacted", "OPS"]:
+    if task.status == DownloadStatus.DOWNLOADING and task.provider in ["RED", "OPS"]:
         try:
             progress_info = _get_transmission_progress(task.torrent_id)
             if progress_info:

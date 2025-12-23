@@ -173,7 +173,7 @@ class DiskHealth(BaseModel):
 
 class ProvidersHealth(BaseModel):
     """Provider availability status."""
-    redacted: bool
+    red: bool
     ops: bool
     youtube: bool
 

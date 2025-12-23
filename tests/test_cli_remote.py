@@ -1,15 +1,11 @@
 """
 Tests for the remote CLI module.
 """
-import pytest
-from unittest.mock import patch, MagicMock
-
 from flacfetch.interface.cli_remote import (
     RemoteClient,
     convert_api_result_to_display,
     print_progress,
 )
-from flacfetch.interface.cli import Colors
 
 
 class TestConvertApiResult:
@@ -17,14 +13,14 @@ class TestConvertApiResult:
 
     def test_converts_provider_to_source_name(self):
         """Test that provider is mapped to source_name."""
-        result = {"provider": "Redacted", "title": "Test"}
+        result = {"provider": "RED", "title": "Test"}
         converted = convert_api_result_to_display(result)
-        assert converted["source_name"] == "Redacted"
+        assert converted["source_name"] == "RED"
 
     def test_preserves_quality_string(self):
         """Test that quality string is preserved as quality_str."""
         result = {
-            "provider": "Redacted",
+            "provider": "RED",
             "quality": "FLAC 16bit CD",
             "quality_data": {"format": "FLAC", "bit_depth": 16},
         }
@@ -34,7 +30,7 @@ class TestConvertApiResult:
     def test_maps_quality_data_to_quality_dict(self):
         """Test that quality_data is mapped to quality dict."""
         result = {
-            "provider": "Redacted",
+            "provider": "RED",
             "quality": "FLAC 16bit CD",
             "quality_data": {"format": "FLAC", "bit_depth": 16, "media": "CD"},
         }

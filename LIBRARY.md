@@ -30,12 +30,13 @@ pip install flacfetch[dev]
 ```python
 from flacfetch.core.manager import FetchManager
 from flacfetch.core.models import TrackQuery
-from flacfetch.providers.redacted import RedactedProvider
+from flacfetch.providers.red import REDProvider
 from flacfetch.providers.youtube import YoutubeProvider
 
 # Create manager and add providers
 manager = FetchManager()
-manager.add_provider(RedactedProvider(api_key="your_key"))
+# Note: base_url must be provided (typically from environment variable)
+manager.add_provider(REDProvider(api_key="your_key", base_url="https://your.tracker.url"))
 manager.add_provider(YoutubeProvider())
 
 # Search for a track
@@ -70,7 +71,7 @@ manager = FetchManager()
 Add a provider to the search pool.
 
 ```python
-manager.add_provider(RedactedProvider(api_key="..."))
+manager.add_provider(REDProvider(api_key="...", base_url="..."))
 manager.add_provider(YoutubeProvider())
 ```
 
@@ -99,7 +100,7 @@ Sorting priority:
 4. Release type (Album > Single > EP > etc.)
 5. Seeders/Views
 6. Quality (Lossless > Lossy, bit depth, bitrate)
-7. Year (context-dependent: Redacted prefers oldest, YouTube prefers newest)
+7. Year (context-dependent: private trackers prefer oldest, YouTube prefers newest)
 
 **`download(release: Release, output_path: str, output_filename: str | None = None) -> str`**
 
@@ -120,8 +121,8 @@ Returns the full path to the downloaded file.
 Set the order in which providers are searched.
 
 ```python
-# Search OPS first, then Redacted, then YouTube
-manager.set_provider_priority(["OPS", "Redacted", "YouTube"])
+# Search OPS first, then RED, then YouTube
+manager.set_provider_priority(["OPS", "RED", "YouTube"])
 ```
 
 **`enable_fallback_search(enabled: bool = True) -> None`**
@@ -143,7 +144,7 @@ Register a custom downloader for a specific provider.
 ```python
 from flacfetch.downloaders.torrent import TorrentDownloader
 
-manager.register_downloader("Redacted", TorrentDownloader())
+manager.register_downloader("RED", TorrentDownloader())
 ```
 
 **`set_default_downloader(downloader: Downloader) -> None`**
@@ -156,15 +157,18 @@ manager.set_default_downloader(TorrentDownloader())
 
 ## Providers
 
-### RedactedProvider
+### REDProvider
 
-Provider for Redacted.ch (private music tracker).
+Provider for RED private music tracker.
 
 ```python
-from flacfetch.providers.redacted import RedactedProvider
+import os
+from flacfetch.providers.red import REDProvider
 
-provider = RedactedProvider(
-    api_key="your_api_key",
+# Base URL must be provided (typically from environment variable for security)
+provider = REDProvider(
+    api_key=os.environ.get("RED_API_KEY"),
+    base_url=os.environ.get("RED_API_URL"),
     cache_dir="/path/to/cache"  # Optional: custom cache directory
 )
 
@@ -175,7 +179,7 @@ manager.add_provider(provider)
 ```
 
 **Properties:**
-- `name: str` - Provider name ("Redacted")
+- `name: str` - Provider name ("RED")
 - `search_limit: int` - Maximum number of results per search
 - `cache_dir: Path | None` - Directory for caching torrent files
 
@@ -186,13 +190,16 @@ manager.add_provider(provider)
 
 ### OPSProvider
 
-Provider for Orpheus.network (private music tracker).
+Provider for OPS private music tracker.
 
 ```python
+import os
 from flacfetch.providers.ops import OPSProvider
 
+# Base URL must be provided (typically from environment variable for security)
 provider = OPSProvider(
-    api_key="your_api_key",
+    api_key=os.environ.get("OPS_API_KEY"),
+    base_url=os.environ.get("OPS_API_URL"),
     cache_dir="/path/to/cache"  # Optional
 )
 
@@ -200,7 +207,7 @@ provider.search_limit = 15
 manager.add_provider(provider)
 ```
 
-**Properties and methods:** Same as RedactedProvider, with `name = "OPS"`
+**Properties and methods:** Same as REDProvider, with `name = "OPS"`
 
 ### YoutubeProvider
 
@@ -251,7 +258,7 @@ release = Release(
     title="Album Title",
     artist="Artist Name",
     quality=Quality(format=AudioFormat.FLAC, bit_depth=24, media=MediaSource.WEB),
-    source_name="Redacted",
+    source_name="RED",
     download_url="...",
     info_hash="...",  # For torrents
     size_bytes=50000000,
@@ -271,7 +278,7 @@ release = Release(
 - `title: str` - Album/release title
 - `artist: str` - Artist name
 - `quality: Quality` - Audio quality information
-- `source_name: str` - Provider name (e.g., "Redacted", "YouTube")
+- `source_name: str` - Provider name (e.g., "RED", "OPS", "YouTube")
 - `download_url: str | None` - URL or path for downloading
 - `info_hash: str | None` - BitTorrent info hash (for torrents)
 - `size_bytes: int | None` - Total release size in bytes
@@ -309,7 +316,7 @@ print(release.formatted_views)  # e.g., "1.2M"
 
 # String representation
 print(str(release))
-# [Redacted] Artist Name - Album Title [Album, 2020 / Label / WEB] (FLAC 24bit WEB) Seeders: 50 - 50.0 MB
+# [RED] Artist Name - Album Title [Album, 2020 / Label / WEB] (FLAC 24bit WEB) Seeders: 50 - 50.0 MB
 ```
 
 ### Quality
@@ -395,20 +402,21 @@ MediaSource.OTHER
 Control the order in which providers are searched:
 
 ```python
+import os
 manager = FetchManager()
 
-# Add providers
-manager.add_provider(RedactedProvider(api_key="..."))
-manager.add_provider(OPSProvider(api_key="..."))
+# Add providers (base_url required for private trackers)
+manager.add_provider(REDProvider(api_key=os.environ["RED_API_KEY"], base_url=os.environ["RED_API_URL"]))
+manager.add_provider(OPSProvider(api_key=os.environ["OPS_API_KEY"], base_url=os.environ["OPS_API_URL"]))
 manager.add_provider(YoutubeProvider())
 
 # Set priority (searches in this order)
-manager.set_provider_priority(["Redacted", "OPS", "YouTube"])
+manager.set_provider_priority(["RED", "OPS", "YouTube"])
 
 # Disable fallback (only search first provider)
 manager.enable_fallback_search(False)
 
-# With fallback disabled, only Redacted will be searched
+# With fallback disabled, only RED will be searched
 # even if it returns no results
 results = manager.search(query)
 ```
@@ -447,7 +455,7 @@ results = manager.search(query)
 lossless_only = [r for r in results if r.quality.is_lossless()]
 
 # Filter by source
-redacted_only = [r for r in results if r.source_name == "Redacted"]
+red_only = [r for r in results if r.source_name == "RED"]
 
 # Filter by year
 recent = [r for r in results if r.year and r.year >= 2020]
@@ -507,15 +515,21 @@ for artist, title in tracks:
 ### Provider Configuration
 
 ```python
-# Create provider with custom settings
-redacted = RedactedProvider(api_key="...")
-redacted.search_limit = 5  # Limit results
-redacted.cache_dir = Path("/custom/cache")  # Custom cache location
+import os
+from pathlib import Path
+
+# Create provider with custom settings (base_url required)
+red = REDProvider(
+    api_key=os.environ["RED_API_KEY"],
+    base_url=os.environ["RED_API_URL"]
+)
+red.search_limit = 5  # Limit results
+red.cache_dir = Path("/custom/cache")  # Custom cache location
 
 # YouTube searches are not configurable (uses yt-dlp defaults)
 youtube = YoutubeProvider()
 
-manager.add_provider(redacted)
+manager.add_provider(red)
 manager.add_provider(youtube)
 ```
 
@@ -607,8 +621,8 @@ setup_logging(verbose=False)  # INFO level
 
 # Now all operations will log details
 manager.search(query)
-# INFO: Searching Redacted for 'Artist - Title'...
-# INFO: Found 5 results from Redacted
+# INFO: Searching RED for 'Artist - Title'...
+# INFO: Found 5 results from RED
 # ...
 ```
 
@@ -636,23 +650,30 @@ if results:
 ### Example 2: Multiple Providers with Priority
 
 ```python
+import os
 from flacfetch.core.manager import FetchManager
 from flacfetch.core.models import TrackQuery
-from flacfetch.providers.redacted import RedactedProvider
+from flacfetch.providers.red import REDProvider
 from flacfetch.providers.ops import OPSProvider
 from flacfetch.providers.youtube import YoutubeProvider
 
 manager = FetchManager()
 
-# Add all providers
-manager.add_provider(RedactedProvider(api_key=REDACTED_KEY))
-manager.add_provider(OPSProvider(api_key=OPS_KEY))
+# Add all providers (base_url required for private trackers)
+manager.add_provider(REDProvider(
+    api_key=os.environ["RED_API_KEY"],
+    base_url=os.environ["RED_API_URL"]
+))
+manager.add_provider(OPSProvider(
+    api_key=os.environ["OPS_API_KEY"],
+    base_url=os.environ["OPS_API_URL"]
+))
 manager.add_provider(YoutubeProvider())
 
-# Set priority: Try Redacted first, then OPS, finally YouTube
-manager.set_provider_priority(["Redacted", "OPS", "YouTube"])
+# Set priority: Try RED first, then OPS, finally YouTube
+manager.set_provider_priority(["RED", "OPS", "YouTube"])
 
-# Search (will try Redacted first, fallback to OPS, then YouTube)
+# Search (will try RED first, fallback to OPS, then YouTube)
 results = manager.search(TrackQuery(artist="Artist", title="Title"))
 
 best = manager.select_best(results)
@@ -664,12 +685,16 @@ if best:
 ### Example 3: Custom Filtering and Selection
 
 ```python
+import os
 from flacfetch.core.manager import FetchManager
 from flacfetch.core.models import TrackQuery, MediaSource
-from flacfetch.providers.redacted import RedactedProvider
+from flacfetch.providers.red import REDProvider
 
 manager = FetchManager()
-manager.add_provider(RedactedProvider(api_key=API_KEY))
+manager.add_provider(REDProvider(
+    api_key=os.environ["RED_API_KEY"],
+    base_url=os.environ["RED_API_URL"]
+))
 
 query = TrackQuery(artist="Artist", title="Title")
 results = manager.search(query)
@@ -689,15 +714,19 @@ if cd_rips:
 ### Example 4: Batch Download with Error Handling
 
 ```python
+import os
 import csv
 from pathlib import Path
 from flacfetch.core.manager import FetchManager
 from flacfetch.core.models import TrackQuery
-from flacfetch.providers.redacted import RedactedProvider
+from flacfetch.providers.red import REDProvider
 
 # Setup
 manager = FetchManager()
-manager.add_provider(RedactedProvider(api_key=API_KEY))
+manager.add_provider(REDProvider(
+    api_key=os.environ["RED_API_KEY"],
+    base_url=os.environ["RED_API_URL"]
+))
 
 output_dir = Path("./downloads")
 output_dir.mkdir(exist_ok=True)
@@ -750,12 +779,16 @@ if failed:
 ### Example 5: Inspecting Release Details
 
 ```python
+import os
 from flacfetch.core.manager import FetchManager
 from flacfetch.core.models import TrackQuery
-from flacfetch.providers.redacted import RedactedProvider
+from flacfetch.providers.red import REDProvider
 
 manager = FetchManager()
-manager.add_provider(RedactedProvider(api_key=API_KEY))
+manager.add_provider(REDProvider(
+    api_key=os.environ["RED_API_KEY"],
+    base_url=os.environ["RED_API_URL"]
+))
 
 query = TrackQuery(artist="Artist", title="Title")
 results = manager.search(query)
@@ -824,8 +857,8 @@ def download_track(manager: FetchManager, artist: str, title: str) -> str | None
 - `.set_default_downloader(downloader)` - Set default downloader
 
 ### Providers
-- `RedactedProvider(api_key, cache_dir?)` - Redacted provider
-- `OPSProvider(api_key, cache_dir?)` - OPS provider
+- `REDProvider(api_key, base_url, cache_dir?)` - RED private tracker provider
+- `OPSProvider(api_key, base_url, cache_dir?)` - OPS private tracker provider
 - `YoutubeProvider()` - YouTube provider
 
 ### Models

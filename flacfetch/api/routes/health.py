@@ -99,15 +99,16 @@ def _check_transmission() -> TransmissionHealth:
 
 def _check_providers() -> ProvidersHealth:
     """Check which providers are configured."""
-    redacted = bool(os.environ.get("REDACTED_API_KEY"))
-    ops = bool(os.environ.get("OPS_API_KEY"))
+    # RED requires both API key and URL
+    red = bool(os.environ.get("RED_API_KEY")) and bool(os.environ.get("RED_API_URL"))
+    # OPS requires both API key and URL
+    ops = bool(os.environ.get("OPS_API_KEY")) and bool(os.environ.get("OPS_API_URL"))
 
     # YouTube is always available
     youtube = True
 
     return ProvidersHealth(
-        redacted=redacted,
+        red=red,
         ops=ops,
         youtube=youtube,
     )
-

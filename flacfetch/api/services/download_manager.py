@@ -61,9 +61,9 @@ def _generate_descriptive_filename(search: SearchCache, release: Any) -> str:
     Format: Artist - Title (Type, Year, Media, Quality, Provider).ext
 
     Examples:
-        Avril Lavigne - Unwanted (Album, 2002, CD, 16bit, Redacted)
+        Avril Lavigne - Unwanted (Album, 2002, CD, 16bit, RED)
         Avril Lavigne - Unwanted (Album, 2002, WEB, 24bit, OPS)
-        Avril Lavigne - Unwanted (Live album, 2003, CD, 16bit, Redacted)
+        Avril Lavigne - Unwanted (Live album, 2003, CD, 16bit, RED)
     """
     import re
 
@@ -98,7 +98,7 @@ def _generate_descriptive_filename(search: SearchCache, release: Any) -> str:
         if bit_depth:
             parts.append(f"{bit_depth}bit")
 
-    # Provider (Redacted, OPS, YouTube)
+    # Provider (RED, OPS, YouTube)
     source = getattr(release, 'source_name', None)
     if source:
         parts.append(source)
@@ -171,30 +171,32 @@ class DownloadManager:
             self._fetch_manager.add_provider(YoutubeProvider())
             self._fetch_manager.register_downloader("YouTube", YoutubeDownloader())
 
-            # Add Redacted provider if configured
-            redacted_key = os.environ.get("REDACTED_API_KEY")
-            if redacted_key:
+            # Add RED provider if configured (requires both key and URL)
+            red_key = os.environ.get("RED_API_KEY")
+            red_url = os.environ.get("RED_API_URL")
+            if red_key and red_url:
                 try:
                     from flacfetch.downloaders.torrent import TorrentDownloader
-                    from flacfetch.providers.redacted import RedactedProvider
+                    from flacfetch.providers.red import REDProvider
 
-                    self._fetch_manager.add_provider(RedactedProvider(api_key=redacted_key))
+                    self._fetch_manager.add_provider(REDProvider(api_key=red_key, base_url=red_url))
                     self._fetch_manager.register_downloader(
-                        "Redacted",
+                        "RED",
                         TorrentDownloader(keep_seeding=self.keep_seeding)
                     )
-                    logger.info("Redacted provider initialized")
+                    logger.info("RED provider initialized")
                 except ImportError as e:
-                    logger.warning(f"Could not initialize Redacted provider: {e}")
+                    logger.warning(f"Could not initialize RED provider: {e}")
 
-            # Add OPS provider if configured
+            # Add OPS provider if configured (requires both key and URL)
             ops_key = os.environ.get("OPS_API_KEY")
-            if ops_key:
+            ops_url = os.environ.get("OPS_API_URL")
+            if ops_key and ops_url:
                 try:
                     from flacfetch.downloaders.torrent import TorrentDownloader
                     from flacfetch.providers.ops import OPSProvider
 
-                    self._fetch_manager.add_provider(OPSProvider(api_key=ops_key))
+                    self._fetch_manager.add_provider(OPSProvider(api_key=ops_key, base_url=ops_url))
                     self._fetch_manager.register_downloader(
                         "OPS",
                         TorrentDownloader(keep_seeding=self.keep_seeding)
@@ -205,7 +207,7 @@ class DownloadManager:
 
             # Set default provider priority
             available = [p.name for p in self._fetch_manager.providers]
-            priority = [n for n in ["Redacted", "OPS", "YouTube"] if n in available]
+            priority = [n for n in ["RED", "OPS", "YouTube"] if n in available]
             if priority:
                 self._fetch_manager.set_provider_priority(priority)
 
@@ -360,7 +362,7 @@ class DownloadManager:
                 logger.info(f"Uploaded to GCS: {gcs_path}")
 
             # Final status depends on whether it's a torrent (seeding) or not
-            if release.source_name in ["Redacted", "OPS"] and self.keep_seeding:
+            if release.source_name in ["RED", "OPS"] and self.keep_seeding:
                 self.update_download(download_id, status=DownloadStatus.SEEDING)
             else:
                 self.update_download(download_id, status=DownloadStatus.COMPLETE)
@@ -422,4 +424,3 @@ def get_download_manager() -> DownloadManager:
         keep_seeding = os.environ.get("FLACFETCH_KEEP_SEEDING", "true").lower() == "true"
         _download_manager = DownloadManager(keep_seeding=keep_seeding)
     return _download_manager
-

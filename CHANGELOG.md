@@ -5,10 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2025-12-22
+
+### Changed
+- **BREAKING**: Renamed provider to "RED" and removed hardcoded API URLs
+- **BREAKING**: Both RED and OPS providers now require `base_url` parameter in constructor
+- Private tracker API URLs must now be set via environment variables (`RED_API_URL`, `OPS_API_URL`)
+- This change improves security and respects privacy of private trackers
+- Environment variable renamed to `RED_API_KEY`
+- Default provider priority updated to: RED > OPS > YouTube
+
 ## [0.3.4] - 2025-11-26
 
 ### Fixed
-- Fixed Redacted and OPS filelist search failing for tracks with special characters (colons, parentheses, etc.)
+- Fixed RED and OPS filelist search failing for tracks with special characters (colons, parentheses, etc.)
 - Sphinx search engine treats certain characters as operators, now sanitizing queries to remove: `:/()\[\]!,.;`
 - Tracks like "Flight 717: Going To Denmark" now search correctly
 - Added comprehensive tests for filelist query sanitization
@@ -43,21 +53,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.3.0] - 2025-11-24
 
 ### Added
-- Support for OPS (orpheus.network) tracker with API integration
+- Support for OPS tracker with API integration
 - `OPS_API_KEY` environment variable and `--ops-key` CLI option
-- OPS provider with the same features as Redacted (lossless FLAC, file matching, caching)
+- OPS provider with the same features as RED (lossless FLAC, file matching, caching)
 - Comprehensive test suite for OPS provider
 - **Provider Priority System**: Configure which trackers to search first
   - `--provider-priority` CLI flag for custom priority order
   - `FLACFETCH_PROVIDER_PRIORITY` environment variable
   - `--no-fallback` flag to only search highest priority provider
-  - Default priority: Redacted > OPS > YouTube (conserves buffer on limited trackers)
+  - Default priority: RED > OPS > YouTube (conserves buffer on limited trackers)
   - Intelligent fallback: automatically tries lower priority providers if higher ones return no results
 
 ### Changed
 - **BREAKING**: Dropped Python 3.8 and 3.9 support, minimum version is now Python 3.10
 - Modernized type hints to use built-in generic types (`list`, `dict`, `set`, `tuple` instead of `typing.List`, etc.)
-- Updated CLI help text to mention both Redacted and OPS trackers
+- Updated CLI help text to mention both RED and OPS trackers
 - Updated README to document OPS support and provider priority system
 - FetchManager now searches providers in priority order with configurable fallback behavior
 
@@ -93,7 +103,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Core functionality for searching and downloading high-quality audio
-- Support for Redacted (private tracker) with API integration
+- Support for private music trackers with API integration
 - Support for YouTube with yt-dlp integration
 - Intelligent release matching and prioritization
 - Interactive and automatic selection modes

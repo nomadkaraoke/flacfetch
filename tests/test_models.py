@@ -140,19 +140,19 @@ class TestRelease:
         r = Release(
             title="Album Title", artist="Artist Name",
             quality=Quality(AudioFormat.FLAC, bit_depth=16, media=MediaSource.CD),
-            source_name="Redacted", year=2020
+            source_name="RED", year=2020
         )
         str_repr = str(r)
         assert "Artist Name" in str_repr
         assert "Album Title" in str_repr
         assert "2020" in str_repr
-        assert "[Redacted]" in str_repr
+        assert "[RED]" in str_repr
 
     def test_str_with_metadata(self):
         r = Release(
             title="Album", artist="Artist",
             quality=Quality(AudioFormat.FLAC, bit_depth=24, media=MediaSource.WEB),
-            source_name="Redacted", year=2020, label="Test Label",
+            source_name="RED", year=2020, label="Test Label",
             catalogue_number="CAT123", edition_info="Deluxe Edition"
         )
         str_repr = str(r)

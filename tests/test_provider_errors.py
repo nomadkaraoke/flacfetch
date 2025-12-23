@@ -3,15 +3,19 @@ from unittest.mock import Mock, patch
 
 from flacfetch.core.models import AudioFormat, TrackQuery
 from flacfetch.providers.ops import OPSProvider
-from flacfetch.providers.redacted import RedactedProvider
+from flacfetch.providers.red import REDProvider
+
+# Mock base URLs for testing (no real tracker URLs)
+MOCK_RED_URL = "https://mock-red-tracker.test"
+MOCK_OPS_URL = "https://mock-ops-tracker.test"
 
 
 class TestProviderErrorHandling:
     """Test error handling in provider implementations"""
 
-    def test_redacted_api_error_handling(self):
-        """Test that Redacted handles API errors gracefully"""
-        provider = RedactedProvider("fake_key")
+    def test_red_api_error_handling(self):
+        """Test that RED handles API errors gracefully"""
+        provider = REDProvider("fake_key", base_url=MOCK_RED_URL)
 
         with patch('requests.get') as mock_get:
             mock_get.side_effect = Exception("Network error")
@@ -24,7 +28,7 @@ class TestProviderErrorHandling:
 
     def test_ops_api_error_handling(self):
         """Test that OPS handles API errors gracefully"""
-        provider = OPSProvider("fake_key")
+        provider = OPSProvider("fake_key", base_url=MOCK_OPS_URL)
 
         with patch('requests.get') as mock_get:
             mock_get.side_effect = Exception("Network error")
@@ -35,9 +39,9 @@ class TestProviderErrorHandling:
             # Should return empty list on error
             assert results == []
 
-    def test_redacted_empty_response(self):
-        """Test Redacted handles empty API responses"""
-        provider = RedactedProvider("fake_key")
+    def test_red_empty_response(self):
+        """Test RED handles empty API responses"""
+        provider = REDProvider("fake_key", base_url=MOCK_RED_URL)
 
         with patch('requests.get') as mock_get:
             mock_response = Mock()
@@ -55,7 +59,7 @@ class TestProviderErrorHandling:
 
     def test_ops_empty_response(self):
         """Test OPS handles empty API responses"""
-        provider = OPSProvider("fake_key")
+        provider = OPSProvider("fake_key", base_url=MOCK_OPS_URL)
 
         with patch('requests.get') as mock_get:
             mock_response = Mock()
@@ -71,9 +75,9 @@ class TestProviderErrorHandling:
 
             assert results == []
 
-    def test_redacted_malformed_response(self):
-        """Test Redacted handles malformed API responses"""
-        provider = RedactedProvider("fake_key")
+    def test_red_malformed_response(self):
+        """Test RED handles malformed API responses"""
+        provider = REDProvider("fake_key", base_url=MOCK_RED_URL)
 
         with patch('requests.get') as mock_get:
             mock_response = Mock()
@@ -89,7 +93,7 @@ class TestProviderErrorHandling:
 
     def test_ops_malformed_response(self):
         """Test OPS handles malformed API responses"""
-        provider = OPSProvider("fake_key")
+        provider = OPSProvider("fake_key", base_url=MOCK_OPS_URL)
 
         with patch('requests.get') as mock_get:
             mock_response = Mock()
@@ -105,7 +109,7 @@ class TestProviderErrorHandling:
 
     def test_provider_search_limit(self):
         """Test that search_limit is respected"""
-        provider = RedactedProvider("fake_key")
+        provider = REDProvider("fake_key", base_url=MOCK_RED_URL)
         provider.search_limit = 5
 
         with patch('requests.get') as mock_get:
@@ -133,9 +137,9 @@ class TestProviderErrorHandling:
             results = provider.search(query)
             assert isinstance(results, list)
 
-    def test_redacted_quality_parsing_edge_cases(self):
+    def test_red_quality_parsing_edge_cases(self):
         """Test quality parsing with unusual formats"""
-        provider = RedactedProvider("fake_key")
+        provider = REDProvider("fake_key", base_url=MOCK_RED_URL)
 
         # Test with minimal data
         torrent = {
@@ -157,7 +161,7 @@ class TestProviderErrorHandling:
 
     def test_ops_quality_parsing_edge_cases(self):
         """Test quality parsing with unusual formats"""
-        provider = OPSProvider("fake_key")
+        provider = OPSProvider("fake_key", base_url=MOCK_OPS_URL)
 
         # Test with minimal data
         torrent = {
@@ -179,7 +183,7 @@ class TestProviderErrorHandling:
 
     def test_file_matching_edge_cases(self):
         """Test file matching with edge cases"""
-        provider = RedactedProvider("fake_key")
+        provider = REDProvider("fake_key", base_url=MOCK_RED_URL)
 
         # Empty file list
         result = provider._find_best_target_file("", "Track Title")
@@ -193,15 +197,15 @@ class TestProviderErrorHandling:
 
     def test_provider_name_property(self):
         """Test provider name properties"""
-        red = RedactedProvider("key")
-        ops = OPSProvider("key")
+        red = REDProvider("key", base_url=MOCK_RED_URL)
+        ops = OPSProvider("key", base_url=MOCK_OPS_URL)
 
-        assert red.name == "Redacted"
+        assert red.name == "RED"
         assert ops.name == "OPS"
 
     def test_provider_cache_dir(self):
         """Test cache directory setting"""
-        provider = RedactedProvider("key")
+        provider = REDProvider("key", base_url=MOCK_RED_URL)
         # Cache dir is set by default to user cache directory
         assert provider.cache_dir is not None
 
@@ -210,10 +214,19 @@ class TestProviderErrorHandling:
 
     def test_provider_search_limit_default(self):
         """Test default search limit"""
-        provider = RedactedProvider("key")
+        provider = REDProvider("key", base_url=MOCK_RED_URL)
         # Default is 20
         assert provider.search_limit == 20
 
         provider.search_limit = 5
         assert provider.search_limit == 5
 
+    def test_provider_requires_base_url(self):
+        """Test that providers require base_url"""
+        import pytest
+
+        with pytest.raises(ValueError):
+            REDProvider("key", base_url="")
+
+        with pytest.raises(ValueError):
+            OPSProvider("key", base_url="")
