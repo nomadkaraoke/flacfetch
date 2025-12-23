@@ -205,13 +205,13 @@ def test_red_requires_base_url():
     """Test that REDProvider raises ValueError if base_url is not provided."""
     try:
         REDProvider(api_key="test", base_url="")
-        assert False, "Should have raised ValueError"
+        raise AssertionError("Should have raised ValueError")
     except ValueError as e:
         assert "base_url is required" in str(e)
 
     try:
         REDProvider(api_key="test", base_url=None)
-        assert False, "Should have raised ValueError"
+        raise AssertionError("Should have raised ValueError")
     except (ValueError, TypeError):
         pass  # Expected
 

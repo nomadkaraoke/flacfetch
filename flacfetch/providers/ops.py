@@ -14,7 +14,7 @@ logger = get_logger("OPSProvider")
 
 class OPSProvider(Provider):
     """Provider for OPS private music tracker.
-    
+
     Requires both an API key and base URL to be provided.
     The base URL should be set via the OPS_API_URL environment variable
     for security reasons (to avoid hardcoding tracker URLs in source code).
@@ -22,14 +22,14 @@ class OPSProvider(Provider):
 
     def __init__(self, api_key: str, base_url: str):
         """Initialize the OPS provider.
-        
+
         Args:
             api_key: API key for authentication
             base_url: Base URL of the tracker API (e.g., from OPS_API_URL env var)
         """
         if not base_url:
             raise ValueError("base_url is required for OPSProvider. Set OPS_API_URL environment variable.")
-        
+
         self.api_key = api_key
         self.base_url = base_url.rstrip('/')  # Remove trailing slash if present
         self.session = requests.Session()

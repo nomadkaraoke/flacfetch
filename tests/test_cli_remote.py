@@ -1,15 +1,11 @@
 """
 Tests for the remote CLI module.
 """
-import pytest
-from unittest.mock import patch, MagicMock
-
 from flacfetch.interface.cli_remote import (
     RemoteClient,
     convert_api_result_to_display,
     print_progress,
 )
-from flacfetch.interface.cli import Colors
 
 
 class TestConvertApiResult:
