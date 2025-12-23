@@ -87,7 +87,7 @@ class Release:
     title: str
     artist: str
     quality: Quality
-    source_name: str # e.g. "Redacted", "Bandcamp"
+    source_name: str # e.g. "RED", "OPS", "YouTube"
     download_url: Optional[str] = None
     info_hash: Optional[str] = None # For torrents
     size_bytes: Optional[int] = None
@@ -239,7 +239,7 @@ class Release:
         else:
              parts.append(f"{self.artist} - {self.title}")
 
-        # Detailed metadata string similar to Redacted UI
+        # Detailed metadata string similar to private tracker UI
         # Format: Year / Label / Cat# / Edition / Media
         meta_components = []
         if self.year: meta_components.append(str(self.year))

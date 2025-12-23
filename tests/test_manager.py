@@ -298,15 +298,15 @@ class TestSorting:
         best = mgr.select_best([r_regular, r_official])
         assert "Official Audio" in best.title
 
-    def test_sort_year_redacted_prefers_oldest(self):
+    def test_sort_year_red_prefers_oldest(self):
         mgr = FetchManager()
         r_old = Release(title="T", artist="A", quality=Quality(AudioFormat.FLAC),
-                       source_name="Redacted", match_score=1.0, year=2000)
+                       source_name="RED", match_score=1.0, year=2000)
         r_new = Release(title="T", artist="A", quality=Quality(AudioFormat.FLAC),
-                       source_name="Redacted", match_score=1.0, year=2020)
+                       source_name="RED", match_score=1.0, year=2020)
 
         best = mgr.select_best([r_new, r_old])
-        # For Redacted, older is better (original release)
+        # For RED, older is better (original release)
         assert best.year == 2000
 
     def test_sort_year_youtube_prefers_newest(self):

@@ -10,7 +10,7 @@ from ..core.manager import FetchManager
 from ..core.models import Release, TrackQuery
 from ..downloaders.youtube import YoutubeDownloader
 from ..providers.ops import OPSProvider
-from ..providers.redacted import RedactedProvider
+from ..providers.red import REDProvider
 from ..providers.youtube import YoutubeProvider
 
 try:
@@ -319,7 +319,7 @@ def main():
 flacfetch - High-Quality Audio Downloader
 
 Search and download music from multiple sources including private torrent trackers
-(Redacted, OPS) for lossless FLAC and YouTube. Intelligently matches tracks and
+(RED, OPS) for lossless FLAC and YouTube. Intelligently matches tracks and
 presents quality options.
         """.strip(),
         epilog="""
@@ -343,9 +343,11 @@ Examples:
       Run as HTTP API server
 
 Environment Variables:
-  REDACTED_API_KEY             API key for Redacted (lossless FLAC source)
+  RED_API_KEY                  API key for RED (lossless FLAC source)
+  RED_API_URL                  Base URL for RED API (required if using RED)
   OPS_API_KEY                  API key for OPS (lossless FLAC source)
-  FLACFETCH_PROVIDER_PRIORITY  Provider priority (e.g. 'Redacted,OPS,YouTube')
+  OPS_API_URL                  Base URL for OPS API (required if using OPS)
+  FLACFETCH_PROVIDER_PRIORITY  Provider priority (e.g. 'RED,OPS,YouTube')
   FLACFETCH_API_KEY            API key for HTTP API authentication (serve mode)
   FLACFETCH_API_PORT           HTTP API port (serve mode, default: 8080)
         """.strip(),
@@ -407,9 +409,14 @@ Environment Variables:
     # Provider options
     provider_group = parser.add_argument_group("Provider Options")
     provider_group.add_argument(
-        "--redacted-key",
+        "--red-key",
         metavar="KEY",
-        help="Redacted API key (or use REDACTED_API_KEY env var)"
+        help="RED API key (or use RED_API_KEY env var)"
+    )
+    provider_group.add_argument(
+        "--red-url",
+        metavar="URL",
+        help="RED API base URL (or use RED_API_URL env var)"
     )
     provider_group.add_argument(
         "--ops-key",
@@ -417,9 +424,14 @@ Environment Variables:
         help="OPS API key (or use OPS_API_KEY env var)"
     )
     provider_group.add_argument(
+        "--ops-url",
+        metavar="URL",
+        help="OPS API base URL (or use OPS_API_URL env var)"
+    )
+    provider_group.add_argument(
         "--provider-priority",
         metavar="NAMES",
-        help="Provider priority (comma-separated, e.g. 'Redacted,OPS,YouTube')"
+        help="Provider priority (comma-separated, e.g. 'RED,OPS,YouTube')"
     )
     provider_group.add_argument(
         "--no-fallback",
@@ -470,28 +482,32 @@ Environment Variables:
     manager.add_provider(YoutubeProvider())
     manager.register_downloader("YouTube", YoutubeDownloader())
 
-    # Register Redacted provider
-    redacted_key = args.redacted_key or os.environ.get("REDACTED_API_KEY")
-    if redacted_key:
+    # Register RED provider
+    red_key = args.red_key or os.environ.get("RED_API_KEY")
+    red_url = args.red_url or os.environ.get("RED_API_URL")
+    if red_key and red_url:
         if artist:
-            rp = RedactedProvider(redacted_key)
+            rp = REDProvider(api_key=red_key, base_url=red_url)
             rp.search_limit = args.limit
             manager.add_provider(rp)
 
             if TorrentDownloader:
                 try:
-                    manager.register_downloader("Redacted", TorrentDownloader())
+                    manager.register_downloader("RED", TorrentDownloader())
                 except ImportError:
                     pass
         else:
              if args.verbose:
-                print("Info: Redacted provider skipped (requires Artist name).")
+                print("Info: RED provider skipped (requires Artist name).")
+    elif red_key and not red_url:
+        print(f"{Colors.YELLOW}Warning: RED_API_KEY set but RED_API_URL not set. RED provider disabled.{Colors.RESET}")
 
     # Register OPS provider
     ops_key = args.ops_key or os.environ.get("OPS_API_KEY")
-    if ops_key:
+    ops_url = args.ops_url or os.environ.get("OPS_API_URL")
+    if ops_key and ops_url:
         if artist:
-            ops = OPSProvider(ops_key)
+            ops = OPSProvider(api_key=ops_key, base_url=ops_url)
             ops.search_limit = args.limit
             manager.add_provider(ops)
 
@@ -503,10 +519,12 @@ Environment Variables:
         else:
              if args.verbose:
                 print("Info: OPS provider skipped (requires Artist name).")
+    elif ops_key and not ops_url:
+        print(f"{Colors.YELLOW}Warning: OPS_API_KEY set but OPS_API_URL not set. OPS provider disabled.{Colors.RESET}")
 
     if not manager.providers:
         print(f"\n{Colors.RED}✗ Error: No providers configured{Colors.RESET}")
-        print(f"\n{Colors.BOLD}Tip:{Colors.RESET} Set REDACTED_API_KEY or OPS_API_KEY environment variable to enable lossless FLAC downloads.")
+        print(f"\n{Colors.BOLD}Tip:{Colors.RESET} Set RED_API_KEY + RED_API_URL or OPS_API_KEY + OPS_API_URL environment variables to enable lossless FLAC downloads.")
         sys.exit(1)
 
     # Configure provider priority
@@ -515,10 +533,10 @@ Environment Variables:
         priority_list = [p.strip() for p in priority_str.split(",")]
         manager.set_provider_priority(priority_list)
     else:
-        # Default priority: Redacted > OPS > YouTube
+        # Default priority: RED > OPS > YouTube
         available_providers = [p.name for p in manager.providers]
         default_priority = []
-        for name in ["Redacted", "OPS", "YouTube"]:
+        for name in ["RED", "OPS", "YouTube"]:
             if name in available_providers:
                 default_priority.append(name)
         if default_priority:
@@ -544,8 +562,8 @@ Environment Variables:
         print("  • Check that your artist/title are correct")
         if not artist:
             print("  • Provide an artist name for better torrent tracker results")
-        if "Redacted" not in provider_names and "OPS" not in provider_names and not args.redacted_key and not args.ops_key:
-            print("  • Set REDACTED_API_KEY or OPS_API_KEY to search lossless FLAC sources")
+        if "RED" not in provider_names and "OPS" not in provider_names and not red_key and not ops_key:
+            print("  • Set RED_API_KEY + RED_API_URL or OPS_API_KEY + OPS_API_URL to search lossless FLAC sources")
         sys.exit(0)
 
     selected = None

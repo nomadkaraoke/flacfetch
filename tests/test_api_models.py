@@ -46,14 +46,14 @@ class TestSearchModels:
             index=0,
             title="Waterloo",
             artist="ABBA",
-            provider="Redacted",
+            provider="RED",
             quality="FLAC 16bit CD",
             seeders=45,
             size_bytes=31457280,
             is_lossless=True,
         )
         assert item.index == 0
-        assert item.provider == "Redacted"
+        assert item.provider == "RED"
         assert item.is_lossless is True
 
     def test_search_response(self):
@@ -131,7 +131,7 @@ class TestDownloadModels:
             peers=3,
             download_speed_kbps=1250.5,
             eta_seconds=120,
-            provider="Redacted",
+            provider="RED",
             title="Waterloo",
             artist="ABBA",
         )
@@ -244,11 +244,11 @@ class TestHealthModels:
     def test_providers_health(self):
         """Test providers health model."""
         providers = ProvidersHealth(
-            redacted=True,
+            red=True,
             ops=False,
             youtube=True,
         )
-        assert providers.redacted is True
+        assert providers.red is True
         assert providers.ops is False
         assert providers.youtube is True
 
@@ -259,7 +259,7 @@ class TestHealthModels:
             version="0.1.0",
             transmission=TransmissionHealth(available=True, active_torrents=3),
             disk=DiskHealth(total_gb=30, used_gb=15, free_gb=15),
-            providers=ProvidersHealth(redacted=True, ops=True, youtube=True),
+            providers=ProvidersHealth(red=True, ops=True, youtube=True),
         )
         assert resp.status == "healthy"
         assert resp.transmission.available is True

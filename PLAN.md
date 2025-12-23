@@ -12,7 +12,7 @@ The system will be designed using **Clean Architecture** principles to separate 
     -   `Release`: Represents a finding (Source, Quality, Metadata, Download Link/Magnet, **Target File**).
     -   `Quality`: Value object for audio quality (Format, Bitrate, Source Media) with comparison logic.
 3.  **Interfaces (Abstract Base Classes)**:
-    -   `Provider`: Interface for searching (e.g., `RedactedProvider`, `YoutubeProvider`).
+    -   `Provider`: Interface for searching (e.g., `REDProvider`, `OPSProvider`, `YoutubeProvider`).
     -   `Downloader`: Interface for retrieving content (e.g., `TorrentDownloader`, `HttpDownloader`).
     -   `UserInterface`: Interface for interaction (handling selection prompts).
 
@@ -33,8 +33,8 @@ graph TD
     FM --> Downloaders
     
     subgraph Providers
-        Redacted
-        Bandcamp
+        RED
+        OPS
         YouTube
     end
     
@@ -49,11 +49,12 @@ graph TD
 
 ### 2.1 Provider System
 Each provider implements a `search(query: TrackQuery) -> List[Release]` method.
--   **RedactedProvider**: 
+-   **REDProvider / OPSProvider**: 
     -   Uses `ajax.php?action=browse` with `artistname` and `filelist` parameters to find torrents containing the specific track.
+    -   Requires `base_url` parameter (set via environment variable) in addition to API key.
     -   Parses the `fileList` field in the response to identify the specific file within the torrent that matches the requested song.
     -   Prioritizes "Album" releases (Type 1) and original release years when presenting options.
--   **PublicProviders**: Wrappers around `yt-dlp` or scraping logic for Bandcamp/Soundcloud.
+-   **PublicProviders**: Wrappers around `yt-dlp` or scraping logic for YouTube.
 
 ### 2.2 Quality & Selection Logic
 -   **Quality Class**: Implements `__lt__`, `__eq__` to allow sorting.
@@ -76,9 +77,9 @@ Each provider implements a `search(query: TrackQuery) -> List[Release]` method.
 -   Define `Provider` and `Downloader` abstract base classes (ABCs).
 -   Implement `Quality` comparison logic.
 
-### Phase 2: Redacted Provider Integration
--   Implement authentication (API Key support).
--   Implement `RedactedProvider.search` using specific `artistname` and `filelist` filtering.
+### Phase 2: Private Tracker Provider Integration
+-   Implement authentication (API Key + Base URL support via environment variables).
+-   Implement `REDProvider.search` and `OPSProvider.search` using specific `artistname` and `filelist` filtering.
 -   Parse `fileList` string (format: `filename{{{size}}}|||...`) to find target track.
 -   Parse results into `Release` objects, including `target_file` metadata.
 

@@ -21,7 +21,7 @@ class FetchManager:
         """Set provider search priority by name.
 
         Args:
-            priority_list: List of provider names in priority order (e.g., ['Redacted', 'OPS', 'YouTube'])
+            priority_list: List of provider names in priority order (e.g., ['RED', 'OPS', 'YouTube'])
         """
         self._provider_priority = priority_list
         logger.info(f"Provider priority set to: {' > '.join(priority_list)}")
@@ -325,7 +325,7 @@ class FetchManager:
 
                 logger.debug(f"Saved temporary torrent file to {path}")
                 release.download_url = path
-            elif provider.name == "Redacted":
+            elif provider.name == "RED":
                  # If we failed to fetch the artifact but still proceed, we likely passed a URL to the downloader
                  # The downloader expects a local path or magnet.
                  # If download_url is http..., TorrentDownloader will fail.

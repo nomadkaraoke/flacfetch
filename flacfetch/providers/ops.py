@@ -13,10 +13,25 @@ from ..core.models import AudioFormat, MediaSource, Quality, Release, TrackQuery
 logger = get_logger("OPSProvider")
 
 class OPSProvider(Provider):
-    BASE_URL = "https://orpheus.network"
+    """Provider for OPS private music tracker.
+    
+    Requires both an API key and base URL to be provided.
+    The base URL should be set via the OPS_API_URL environment variable
+    for security reasons (to avoid hardcoding tracker URLs in source code).
+    """
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, base_url: str):
+        """Initialize the OPS provider.
+        
+        Args:
+            api_key: API key for authentication
+            base_url: Base URL of the tracker API (e.g., from OPS_API_URL env var)
+        """
+        if not base_url:
+            raise ValueError("base_url is required for OPSProvider. Set OPS_API_URL environment variable.")
+        
         self.api_key = api_key
+        self.base_url = base_url.rstrip('/')  # Remove trailing slash if present
         self.session = requests.Session()
         self.session.headers.update({"Authorization": self.api_key})
         self.search_limit = 20 # Default limit
@@ -65,7 +80,7 @@ class OPSProvider(Provider):
         return sanitized
 
     def search(self, query: TrackQuery) -> list[Release]:
-        url = f"{self.BASE_URL}/ajax.php"
+        url = f"{self.base_url}/ajax.php"
 
         # Sanitize the filelist query to remove Sphinx special operators
         sanitized_title = self._sanitize_filelist_query(query.title) if query.title else ""
@@ -141,7 +156,7 @@ class OPSProvider(Provider):
             return []
 
     def _fetch_group_details(self, group_id: int, track_title: str) -> list[Release]:
-        url = f"{self.BASE_URL}/ajax.php"
+        url = f"{self.base_url}/ajax.php"
         params = {"action": "torrentgroup", "id": group_id}
 
         try:
@@ -184,7 +199,7 @@ class OPSProvider(Provider):
                 if not target_file:
                     continue
 
-                dl_url = f"{self.BASE_URL}/ajax.php?action=download&id={torrent['id']}"
+                dl_url = f"{self.base_url}/ajax.php?action=download&id={torrent['id']}"
 
                 edition_parts = []
                 remaster_title = torrent.get("remasterTitle")
@@ -308,7 +323,7 @@ class OPSProvider(Provider):
                 if redirect_url:
                     # If redirect is relative, make absolute
                     if redirect_url.startswith("/"):
-                        redirect_url = self.BASE_URL + redirect_url
+                        redirect_url = self.base_url + redirect_url
                     # Follow redirect manually to ensure headers are kept if same domain,
                     # or just let requests handle it if we didn't set allow_redirects=False.
                     # Actually, requests keeps headers for same-domain redirects.
@@ -439,4 +454,3 @@ class OPSProvider(Provider):
             bitrate=bitrate,
             media=media
         )
-

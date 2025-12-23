@@ -23,7 +23,7 @@ async def search_audio(
     """
     Search for audio matching artist and title.
 
-    Returns a list of results from all configured providers (Redacted, OPS, YouTube).
+    Returns a list of results from all configured providers (RED, OPS, YouTube).
     Results are sorted by quality with lossless sources prioritized.
 
     The search_id in the response can be used with POST /download to download a result.

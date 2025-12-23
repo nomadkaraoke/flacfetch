@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flacfetch"
-version = "0.7.3"
+version = "0.8.0"
 description = "Search and download high-quality audio from multiple sources"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,7 +12,7 @@ license = "MIT"
 authors = [
     {name = "Andrew Beveridge", email = "andrew@beveridge.uk"}
 ]
-keywords = ["audio", "music", "flac", "download", "youtube", "redacted", "torrent"]
+keywords = ["audio", "music", "flac", "download", "youtube", "torrent"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: End Users/Desktop",
