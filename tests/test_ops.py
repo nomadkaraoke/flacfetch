@@ -3,6 +3,9 @@ from unittest.mock import MagicMock
 from flacfetch.core.models import AudioFormat, TrackQuery
 from flacfetch.providers.ops import OPSProvider
 
+# Mock base URL for testing (no real URLs in codebase)
+MOCK_BASE_URL = "https://mock.tracker.test/api"
+
 # Updated Mock to include file lists and multiple qualities
 SAMPLE_GROUP_RESPONSE = {
     "status": "success",
@@ -48,7 +51,7 @@ SAMPLE_GROUP_RESPONSE = {
 }
 
 def test_ops_lossless_filtering():
-    provider = OPSProvider(api_key="test")
+    provider = OPSProvider(api_key="test", base_url=MOCK_BASE_URL)
     provider.session.get = MagicMock()
 
     # Mock the browse search response
@@ -82,7 +85,7 @@ def test_ops_lossless_filtering():
     assert releases[1].target_file == "01 Fear Not.flac"
 
 def test_ops_no_match_filtered():
-    provider = OPSProvider(api_key="test")
+    provider = OPSProvider(api_key="test", base_url=MOCK_BASE_URL)
     provider.session.get = MagicMock()
 
     # Response with no matching file
@@ -114,7 +117,7 @@ def test_ops_no_match_filtered():
 
 def test_ops_html_entity_decoding():
     """Test that HTML entities like &amp; are properly decoded in filenames."""
-    provider = OPSProvider(api_key="test")
+    provider = OPSProvider(api_key="test", base_url=MOCK_BASE_URL)
     provider.session.get = MagicMock()
 
     # Response with HTML entities in filename
@@ -175,7 +178,7 @@ def test_ops_filelist_sanitization():
     - . (period) - wildcard
     - ; (semicolon) - separator
     """
-    provider = OPSProvider("fake_api_key")
+    provider = OPSProvider("fake_api_key", base_url=MOCK_BASE_URL)
 
     # Test cases: (input, expected_output)
     test_cases = [
