@@ -11,6 +11,7 @@ from ..models import (
     DiskHealth,
     HealthResponse,
     ProvidersHealth,
+    TorrentSummaryItem,
     TransmissionHealth,
 )
 from ..services import get_disk_manager
@@ -80,10 +81,40 @@ def _check_transmission() -> TransmissionHealth:
         session = client.get_session()
         torrents = client.get_torrents()
 
+        # Build summary list
+        torrent_list = []
+        seeding_count = 0
+        total_size = 0
+        total_uploaded = 0
+
+        for t in torrents:
+            status_str = str(t.status) if hasattr(t, 'status') else "unknown"
+            size = t.total_size if hasattr(t, 'total_size') else 0
+            uploaded = t.uploaded_ever if hasattr(t, 'uploaded_ever') else 0
+
+            total_size += size
+            total_uploaded += uploaded
+
+            if status_str in ['seeding', 'seed_pending']:
+                seeding_count += 1
+
+            torrent_list.append(TorrentSummaryItem(
+                id=t.id,
+                name=t.name,
+                status=status_str,
+                progress=t.progress if hasattr(t, 'progress') else 0,
+                size_mb=round(size / (1024 * 1024), 2),
+                ratio=t.ratio if hasattr(t, 'ratio') else 0,
+            ))
+
         return TransmissionHealth(
             available=True,
             version=session.version if hasattr(session, 'version') else None,
             active_torrents=len(torrents),
+            seeding_torrents=seeding_count,
+            total_size_mb=round(total_size / (1024 * 1024), 2),
+            total_uploaded_mb=round(total_uploaded / (1024 * 1024), 2),
+            torrents=torrent_list,
         )
     except ImportError:
         return TransmissionHealth(
@@ -112,3 +143,72 @@ def _check_providers() -> ProvidersHealth:
         ops=ops,
         youtube=youtube,
     )
+
+
+@router.get("/debug/providers")
+async def debug_providers():
+    """
+    Debug endpoint to check actual provider initialization and connectivity.
+
+    Returns detailed information about each provider's status.
+    """
+    from ..services import get_download_manager
+
+    result = {
+        "env_vars": {
+            "RED_API_KEY": bool(os.environ.get("RED_API_KEY")),
+            "RED_API_URL": bool(os.environ.get("RED_API_URL")),
+            "OPS_API_KEY": bool(os.environ.get("OPS_API_KEY")),
+            "OPS_API_URL": bool(os.environ.get("OPS_API_URL")),
+        },
+        "providers": {},
+        "errors": [],
+    }
+
+    # Try to get the download manager and fetch manager
+    try:
+        manager = get_download_manager()
+        fetch_manager = manager._get_fetch_manager()
+
+        # List registered providers
+        for provider in fetch_manager.providers:
+            provider_info = {
+                "name": provider.name,
+                "initialized": True,
+            }
+
+            # Try a simple API test for RED/OPS
+            if provider.name in ["RED", "OPS"]:
+                try:
+                    # Test by checking if the base_url is set
+                    base_url = getattr(provider, 'base_url', None)
+                    provider_info["base_url_set"] = bool(base_url)
+
+                    # Try a simple API call (index action just checks auth)
+                    if hasattr(provider, 'session'):
+                        test_url = f"{base_url}/ajax.php?action=index"
+                        resp = provider.session.get(test_url, timeout=5)
+                        provider_info["api_test_status"] = resp.status_code
+                        if resp.status_code == 200:
+                            try:
+                                data = resp.json()
+                                provider_info["api_test_success"] = data.get("status") == "success"
+                                if data.get("status") != "success":
+                                    provider_info["api_test_error"] = data.get("error", "Unknown error")
+                            except Exception as e:
+                                provider_info["api_test_error"] = f"JSON parse error: {e}"
+                        else:
+                            provider_info["api_test_error"] = f"HTTP {resp.status_code}"
+                except Exception as e:
+                    provider_info["api_test_error"] = str(e)
+
+            result["providers"][provider.name] = provider_info
+
+        # Check which providers are registered
+        result["registered_providers"] = [p.name for p in fetch_manager.providers]
+        result["provider_priority"] = fetch_manager._provider_priority
+
+    except Exception as e:
+        result["errors"].append(f"Failed to get fetch manager: {e}")
+
+    return result

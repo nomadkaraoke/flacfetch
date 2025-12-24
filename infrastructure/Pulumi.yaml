@@ -1,0 +1,7 @@
+name: flacfetch-infrastructure
+runtime:
+  name: python
+  options:
+    virtualenv: venv
+description: Infrastructure for flacfetch audio download service on Google Cloud Platform
+

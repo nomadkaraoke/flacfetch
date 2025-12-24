@@ -13,6 +13,8 @@ from ..models import (
     TorrentDeleteResponse,
     TorrentInfo,
     TorrentListResponse,
+    TorrentSummaryItem,
+    TorrentSummaryResponse,
 )
 from ..services import get_disk_manager
 
@@ -33,6 +35,59 @@ def _get_transmission_client():
         raise HTTPException(status_code=500, detail="transmission-rpc not installed")
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Cannot connect to Transmission: {e}")
+
+
+@router.get("/torrents/summary", response_model=TorrentSummaryResponse)
+async def torrent_summary() -> TorrentSummaryResponse:
+    """
+    Get a summary of torrents in Transmission (public, no auth required).
+
+    Shows basic info about each torrent for visibility into what's seeding.
+    """
+    client = _get_transmission_client()
+
+    try:
+        torrents = client.get_torrents()
+    except Exception as e:
+        logger.error(f"Failed to get torrent summary: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get torrent summary: {e}")
+
+    torrent_list = []
+    total_size = 0
+    total_uploaded = 0
+    seeding_count = 0
+    downloading_count = 0
+
+    for t in torrents:
+        status_str = str(t.status) if hasattr(t, 'status') else "unknown"
+        size = t.total_size if hasattr(t, 'total_size') else 0
+        uploaded = t.uploaded_ever if hasattr(t, 'uploaded_ever') else 0
+
+        total_size += size
+        total_uploaded += uploaded
+
+        if status_str in ['seeding', 'seed_pending']:
+            seeding_count += 1
+        elif status_str in ['downloading', 'download_pending']:
+            downloading_count += 1
+
+        torrent_list.append(TorrentSummaryItem(
+            id=t.id,
+            name=t.name,
+            status=status_str,
+            progress=t.progress if hasattr(t, 'progress') else 0,
+            size_mb=round(size / (1024 * 1024), 2),
+            ratio=t.ratio if hasattr(t, 'ratio') else 0,
+        ))
+
+    return TorrentSummaryResponse(
+        count=len(torrent_list),
+        seeding=seeding_count,
+        downloading=downloading_count,
+        total_size_mb=round(total_size / (1024 * 1024), 2),
+        total_uploaded_mb=round(total_uploaded / (1024 * 1024), 2),
+        torrents=torrent_list,
+    )
 
 
 @router.get("/torrents", response_model=TorrentListResponse)

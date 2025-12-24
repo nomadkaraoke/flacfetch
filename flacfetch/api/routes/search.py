@@ -3,12 +3,13 @@ Search endpoint for flacfetch HTTP API.
 """
 import logging
 import uuid
+from collections import Counter
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..auth import verify_api_key
-from ..models import SearchRequest, SearchResponse, SearchResultItem
+from ..models import ProviderSearchStats, SearchRequest, SearchResponse, SearchResultItem
 from ..services import get_download_manager
 
 logger = logging.getLogger(__name__)
@@ -91,11 +92,24 @@ async def search_audio(
             is_lossless=is_lossless,
         ))
 
+    # Build provider stats
+    provider_counts = Counter(r.provider for r in results)
+    configured_providers = [p.name for p in fetch_manager.providers]
+    provider_stats = [
+        ProviderSearchStats(
+            provider=provider,
+            results_count=provider_counts.get(provider, 0),
+            searched=True,
+        )
+        for provider in configured_providers
+    ]
+
     return SearchResponse(
         search_id=search_id,
         artist=request.artist,
         title=request.title,
         results=results,
         results_count=len(results),
+        provider_stats=provider_stats,
     )
 
