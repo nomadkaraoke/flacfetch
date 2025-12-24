@@ -208,7 +208,6 @@ class DownloadManager:
             # Add Spotify provider if configured
             spotify_client_id = os.environ.get("SPOTIPY_CLIENT_ID")
             spotify_client_secret = os.environ.get("SPOTIPY_CLIENT_SECRET")
-            spotify_redirect_uri = os.environ.get("SPOTIPY_REDIRECT_URI", "http://127.0.0.1:8888/callback")
             if spotify_client_id and spotify_client_secret:
                 try:
                     from flacfetch.downloaders.spotify import SpotifyDownloader
@@ -217,7 +216,6 @@ class DownloadManager:
                     spotify_provider = SpotifyProvider(
                         client_id=spotify_client_id,
                         client_secret=spotify_client_secret,
-                        redirect_uri=spotify_redirect_uri,
                     )
                     self._fetch_manager.add_provider(spotify_provider)
                     self._fetch_manager.register_downloader(
