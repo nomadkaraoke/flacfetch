@@ -34,7 +34,12 @@ class OPSProvider(Provider):
         self.base_url = base_url.rstrip('/')  # Remove trailing slash if present
         self.session = requests.Session()
         self.session.headers.update({"Authorization": self.api_key})
-        self.search_limit = 20 # Default limit
+        self.search_limit = 10  # Default limit (reduced for faster searches)
+
+        # Early termination settings
+        self.early_termination = True  # Stop fetching if we find an excellent result
+        self.early_termination_seeders = 50  # Seeder threshold for early termination
+        self.early_termination_release_types = {"Album", "Single", "EP"}  # Release types that qualify
 
         # Setup persistent cache
         self.cache_dir = Path.home() / ".flacfetch" / "cache" / "ops"
@@ -138,12 +143,31 @@ class OPSProvider(Provider):
             if len(ordered_group_ids) > self.search_limit:
                 logger.info(f"Limiting detailed fetch to top {self.search_limit} groups (out of {len(ordered_group_ids)} found)")
 
-            logger.info(f"Fetching details for {len(limited_group_ids)} groups to resolve file lists...")
+            logger.info(f"Fetching details for up to {len(limited_group_ids)} groups to resolve file lists...")
 
             releases = []
+            excellent_found = False
+            groups_fetched = 0
+
             for gid in limited_group_ids:
                 group_releases = self._fetch_group_details(gid, query.title)
                 releases.extend(group_releases)
+                groups_fetched += 1
+
+                # Check for early termination
+                if self.early_termination and not excellent_found:
+                    for r in group_releases:
+                        if (r.seeders and r.seeders >= self.early_termination_seeders and
+                            r.release_type in self.early_termination_release_types):
+                            excellent_found = True
+                            logger.info(f"Found excellent result: {r.artist} - {r.title} ({r.seeders} seeders, {r.release_type})")
+                            break
+
+                # If we found an excellent result, fetch a few more groups then stop
+                if excellent_found and groups_fetched >= min(5, len(limited_group_ids)):
+                    logger.info(f"Early termination: stopping after {groups_fetched} groups (found excellent result)")
+                    break
+
                 time.sleep(1.1)
 
             logger.info(f"Total matching tracks parsed from OPS: {len(releases)}")

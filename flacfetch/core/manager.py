@@ -104,7 +104,7 @@ class FetchManager:
 
         return ordered
 
-    def _sort_releases(self, releases: list[Release], query: TrackQuery = None) -> list[Release]:
+    def _sort_releases(self, releases: list[Release], query: Optional[TrackQuery] = None) -> list[Release]:
         """
         Sort releases by quality and relevance.
 
@@ -182,6 +182,20 @@ class FetchManager:
                 elif views > 10_000:
                     return 40
                 return 20
+
+            if r.source_name == "Spotify":
+                # Use popularity (stored in view_count, scaled by 10000)
+                popularity = (r.view_count or 0) // 10000  # Unscale
+                if popularity >= 80:
+                    return 95  # Very popular
+                elif popularity >= 60:
+                    return 80
+                elif popularity >= 40:
+                    return 60
+                elif popularity >= 20:
+                    return 40
+                return 20
+
             # Torrent seeders - scale logarithmically
             seeders = r.seeders or 0
             if seeders >= 100:

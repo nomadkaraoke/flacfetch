@@ -46,13 +46,16 @@ class RemoteClient:
             resp.raise_for_status()
             return resp.json()
 
-    def search(self, artist: str, title: str) -> Dict[str, Any]:
+    def search(self, artist: str, title: str, exhaustive: bool = False) -> Dict[str, Any]:
         """Search for audio."""
         with httpx.Client() as client:
+            payload = {"artist": artist, "title": title}
+            if exhaustive:
+                payload["exhaustive"] = True
             resp = client.post(
                 f"{self.base_url}/search",
                 headers=self._headers(),
-                json={"artist": artist, "title": title},
+                json=payload,
                 timeout=self.timeout,
             )
             if resp.status_code == 404:
@@ -343,6 +346,11 @@ Optional:
         action="store_true",
         help="Auto-select best quality without prompting"
     )
+    search_group.add_argument(
+        "-e", "--exhaustive",
+        action="store_true",
+        help="Disable early termination and search more groups (slower but comprehensive)"
+    )
 
     # Output options
     output_group = parser.add_argument_group("Output Options")
@@ -479,7 +487,7 @@ Optional:
     print(f"{Colors.BOLD}Server:{Colors.RESET}    {Colors.CYAN}{api_url}{Colors.RESET}\n")
 
     try:
-        search_result = client.search(artist, title)
+        search_result = client.search(artist, title, exhaustive=args.exhaustive)
     except Exception as e:
         print(f"\n{Colors.RED}✗ Search failed: {e}{Colors.RESET}")
         sys.exit(1)

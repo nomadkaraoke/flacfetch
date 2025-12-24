@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flacfetch"
-version = "0.8.2"
+version = "0.9.0"
 description = "Search and download high-quality audio from multiple sources"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<4.0"
 license = "MIT"
 authors = [
     {name = "Andrew Beveridge", email = "andrew@beveridge.uk"}
@@ -43,6 +43,9 @@ api = [
     "httpx>=0.25.0",
     "google-cloud-storage>=2.13.0",
 ]
+spotify = [
+    "spotipy>=2.25.1",  # CVE-2025-27154 fixed in 2.25.1
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-mock>=3.10.0",
@@ -53,9 +56,23 @@ dev = [
     "types-requests>=2.28.0",
 ]
 all = [
-    "flacfetch[api]",
-    "flacfetch[remote]",
-    "flacfetch[dev]",
+    # remote
+    "httpx>=0.25.0",
+    # api
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.0.0",
+    "google-cloud-storage>=2.13.0",
+    # spotify
+    "spotipy>=2.25.1",
+    # dev
+    "pytest>=7.0.0",
+    "pytest-mock>=3.10.0",
+    "pytest-cov>=4.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+    "types-requests>=2.28.0",
 ]
 
 [project.urls]

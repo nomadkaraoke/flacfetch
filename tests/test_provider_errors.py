@@ -215,8 +215,8 @@ class TestProviderErrorHandling:
     def test_provider_search_limit_default(self):
         """Test default search limit"""
         provider = REDProvider("key", base_url=MOCK_RED_URL)
-        # Default is 20
-        assert provider.search_limit == 20
+        # Default is 10 (reduced for faster searches)
+        assert provider.search_limit == 10
 
         provider.search_limit = 5
         assert provider.search_limit == 5

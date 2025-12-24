@@ -194,39 +194,39 @@ echo "Setting up persistent storage..."
 # Check if the persistent disk is attached (should be /dev/sdb)
 if [ -b /dev/sdb ]; then
     echo "Persistent disk found at /dev/sdb"
-    
+
     # Create mount point
     mkdir -p "$PERSISTENT_MOUNT"
-    
+
     # Check if disk is formatted
     if ! blkid /dev/sdb | grep -q 'TYPE="ext4"'; then
         echo "Formatting persistent disk..."
         mkfs.ext4 -F /dev/sdb
     fi
-    
+
     # Mount if not already mounted
     if ! mountpoint -q "$PERSISTENT_MOUNT"; then
         echo "Mounting persistent disk..."
         mount /dev/sdb "$PERSISTENT_MOUNT"
     fi
-    
+
     # Add to fstab if not already there
     UUID=$(blkid -s UUID -o value /dev/sdb)
     if ! grep -q "$UUID" /etc/fstab; then
         echo "UUID=$UUID $PERSISTENT_MOUNT ext4 defaults,nofail,discard 0 2" >> /etc/fstab
         echo "Added persistent disk to fstab"
     fi
-    
+
     # Create directory structure on persistent disk
     mkdir -p "$TRANSMISSION_DATA/downloads"
     mkdir -p "$TRANSMISSION_DATA/.incomplete"
     mkdir -p "$TRANSMISSION_DATA/config/torrents"
     mkdir -p "$TRANSMISSION_DATA/config/resume"
     chown -R debian-transmission:debian-transmission "$TRANSMISSION_DATA"
-    
+
     echo "Persistent disk mounted at $PERSISTENT_MOUNT"
     df -h "$PERSISTENT_MOUNT"
-    
+
     USE_PERSISTENT_DISK=true
 else
     echo "WARNING: No persistent disk found. Torrent data will be stored on boot disk."
@@ -269,7 +269,7 @@ if [ "$USE_PERSISTENT_DISK" = true ]; then
     "utp-enabled": true
 }
 SETTINGS
-    
+
     # Set up symlinks for torrent/resume data (transmission looks in config dir)
     mkdir -p "$TRANSMISSION_CONFIG_DIR"
     rm -rf "$TRANSMISSION_CONFIG_DIR/torrents" 2>/dev/null || true
@@ -277,7 +277,7 @@ SETTINGS
     ln -sf "$TRANSMISSION_DATA/config/torrents" "$TRANSMISSION_CONFIG_DIR/torrents"
     ln -sf "$TRANSMISSION_DATA/config/resume" "$TRANSMISSION_CONFIG_DIR/resume"
     chown -h debian-transmission:debian-transmission "$TRANSMISSION_CONFIG_DIR/torrents" "$TRANSMISSION_CONFIG_DIR/resume"
-    
+
     echo "Transmission configured to use persistent disk"
     echo "  Downloads: $TRANSMISSION_DATA/downloads"
     echo "  Torrents:  $TRANSMISSION_DATA/config/torrents"
@@ -307,7 +307,7 @@ else
     "utp-enabled": true
 }
 SETTINGS
-    
+
     mkdir -p /var/lib/transmission-daemon/downloads
     mkdir -p /var/lib/transmission-daemon/.incomplete
     mkdir -p "$TRANSMISSION_CONFIG_DIR/torrents"
@@ -341,14 +341,14 @@ cd /opt
 if [ -d "flacfetch" ]; then
     echo "Updating existing flacfetch installation..."
     cd flacfetch
-    
+
     # Stash any local changes (shouldn't be any)
     git stash 2>/dev/null || true
-    
+
     # Fetch and pull latest
     git fetch origin
     git reset --hard origin/main
-    
+
     # Activate venv and update
     source venv/bin/activate
     pip install -e ".[api]" --quiet
@@ -356,11 +356,11 @@ else
     echo "Fresh flacfetch installation..."
     git clone https://github.com/nomadkaraoke/flacfetch.git
     cd flacfetch
-    
+
     # Create virtual environment
     python3 -m venv venv
     source venv/bin/activate
-    
+
     # Install flacfetch with API dependencies
     pip install -e ".[api]"
 fi
