@@ -1,0 +1,7 @@
+# Virtual environment
+venv/
+
+# Pulumi
+*.pyc
+__pycache__/
+
