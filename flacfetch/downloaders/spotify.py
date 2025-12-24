@@ -172,6 +172,11 @@ class SpotifyDownloader(Downloader):
         # Start librespot with OAuth token
         logger.debug(f"Starting librespot: {self._librespot_path}")
 
+        # Use environment variable for OAuth token (safer than command-line arg
+        # which is visible in process listings)
+        librespot_env = os.environ.copy()
+        librespot_env["LIBRESPOT_ACCESS_TOKEN"] = access_token
+
         with open(pcm_path, "wb") as pcm_file, open(log_path, "w") as log_file:
             librespot_proc = subprocess.Popen(
                 [
@@ -180,10 +185,10 @@ class SpotifyDownloader(Downloader):
                     "--backend", "pipe",
                     "--bitrate", "320",
                     "--disable-discovery",
-                    "-k", access_token,
                 ],
                 stdout=pcm_file,
                 stderr=log_file,
+                env=librespot_env,
             )
 
             try:
@@ -326,8 +331,8 @@ class SpotifyDownloader(Downloader):
         # Timeout reached, but check if we got enough data
         if pcm_path.exists():
             final_size = pcm_path.stat().st_size
-            if final_size >= expected_size * 0.5:
-                logger.warning(f"Timeout but captured {final_size/expected_size*100:.0f}% of expected data")
+            if final_size >= expected_size * 0.7:
+                logger.warning(f"Download may be incomplete: timeout but captured {final_size/expected_size*100:.0f}% of expected data")
                 return
 
         raise SpotifyDownloadError("Download timeout")

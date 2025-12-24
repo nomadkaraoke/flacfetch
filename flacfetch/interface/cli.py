@@ -303,25 +303,110 @@ def print_releases(
         line = format_release_line(idx, release, target_artist, use_colors)
         output_func(line)
 
+
+def print_categorized_releases(
+    categorized,  # CategorizedResults from categorize.py
+    target_artist: Optional[str] = None,
+    use_colors: bool = True,
+    output_func: Callable[[str], None] = print,
+) -> List[Release]:
+    """
+    Print releases organized by category for cleaner display.
+
+    Args:
+        categorized: CategorizedResults from categorize_releases()
+        target_artist: Artist name for highlighting matches
+        use_colors: Whether to use ANSI color codes
+        output_func: Function to use for output (default: print)
+
+    Returns:
+        Flat list of displayed releases (for index-based selection)
+    """
+    C = Colors if use_colors else type('NoColors', (), {
+        attr: '' for attr in dir(Colors) if not attr.startswith('_')
+    })()
+
+    total_categories = len(categorized.categories)
+    output_func(f"\n{C.BOLD}Found {categorized.total_count} results across {total_categories} categories:{C.RESET}\n")
+
+    display_releases = []
+    global_idx = 1
+
+    for category in categorized.categories:
+        # Category header
+        cat_count = len(category.releases)
+        output_func(f"{C.CYAN}{C.BOLD}{category.name}{C.RESET} ({cat_count}):")
+
+        # Show releases up to max_display
+        for release in category.releases[:category.max_display]:
+            line = format_release_line(global_idx, release, target_artist, use_colors)
+            output_func(line)
+            display_releases.append(release)
+            global_idx += 1
+
+        # Show "and N more" if there are more
+        hidden = cat_count - category.max_display
+        if hidden > 0:
+            output_func(f"   {C.DIM}... and {hidden} more{C.RESET}")
+
+        output_func("")  # Blank line between categories
+
+    return display_releases
+
+
 class CLIHandler(InteractionHandler):
-    def __init__(self, target_artist: Optional[str] = None):
+    def __init__(self, target_artist: Optional[str] = None, use_categories: bool = True):
         self.target_artist = target_artist
+        self.use_categories = use_categories
 
     def select_release(self, releases: list[Release]) -> Optional[Release]:
-        # Use the shared display function
-        print_releases(releases, self.target_artist, use_colors=True)
+        from ..core.categorize import categorize_releases
+        from ..core.models import TrackQuery
 
-        while True:
-            choice = input(f"\n{Colors.BOLD}Select a release (1-{len(releases)}, 0 to cancel): {Colors.RESET}")
-            try:
-                idx = int(choice)
-                if idx == 0:
-                    return None
-                if 1 <= idx <= len(releases):
-                    return releases[idx - 1]
-                print(f"{Colors.RED}Invalid selection.{Colors.RESET}")
-            except ValueError:
-                print(f"{Colors.RED}Please enter a number.{Colors.RESET}")
+        # Create a query for categorization
+        query = TrackQuery(artist=self.target_artist or "", title="") if self.target_artist else None
+
+        # Categorize and display
+        if self.use_categories and len(releases) > 10:
+            categorized = categorize_releases(releases, query)
+            display_releases = print_categorized_releases(
+                categorized, self.target_artist, use_colors=True
+            )
+
+            while True:
+                prompt = f"{Colors.BOLD}Select (1-{len(display_releases)}), 'more' for full list, 0 to cancel: {Colors.RESET}"
+                choice = input(prompt)
+
+                if choice.lower() in ('more', 'm', 'all', 'a'):
+                    # Show full flat list
+                    print_releases(releases, self.target_artist, use_colors=True)
+                    display_releases = releases
+                    continue
+
+                try:
+                    idx = int(choice)
+                    if idx == 0:
+                        return None
+                    if 1 <= idx <= len(display_releases):
+                        return display_releases[idx - 1]
+                    print(f"{Colors.RED}Invalid selection. Enter 1-{len(display_releases)}, 'more', or 0.{Colors.RESET}")
+                except ValueError:
+                    print(f"{Colors.RED}Please enter a number or 'more'.{Colors.RESET}")
+        else:
+            # Use simple flat list for small result sets
+            print_releases(releases, self.target_artist, use_colors=True)
+
+            while True:
+                choice = input(f"\n{Colors.BOLD}Select a release (1-{len(releases)}, 0 to cancel): {Colors.RESET}")
+                try:
+                    idx = int(choice)
+                    if idx == 0:
+                        return None
+                    if 1 <= idx <= len(releases):
+                        return releases[idx - 1]
+                    print(f"{Colors.RED}Invalid selection.{Colors.RESET}")
+                except ValueError:
+                    print(f"{Colors.RED}Please enter a number.{Colors.RESET}")
 
 def main():
     # Custom formatter with wider width to prevent awkward wrapping
@@ -433,11 +518,16 @@ Spotify Setup (requires Premium account):
         help="Auto-select best quality without prompting"
     )
     search_group.add_argument(
+        "-e", "--exhaustive",
+        action="store_true",
+        help="Disable early termination and search more groups (slower but comprehensive)"
+    )
+    search_group.add_argument(
         "--limit",
         type=int,
-        default=20,
+        default=10,
         metavar="N",
-        help="Limit torrent tracker result groups (default: 20)"
+        help="Limit torrent tracker result groups (default: 10, use -e for 20)"
     )
 
     # Output options
@@ -540,16 +630,23 @@ Spotify Setup (requires Premium account):
     manager.add_provider(YoutubeProvider())
     manager.register_downloader("YouTube", YoutubeDownloader())
 
+    # Determine search limits and early termination
+    search_limit = args.limit
+    use_early_termination = not args.exhaustive
+    if args.exhaustive and args.limit == 10:  # Default wasn't changed
+        search_limit = 20  # Use higher limit for exhaustive mode
+
     # Register RED provider
     red_key = args.red_key or os.environ.get("RED_API_KEY")
     red_url = args.red_url or os.environ.get("RED_API_URL")
     if red_key and red_url:
         if artist:
             rp = REDProvider(api_key=red_key, base_url=red_url)
-            rp.search_limit = args.limit
+            rp.search_limit = search_limit
+            rp.early_termination = use_early_termination
             manager.add_provider(rp)
 
-            if TorrentDownloader:
+            if TorrentDownloader is not None:
                 try:
                     manager.register_downloader("RED", TorrentDownloader())
                 except ImportError:
@@ -566,10 +663,11 @@ Spotify Setup (requires Premium account):
     if ops_key and ops_url:
         if artist:
             ops = OPSProvider(api_key=ops_key, base_url=ops_url)
-            ops.search_limit = args.limit
+            ops.search_limit = search_limit
+            ops.early_termination = use_early_termination
             manager.add_provider(ops)
 
-            if TorrentDownloader:
+            if TorrentDownloader is not None:
                 try:
                     manager.register_downloader("OPS", TorrentDownloader())
                 except ImportError:
@@ -656,8 +754,25 @@ Spotify Setup (requires Premium account):
 
     selected = None
     if args.auto:
+        from ..core.categorize import is_excellent_match
+
         selected = manager.select_best(releases)
-        print(f"\n{Colors.BOLD}Auto-selected:{Colors.RESET} {selected.title} ({selected.quality})")
+
+        # Check if we have an excellent match for aggressive auto-selection
+        if selected and is_excellent_match(selected, q):
+            # Excellent match - just show brief info and proceed immediately
+            seeders_info = f", {selected.seeders} seeders" if selected.seeders else ""
+            print(f"\n{Colors.GREEN}✓ Auto-selected:{Colors.RESET} {Colors.BOLD}{selected.artist} - {selected.title}{Colors.RESET}")
+            print(f"   {Colors.DIM}[{selected.release_type}] {selected.quality}{seeders_info}{Colors.RESET}")
+        else:
+            # Not an excellent match - show top results so user can see what was chosen
+            print(f"\n{Colors.BOLD}Top results:{Colors.RESET}")
+            for idx, r in enumerate(releases[:5], 1):
+                line = format_release_line(idx, r, artist, use_colors=True)
+                print(line)
+            if len(releases) > 5:
+                print(f"   {Colors.DIM}... and {len(releases) - 5} more{Colors.RESET}")
+            print(f"\n{Colors.BOLD}Auto-selected:{Colors.RESET} #{1} - {selected.title} ({selected.quality})")
     else:
         selected = manager.select_interactive(releases, CLIHandler(artist))
 

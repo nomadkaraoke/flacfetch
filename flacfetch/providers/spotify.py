@@ -4,7 +4,7 @@ This module provides search functionality for Spotify using the official Web API
 via spotipy. Requires Spotify Premium for downloading (handled by downloader).
 
 Authentication: OAuth2 via spotipy (browser-based login, cached automatically)
-Quality: 320kbps OGG Vorbis (Premium) - converted to FLAC by downloader
+Quality: CD-quality FLAC output (44.1kHz/16-bit) via librespot capture
 """
 
 from typing import TYPE_CHECKING, Optional
@@ -191,6 +191,8 @@ class SpotifyProvider(Provider):
             quality = Quality(
                 format=AudioFormat.FLAC,  # Output format after conversion
                 bitrate=None,  # Lossless
+                bit_depth=16,
+                sample_rate=44100,
                 media=MediaSource.WEB,
             )
 
