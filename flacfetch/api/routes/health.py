@@ -134,6 +134,8 @@ def _check_providers() -> ProvidersHealth:
     red = bool(os.environ.get("RED_API_KEY")) and bool(os.environ.get("RED_API_URL"))
     # OPS requires both API key and URL
     ops = bool(os.environ.get("OPS_API_KEY")) and bool(os.environ.get("OPS_API_URL"))
+    # Spotify requires client ID and secret
+    spotify = bool(os.environ.get("SPOTIPY_CLIENT_ID")) and bool(os.environ.get("SPOTIPY_CLIENT_SECRET"))
 
     # YouTube is always available
     youtube = True
@@ -141,6 +143,7 @@ def _check_providers() -> ProvidersHealth:
     return ProvidersHealth(
         red=red,
         ops=ops,
+        spotify=spotify,
         youtube=youtube,
     )
 
@@ -160,6 +163,8 @@ async def debug_providers():
             "RED_API_URL": bool(os.environ.get("RED_API_URL")),
             "OPS_API_KEY": bool(os.environ.get("OPS_API_KEY")),
             "OPS_API_URL": bool(os.environ.get("OPS_API_URL")),
+            "SPOTIPY_CLIENT_ID": bool(os.environ.get("SPOTIPY_CLIENT_ID")),
+            "SPOTIPY_CLIENT_SECRET": bool(os.environ.get("SPOTIPY_CLIENT_SECRET")),
         },
         "providers": {},
         "errors": [],

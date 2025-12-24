@@ -208,6 +208,7 @@ class ProvidersHealth(BaseModel):
     """Provider availability status."""
     red: bool
     ops: bool
+    spotify: bool = False
     youtube: bool
 
 

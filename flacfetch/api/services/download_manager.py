@@ -205,9 +205,34 @@ class DownloadManager:
                 except ImportError as e:
                     logger.warning(f"Could not initialize OPS provider: {e}")
 
+            # Add Spotify provider if configured
+            spotify_client_id = os.environ.get("SPOTIPY_CLIENT_ID")
+            spotify_client_secret = os.environ.get("SPOTIPY_CLIENT_SECRET")
+            spotify_redirect_uri = os.environ.get("SPOTIPY_REDIRECT_URI", "http://127.0.0.1:8888/callback")
+            if spotify_client_id and spotify_client_secret:
+                try:
+                    from flacfetch.downloaders.spotify import SpotifyDownloader
+                    from flacfetch.providers.spotify import SpotifyProvider
+
+                    spotify_provider = SpotifyProvider(
+                        client_id=spotify_client_id,
+                        client_secret=spotify_client_secret,
+                        redirect_uri=spotify_redirect_uri,
+                    )
+                    self._fetch_manager.add_provider(spotify_provider)
+                    self._fetch_manager.register_downloader(
+                        "Spotify",
+                        SpotifyDownloader(provider=spotify_provider)
+                    )
+                    logger.info("Spotify provider initialized")
+                except ImportError as e:
+                    logger.warning(f"Could not initialize Spotify provider: {e}")
+                except Exception as e:
+                    logger.warning(f"Spotify provider initialization failed: {e}")
+
             # Set default provider priority
             available = [p.name for p in self._fetch_manager.providers]
-            priority = [n for n in ["RED", "OPS", "YouTube"] if n in available]
+            priority = [n for n in ["RED", "OPS", "Spotify", "YouTube"] if n in available]
             if priority:
                 self._fetch_manager.set_provider_priority(priority)
 
