@@ -185,6 +185,10 @@ class SpotifyDownloader(Downloader):
                     "--backend", "pipe",
                     "--bitrate", "320",
                     "--disable-discovery",
+                    # Volume settings for full-quality recording:
+                    "--initial-volume", "100",  # Start at max volume
+                    "--volume-ctrl", "fixed",  # No dynamic volume adjustments
+                    # Note: volume normalisation is disabled by default, no flag needed
                 ],
                 stdout=pcm_file,
                 stderr=log_file,

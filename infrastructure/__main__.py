@@ -132,6 +132,23 @@ ops_api_url_secret = secretmanager.Secret(
     ),
 )
 
+# Spotify secrets (for Spotify Premium audio capture)
+spotipy_client_id_secret = secretmanager.Secret(
+    "spotipy-client-id",
+    secret_id="spotipy-client-id",
+    replication=secretmanager.SecretReplicationArgs(
+        auto=secretmanager.SecretReplicationAutoArgs(),
+    ),
+)
+
+spotipy_client_secret_secret = secretmanager.Secret(
+    "spotipy-client-secret",
+    secret_id="spotipy-client-secret",
+    replication=secretmanager.SecretReplicationArgs(
+        auto=secretmanager.SecretReplicationAutoArgs(),
+    ),
+)
+
 # =============================================================================
 # Persistent Data Disk
 # =============================================================================
@@ -179,7 +196,22 @@ echo "========================================"
 # Install dependencies (idempotent)
 echo "Installing/updating system dependencies..."
 apt-get update
-apt-get install -y python3-pip python3-venv transmission-daemon ffmpeg git curl
+apt-get install -y python3-pip python3-venv transmission-daemon ffmpeg git curl cargo
+
+# =============================================================================
+# Install librespot (for Spotify audio capture)
+# =============================================================================
+echo "Installing/updating librespot..."
+if ! command -v librespot &> /dev/null; then
+    echo "Installing librespot via cargo (this may take a few minutes on first run)..."
+    cargo install librespot --locked
+    # Add cargo bin to PATH for this session
+    export PATH="$HOME/.cargo/bin:$PATH"
+    # Add to system profile for future sessions
+    echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> /etc/profile.d/cargo.sh
+else
+    echo "librespot already installed: $(librespot --version 2>&1 | head -1)"
+fi
 
 # =============================================================================
 # Persistent Disk Setup
@@ -351,7 +383,7 @@ if [ -d "flacfetch" ]; then
 
     # Activate venv and update
     source venv/bin/activate
-    pip install -e ".[api]" --quiet
+    pip install -e ".[api,spotify]" --quiet
 else
     echo "Fresh flacfetch installation..."
     git clone https://github.com/nomadkaraoke/flacfetch.git
@@ -361,8 +393,8 @@ else
     python3 -m venv venv
     source venv/bin/activate
 
-    # Install flacfetch with API dependencies
-    pip install -e ".[api]"
+    # Install flacfetch with API and Spotify dependencies
+    pip install -e ".[api,spotify]"
 fi
 
 # Get version
@@ -378,6 +410,9 @@ RED_API_KEY=$(gcloud secrets versions access latest --secret=red-api-key 2>/dev/
 RED_API_URL=$(gcloud secrets versions access latest --secret=red-api-url 2>/dev/null || echo "")
 OPS_API_KEY=$(gcloud secrets versions access latest --secret=ops-api-key 2>/dev/null || echo "")
 OPS_API_URL=$(gcloud secrets versions access latest --secret=ops-api-url 2>/dev/null || echo "")
+SPOTIPY_CLIENT_ID=$(gcloud secrets versions access latest --secret=spotipy-client-id 2>/dev/null || echo "")
+SPOTIPY_CLIENT_SECRET=$(gcloud secrets versions access latest --secret=spotipy-client-secret 2>/dev/null || echo "")
+SPOTIPY_REDIRECT_URI="http://127.0.0.1:8888/callback"
 
 # Get bucket name from project metadata
 GCS_BUCKET=$(gcloud compute project-info describe --format='value(commonInstanceMetadata.items.gcs-bucket)' 2>/dev/null || echo "")
@@ -414,6 +449,9 @@ Environment="RED_API_KEY=${RED_API_KEY}"
 Environment="RED_API_URL=${RED_API_URL}"
 Environment="OPS_API_KEY=${OPS_API_KEY}"
 Environment="OPS_API_URL=${OPS_API_URL}"
+Environment="SPOTIPY_CLIENT_ID=${SPOTIPY_CLIENT_ID}"
+Environment="SPOTIPY_CLIENT_SECRET=${SPOTIPY_CLIENT_SECRET}"
+Environment="SPOTIPY_REDIRECT_URI=${SPOTIPY_REDIRECT_URI}"
 Environment="GCS_BUCKET=${GCS_BUCKET}"
 Environment="FLACFETCH_KEEP_SEEDING=true"
 Environment="FLACFETCH_MIN_FREE_GB=5"
@@ -583,5 +621,7 @@ pulumi.export("secrets", {
     "red_api_url": red_api_url_secret.name,
     "ops_api_key": ops_api_key_secret.name,
     "ops_api_url": ops_api_url_secret.name,
+    "spotipy_client_id": spotipy_client_id_secret.name,
+    "spotipy_client_secret": spotipy_client_secret_secret.name,
 })
 
