@@ -21,7 +21,7 @@ try:
 except ImportError:
     httpx = None
 
-from .cli import Colors, print_releases
+from .cli import Colors, format_release_line, print_categorized_releases, print_releases
 
 
 class RemoteClient:
@@ -515,32 +515,119 @@ Optional:
     # Convert results for display
     display_results = [convert_api_result_to_display(r) for r in results]
 
-    # Display results
+    # Display results and select
     use_colors = not args.no_color
-    print_releases(display_results, target_artist=artist, use_colors=use_colors)
-
-    # Select result
     selected_idx = 0
+
     if args.auto:
         # Auto-select first result (API already returns sorted by quality)
         selected_idx = 0
         selected = display_results[0]
-        print(f"\n{Colors.BOLD}Auto-selected:{Colors.RESET} {selected.get('artist', artist)} - {selected.get('title', title)}")
+
+        # Check for excellent match (lossless, matching artist, good seeders)
+        is_excellent = (
+            selected.get("is_lossless", False) and
+            selected.get("seeders", 0) >= 50 and
+            selected.get("release_type") in ("Album", "Single", "EP")
+        )
+
+        if is_excellent:
+            # Excellent match - brief output and proceed
+            seeders_info = f", {selected.get('seeders')} seeders" if selected.get('seeders') else ""
+            print(f"\n{Colors.GREEN}✓ Auto-selected:{Colors.RESET} {Colors.BOLD}{selected.get('artist', artist)} - {selected.get('title', title)}{Colors.RESET}")
+            print(f"   {Colors.DIM}[{selected.get('release_type')}] {selected.get('quality_str', '')}{seeders_info}{Colors.RESET}")
+        else:
+            # Show top results so user can see what was chosen
+            print(f"\n{Colors.BOLD}Top results:{Colors.RESET}")
+            for idx, r in enumerate(display_results[:5], 1):
+                line = format_release_line(idx, r, artist, use_colors=use_colors)
+                print(line)
+            if len(display_results) > 5:
+                print(f"   {Colors.DIM}... and {len(display_results) - 5} more{Colors.RESET}")
+            print(f"\n{Colors.BOLD}Auto-selected:{Colors.RESET} #{1} - {selected.get('title', title)} ({selected.get('quality_str', '')})")
     else:
-        while True:
-            choice = input(f"\n{Colors.BOLD}Select a release (1-{len(results)}, 0 to cancel): {Colors.RESET}")
-            try:
-                idx = int(choice)
-                if idx == 0:
-                    print(f"\n{Colors.YELLOW}Cancelled.{Colors.RESET}")
-                    sys.exit(0)
-                if 1 <= idx <= len(results):
-                    selected_idx = idx - 1
-                    selected = display_results[selected_idx]
+        # Interactive mode - use categorized display for large result sets
+        if len(display_results) > 10:
+            from ..core.categorize import categorize_releases
+            from ..core.models import Release, TrackQuery
+
+            # Convert dicts back to Release objects for categorization
+            release_objects = []
+            for d in display_results:
+                try:
+                    release_objects.append(Release.from_dict(d))
+                except Exception:
+                    # If conversion fails, skip categorization
+                    release_objects = []
                     break
-                print(f"{Colors.RED}Invalid selection.{Colors.RESET}")
-            except ValueError:
-                print(f"{Colors.RED}Please enter a number.{Colors.RESET}")
+
+            if release_objects:
+                query = TrackQuery(artist=artist, title=title)
+                categorized = categorize_releases(release_objects, query)
+                cat_display = print_categorized_releases(categorized, target_artist=artist, use_colors=use_colors)
+
+                while True:
+                    prompt = f"{Colors.BOLD}Select (1-{len(cat_display)}), 'more' for full list, 0 to cancel: {Colors.RESET}"
+                    choice = input(prompt)
+
+                    if choice.lower() in ('more', 'm', 'all', 'a'):
+                        # Show full flat list
+                        print_releases(display_results, target_artist=artist, use_colors=use_colors)
+                        cat_display = release_objects  # Switch to full list
+                        continue
+
+                    try:
+                        idx = int(choice)
+                        if idx == 0:
+                            print(f"\n{Colors.YELLOW}Cancelled.{Colors.RESET}")
+                            sys.exit(0)
+                        if 1 <= idx <= len(cat_display):
+                            # Find the index in original results
+                            selected_release = cat_display[idx - 1]
+                            # Find matching result in display_results by download_url
+                            for i, r in enumerate(display_results):
+                                if r.get('download_url') == selected_release.download_url:
+                                    selected_idx = i
+                                    break
+                            selected = display_results[selected_idx]
+                            break
+                        print(f"{Colors.RED}Invalid selection. Enter 1-{len(cat_display)}, 'more', or 0.{Colors.RESET}")
+                    except ValueError:
+                        print(f"{Colors.RED}Please enter a number or 'more'.{Colors.RESET}")
+            else:
+                # Fallback to flat list
+                print_releases(display_results, target_artist=artist, use_colors=use_colors)
+                while True:
+                    choice = input(f"\n{Colors.BOLD}Select a release (1-{len(results)}, 0 to cancel): {Colors.RESET}")
+                    try:
+                        idx = int(choice)
+                        if idx == 0:
+                            print(f"\n{Colors.YELLOW}Cancelled.{Colors.RESET}")
+                            sys.exit(0)
+                        if 1 <= idx <= len(results):
+                            selected_idx = idx - 1
+                            selected = display_results[selected_idx]
+                            break
+                        print(f"{Colors.RED}Invalid selection.{Colors.RESET}")
+                    except ValueError:
+                        print(f"{Colors.RED}Please enter a number.{Colors.RESET}")
+        else:
+            # Simple flat list for small results
+            print_releases(display_results, target_artist=artist, use_colors=use_colors)
+            while True:
+                choice = input(f"\n{Colors.BOLD}Select a release (1-{len(results)}, 0 to cancel): {Colors.RESET}")
+                try:
+                    idx = int(choice)
+                    if idx == 0:
+                        print(f"\n{Colors.YELLOW}Cancelled.{Colors.RESET}")
+                        sys.exit(0)
+                    if 1 <= idx <= len(results):
+                        selected_idx = idx - 1
+                        selected = display_results[selected_idx]
+                        break
+                    print(f"{Colors.RED}Invalid selection.{Colors.RESET}")
+                except ValueError:
+                    print(f"{Colors.RED}Please enter a number.{Colors.RESET}")
 
     # Determine output filename
     output_filename = None

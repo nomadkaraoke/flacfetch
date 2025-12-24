@@ -149,7 +149,15 @@ class REDProvider(Provider):
             excellent_found = False
             groups_fetched = 0
 
+            # Rate limit: 10 requests per 10 seconds for API key auth
+            # We already made 1 request (browse), so we need to pace the torrentgroup calls
+            # Sleep BEFORE each torrentgroup call to ensure we don't exceed the limit
+
             for gid in limited_group_ids:
+                # Sleep BEFORE the request to ensure proper spacing from previous request
+                # This ensures we never exceed 10 requests in any 10-second window
+                time.sleep(1.1)
+
                 group_releases = self._fetch_group_details(gid, query.title)
                 releases.extend(group_releases)
                 groups_fetched += 1
@@ -167,8 +175,6 @@ class REDProvider(Provider):
                 if excellent_found and groups_fetched >= min(5, len(limited_group_ids)):
                     logger.info(f"Early termination: stopping after {groups_fetched} groups (found excellent result)")
                     break
-
-                time.sleep(1.1)
 
             logger.info(f"Total matching tracks parsed from RED: {len(releases)}")
             return releases

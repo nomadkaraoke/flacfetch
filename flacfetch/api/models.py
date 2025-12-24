@@ -20,6 +20,7 @@ class SearchRequest(BaseModel):
     """Request to search for audio."""
     artist: str = Field(..., description="Artist name to search for")
     title: str = Field(..., description="Track title to search for")
+    exhaustive: bool = Field(False, description="Disable early termination for comprehensive search (slower)")
 
 
 class SearchResultItem(BaseModel):
