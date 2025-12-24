@@ -28,11 +28,24 @@ async def search_audio(
     Results are sorted by quality with lossless sources prioritized.
 
     The search_id in the response can be used with POST /download to download a result.
+
+    Set `exhaustive=true` for a comprehensive search that disables early termination
+    and searches more groups (slower but returns more results).
     """
     manager = get_download_manager()
     fetch_manager = manager._get_fetch_manager()
 
-    logger.info(f"Searching for: {request.artist} - {request.title}")
+    logger.info(f"Searching for: {request.artist} - {request.title} (exhaustive={request.exhaustive})")
+
+    # Configure providers based on exhaustive flag
+    for provider in fetch_manager.providers:
+        # Check if provider has early termination settings (RED/OPS)
+        if hasattr(provider, 'early_termination'):
+            provider.early_termination = not request.exhaustive
+            if request.exhaustive:
+                # Also increase search limit for exhaustive mode
+                if hasattr(provider, 'search_limit'):
+                    provider.search_limit = 20
 
     try:
         from flacfetch.core.models import TrackQuery
