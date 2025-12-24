@@ -43,6 +43,11 @@ api = [
     "httpx>=0.25.0",
     "google-cloud-storage>=2.13.0",
 ]
+spotify = [
+    # Note: zotify must be installed manually from GitHub:
+    # pip install git+https://github.com/zotify-dev/zotify.git
+    # The spotify extra is a marker for documentation purposes.
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-mock>=3.10.0",
@@ -55,6 +60,7 @@ dev = [
 all = [
     "flacfetch[api]",
     "flacfetch[remote]",
+    "flacfetch[spotify]",
     "flacfetch[dev]",
 ]
 

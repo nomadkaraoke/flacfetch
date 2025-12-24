@@ -12,11 +12,13 @@
 
 -   **Precise Track Search**:
     -   **Private Music Trackers**: RED and OPS (API integration). Uses advanced file list filtering to find specific songs within album torrents, downloading only the required track.
+    -   **Streaming Services**: Spotify (via `zotify`, requires Premium account) - 320kbps OGG Vorbis.
     -   **Public Sources**: YouTube (via `yt-dlp`).
 -   **Smart Prioritization**:
-    -   **Official Sources**: Automatically prioritizes "Topic" channels and "Official Audio" on YouTube.
+    -   **Official Sources**: Automatically prioritizes "Topic" channels and "Official Audio" on YouTube. Spotify results are always from official sources.
     -   **Quality Heuristics**: 
         -   **Trackers (RED/OPS)**: Prioritizes Lossless (FLAC) and healthy torrents (Seeders). Matches filename exactly to your query.
+        -   **Spotify**: High-quality 320kbps OGG Vorbis, single transcode from masters. Prioritizes by popularity.
         -   **YouTube**: Prioritizes newer uploads (Opus codec) over legacy uploads (AAC). Color-codes upload years to help you spot modern, high-quality streams (Green: 2020+, Yellow: 2015-2019, Red: <2015).
 -   **Flexible Interaction**:
     -   **Interactive Mode**: Present search results to the user for manual selection with rich, color-coded metadata (Seeders, Views, Duration).
@@ -123,25 +125,64 @@ export OPS_API_URL="your_tracker_url_here"
 flacfetch "..." --ops-key "your_key" --ops-url "your_url"
 ```
 
-**Provider Priority**
+**Spotify Configuration** (Optional - requires Premium account)
 
-When multiple providers are configured, flacfetch searches them in priority order. By default: **RED > OPS > YouTube**
-
-This means RED is searched first, and only if it returns no results will OPS be searched, then YouTube. This is useful for conserving buffer on trackers with stricter limits.
+Spotify provides high-quality 320kbps OGG Vorbis streams, single-encoded from masters (often better than YouTube's re-encoded content).
 
 ```bash
-# Use default priority (RED > OPS > YouTube)
+# 1. Install zotify from GitHub (not on PyPI)
+pip install git+https://github.com/zotify-dev/zotify.git
+
+# 2. Generate credentials (one-time setup - will prompt for Spotify login)
+mkdir -p ~/.flacfetch
+zotify --credentials-location ~/.flacfetch/spotify_credentials.json --save-credentials true -s "test"
+# Enter your Spotify username/email and password when prompted
+
+# ⚠️  NOTE: Spotify's recent security changes may cause authentication failures
+# with newer accounts. If you get "BadCredentials" errors, this feature may not
+# work with your account. See troubleshooting section below.
+
+# 4. flacfetch will now auto-detect Spotify and enable it
+flacfetch "Artist" "Title"
+
+# Or specify credentials explicitly
+flacfetch "Artist" "Title" --spotify-creds /path/to/credentials.json
+
+# Disable Spotify if needed
+flacfetch "Artist" "Title" --no-spotify
+```
+
+**Spotify Troubleshooting**
+
+If you get `BadCredentials` or `SpotifyAuthenticationException` errors:
+
+1. **Account Security**: Spotify's recent security changes (invisible 2FA) break librespot-based tools for many accounts. Unfortunately, there's no reliable workaround.
+
+2. **Try your actual username**: Your Spotify username (found at spotify.com/account) may differ from your email. Try the random string username like `31abc123...`.
+
+3. **Alternative accounts**: Older Spotify accounts or those created without social login may work better.
+
+4. **Known limitation**: This feature is experimental and may not work with all Spotify accounts due to Spotify's evolving security measures.
+
+**Provider Priority**
+
+When multiple providers are configured, flacfetch searches them in priority order. By default: **RED > OPS > Spotify > YouTube**
+
+This means RED is searched first, and only if it returns no results will OPS be searched, then Spotify, then YouTube. This prioritizes lossless sources first, then high-quality streaming.
+
+```bash
+# Use default priority (RED > OPS > Spotify > YouTube)
 export RED_API_KEY="..."
 export RED_API_URL="..."
 export OPS_API_KEY="..."
 export OPS_API_URL="..."
 flacfetch "Artist" "Title" --auto
 
-# Custom priority
-flacfetch "Artist" "Title" --provider-priority "OPS,RED,YouTube"
+# Custom priority (e.g., prefer Spotify over trackers)
+flacfetch "Artist" "Title" --provider-priority "Spotify,RED,OPS,YouTube"
 
 # Or via environment variable
-export FLACFETCH_PROVIDER_PRIORITY="OPS,RED,YouTube"
+export FLACFETCH_PROVIDER_PRIORITY="OPS,RED,Spotify,YouTube"
 flacfetch "Artist" "Title" --auto
 
 # Disable fallback (only search highest priority provider)
@@ -157,10 +198,12 @@ from flacfetch.core.manager import FetchManager
 from flacfetch.core.models import TrackQuery
 from flacfetch.providers.red import REDProvider
 from flacfetch.providers.ops import OPSProvider
+from flacfetch.providers.spotify import SpotifyProvider  # Optional
 
 manager = FetchManager()
 manager.add_provider(REDProvider(api_key="...", base_url="..."))
 manager.add_provider(OPSProvider(api_key="...", base_url="..."))
+manager.add_provider(SpotifyProvider(credentials_path="~/.flacfetch/spotify_credentials.json"))  # Optional
 
 # Search for a specific track
 results = manager.search(TrackQuery(artist="Seether", title="Tonight"))

@@ -2,6 +2,7 @@ import argparse
 import os
 import re
 import sys
+from pathlib import Path
 from typing import Any, Callable, List, Optional, Union
 
 from ..core.interfaces import InteractionHandler
@@ -17,6 +18,15 @@ try:
     from ..downloaders.torrent import TorrentDownloader
 except ImportError:
     TorrentDownloader = None
+
+try:
+    from ..downloaders.spotify import SpotifyDownloader
+    from ..providers.spotify import SpotifyProvider
+    SPOTIFY_AVAILABLE = True
+except ImportError:
+    SpotifyProvider = None
+    SpotifyDownloader = None
+    SPOTIFY_AVAILABLE = False
 
 
 def serve_command(args):
@@ -141,6 +151,18 @@ def format_release_line(
         subject_str = f"{color}{subject}{C.RESET}" if subject else "Unknown"
         title_str = f"{C.BOLD}{title}{C.RESET}"
         main_info = f"{subject_str}: {title_str}"
+    elif source_name == "Spotify":
+        # Spotify: Artist is always "official", show track name prominently
+        subject = artist
+        color = C.GREEN  # Spotify is always "official" source
+        subject_str = f"{color}{subject}{C.RESET}" if subject else "Unknown"
+        # Track name is in target_file, album name is in title
+        track_name = target_file or title
+        title_str = f"{C.BOLD}{track_name}{C.RESET}"
+        main_info = f"{subject_str} - {title_str}"
+        # Show album name if different from track
+        if title and title != track_name:
+            main_info += f" ({C.DIM}{title}{C.RESET})"
     else:
         subject = artist
         color = C.ORANGE
@@ -176,6 +198,14 @@ def format_release_line(
             elif "googlevideo.com" in short_url:
                 short_url = "Stream"
             meta_parts.append(short_url)
+    elif source_name == "Spotify":
+        # Spotify: Show duration, year, and release type
+        if formatted_duration:
+            meta_parts.append(formatted_duration)
+        if release_type:
+            meta_parts.append(f"{C.MAGENTA}{release_type}{C.RESET}")
+        if year:
+            meta_parts.append(f"{C.YELLOW}{year}{C.RESET}")
     else:
         if release_type:
             meta_parts.append(f"{C.MAGENTA}{release_type}{C.RESET}")
@@ -191,7 +221,10 @@ def format_release_line(
 
     # Quality
     qual_str = ""
-    if source_name != "YouTube":
+    if source_name == "Spotify":
+        # Spotify: Show quality simply (VORBIS 320kbps)
+        qual_str = f" ({C.GREEN}{quality_str}{C.RESET})"
+    elif source_name != "YouTube":
         qual_text = quality_str
         if qual_text.endswith(media_name):
             qual_text = qual_text[:-len(media_name)].strip()
@@ -200,7 +233,7 @@ def format_release_line(
         else:
             qual_str = f" ({C.GREEN}{qual_text}{C.RESET})"
 
-    # Stats (Size, Seeders/Views)
+    # Stats (Size, Seeders/Views/Popularity)
     stats_parts = []
     if formatted_size and formatted_size != "?":
         stats_parts.append(formatted_size)
@@ -214,7 +247,8 @@ def format_release_line(
             s_color = C.RED
         stats_parts.append(f"Seeders: {s_color}{seeders}{C.RESET}")
 
-    if view_count is not None:
+    if view_count is not None and source_name == "YouTube":
+        # Only show views for YouTube (Spotify uses view_count for popularity internally)
         if view_count > 1_000_000:
             v_color = C.GREEN
         elif view_count >= 10_000:
@@ -222,6 +256,16 @@ def format_release_line(
         else:
             v_color = C.RED
         stats_parts.append(f"Views: {v_color}{formatted_views}{C.RESET}")
+    elif view_count is not None and source_name == "Spotify":
+        # Show popularity for Spotify (stored scaled in view_count)
+        popularity = view_count // 10000  # Unscale
+        if popularity >= 70:
+            p_color = C.GREEN
+        elif popularity >= 40:
+            p_color = C.YELLOW
+        else:
+            p_color = C.DIM
+        stats_parts.append(f"Pop: {p_color}{popularity}{C.RESET}")
 
     stats_str = f" - {', '.join(stats_parts)}" if stats_parts else ""
 
@@ -347,9 +391,15 @@ Environment Variables:
   RED_API_URL                  Base URL for RED API (required if using RED)
   OPS_API_KEY                  API key for OPS (lossless FLAC source)
   OPS_API_URL                  Base URL for OPS API (required if using OPS)
-  FLACFETCH_PROVIDER_PRIORITY  Provider priority (e.g. 'RED,OPS,YouTube')
+  SPOTIFY_CREDENTIALS_PATH     Path to Spotify credentials.json (librespot-auth)
+  FLACFETCH_PROVIDER_PRIORITY  Provider priority (e.g. 'RED,OPS,Spotify,YouTube')
   FLACFETCH_API_KEY            API key for HTTP API authentication (serve mode)
   FLACFETCH_API_PORT           HTTP API port (serve mode, default: 8080)
+
+Spotify Setup (requires Premium account):
+  1. Install zotify: pip install git+https://github.com/zotify-dev/zotify.git
+  2. Generate credentials: zotify --credentials-location ~/.flacfetch/spotify_credentials.json --save-credentials true -s "test"
+  3. Spotify will auto-enable when credentials are found
         """.strip(),
         formatter_class=WideHelpFormatter
     )
@@ -429,9 +479,19 @@ Environment Variables:
         help="OPS API base URL (or use OPS_API_URL env var)"
     )
     provider_group.add_argument(
+        "--spotify-creds",
+        metavar="PATH",
+        help="Path to Spotify credentials.json (or use SPOTIFY_CREDENTIALS_PATH env var)"
+    )
+    provider_group.add_argument(
+        "--no-spotify",
+        action="store_true",
+        help="Disable Spotify provider even if credentials exist"
+    )
+    provider_group.add_argument(
         "--provider-priority",
         metavar="NAMES",
-        help="Provider priority (comma-separated, e.g. 'RED,OPS,YouTube')"
+        help="Provider priority (comma-separated, e.g. 'RED,OPS,Spotify,YouTube')"
     )
     provider_group.add_argument(
         "--no-fallback",
@@ -522,6 +582,37 @@ Environment Variables:
     elif ops_key and not ops_url:
         print(f"{Colors.YELLOW}Warning: OPS_API_KEY set but OPS_API_URL not set. OPS provider disabled.{Colors.RESET}")
 
+    # Register Spotify provider
+    if not args.no_spotify and SPOTIFY_AVAILABLE:
+        spotify_creds = args.spotify_creds or os.environ.get("SPOTIFY_CREDENTIALS_PATH")
+
+        # Auto-detect credentials in default locations if not specified
+        if not spotify_creds:
+            default_paths = [
+                Path.home() / ".flacfetch" / "spotify_credentials.json",
+                Path.home() / ".config" / "zotify" / "credentials.json",
+                Path.home() / ".zotify" / "credentials.json",
+            ]
+            for path in default_paths:
+                if path.exists():
+                    spotify_creds = str(path)
+                    break
+
+        if spotify_creds and Path(spotify_creds).exists():
+            try:
+                sp = SpotifyProvider(credentials_path=spotify_creds)
+                manager.add_provider(sp)
+                manager.register_downloader("Spotify", SpotifyDownloader(credentials_path=spotify_creds))
+                if args.verbose:
+                    print(f"Info: Spotify provider enabled (credentials: {spotify_creds})")
+            except Exception as e:
+                if args.verbose:
+                    print(f"{Colors.YELLOW}Warning: Could not initialize Spotify provider: {e}{Colors.RESET}")
+        elif args.verbose and spotify_creds:
+            print(f"{Colors.YELLOW}Warning: Spotify credentials not found at {spotify_creds}{Colors.RESET}")
+    elif args.no_spotify and args.verbose:
+        print("Info: Spotify provider disabled by --no-spotify flag.")
+
     if not manager.providers:
         print(f"\n{Colors.RED}✗ Error: No providers configured{Colors.RESET}")
         print(f"\n{Colors.BOLD}Tip:{Colors.RESET} Set RED_API_KEY + RED_API_URL or OPS_API_KEY + OPS_API_URL environment variables to enable lossless FLAC downloads.")
@@ -533,10 +624,10 @@ Environment Variables:
         priority_list = [p.strip() for p in priority_str.split(",")]
         manager.set_provider_priority(priority_list)
     else:
-        # Default priority: RED > OPS > YouTube
+        # Default priority: RED > OPS > Spotify > YouTube
         available_providers = [p.name for p in manager.providers]
         default_priority = []
-        for name in ["RED", "OPS", "YouTube"]:
+        for name in ["RED", "OPS", "Spotify", "YouTube"]:
             if name in available_providers:
                 default_priority.append(name)
         if default_priority:

@@ -9,6 +9,7 @@ class AudioFormat(Enum):
     AAC = auto()
     WAV = auto()
     OPUS = auto()
+    VORBIS = auto()  # OGG Vorbis - used by Spotify (320kbps)
     OTHER = auto()
 
 class MediaSource(Enum):
