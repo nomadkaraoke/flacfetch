@@ -164,12 +164,36 @@ class CleanupResponse(BaseModel):
 # Health Models
 # =============================================================================
 
+class TorrentSummaryItem(BaseModel):
+    """Brief torrent info for health/summary endpoints."""
+    id: int
+    name: str
+    status: str
+    progress: float
+    size_mb: float
+    ratio: float
+
+
 class TransmissionHealth(BaseModel):
     """Transmission daemon health status."""
     available: bool
     version: Optional[str] = None
     active_torrents: int = 0
+    seeding_torrents: int = 0
+    total_size_mb: float = 0.0
+    total_uploaded_mb: float = 0.0
+    torrents: Optional[List[TorrentSummaryItem]] = None
     error: Optional[str] = None
+
+
+class TorrentSummaryResponse(BaseModel):
+    """Public torrent summary (no auth required)."""
+    count: int
+    seeding: int
+    downloading: int
+    total_size_mb: float
+    total_uploaded_mb: float
+    torrents: List[TorrentSummaryItem]
 
 
 class DiskHealth(BaseModel):

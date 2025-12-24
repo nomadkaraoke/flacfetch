@@ -11,6 +11,7 @@ from ..models import (
     DiskHealth,
     HealthResponse,
     ProvidersHealth,
+    TorrentSummaryItem,
     TransmissionHealth,
 )
 from ..services import get_disk_manager
@@ -80,10 +81,40 @@ def _check_transmission() -> TransmissionHealth:
         session = client.get_session()
         torrents = client.get_torrents()
 
+        # Build summary list
+        torrent_list = []
+        seeding_count = 0
+        total_size = 0
+        total_uploaded = 0
+
+        for t in torrents:
+            status_str = str(t.status) if hasattr(t, 'status') else "unknown"
+            size = t.total_size if hasattr(t, 'total_size') else 0
+            uploaded = t.uploaded_ever if hasattr(t, 'uploaded_ever') else 0
+
+            total_size += size
+            total_uploaded += uploaded
+
+            if status_str in ['seeding', 'seed_pending']:
+                seeding_count += 1
+
+            torrent_list.append(TorrentSummaryItem(
+                id=t.id,
+                name=t.name,
+                status=status_str,
+                progress=t.progress if hasattr(t, 'progress') else 0,
+                size_mb=round(size / (1024 * 1024), 2),
+                ratio=t.ratio if hasattr(t, 'ratio') else 0,
+            ))
+
         return TransmissionHealth(
             available=True,
             version=session.version if hasattr(session, 'version') else None,
             active_torrents=len(torrents),
+            seeding_torrents=seeding_count,
+            total_size_mb=round(total_size / (1024 * 1024), 2),
+            total_uploaded_mb=round(total_uploaded / (1024 * 1024), 2),
+            torrents=torrent_list,
         )
     except ImportError:
         return TransmissionHealth(
