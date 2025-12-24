@@ -1,110 +1,111 @@
 """Spotify downloader for flacfetch.
 
-This module provides download functionality for Spotify tracks using the
-librespot protocol via zotify. Downloads are saved as OGG Vorbis at 320kbps.
+This module provides download functionality for Spotify tracks using:
+- librespot binary (Rust) with pipe backend for audio capture
+- Spotify Web API (via spotipy) for playback control
+- ffmpeg for PCM to FLAC conversion
+
+Output: FLAC at 44.1kHz/16-bit (CD quality)
 """
 
 import os
 import re
+import shutil
+import signal
 import subprocess
+import time
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from ..core.interfaces import Downloader
 from ..core.log import get_logger
 from ..core.models import Release
 
+if TYPE_CHECKING:
+    import spotipy
+
+    from ..providers.spotify import SpotifyProvider
+
 logger = get_logger("SpotifyDownloader")
+
+# librespot configuration
+LIBRESPOT_DEVICE_NAME = "flacfetch-capture"
+SAMPLE_RATE = 44100
+CHANNELS = 2
+BIT_DEPTH = 16
+
+
+class SpotifyDownloadError(Exception):
+    """Raised when Spotify download fails."""
+
+    pass
+
+
+class LibrespotNotFoundError(SpotifyDownloadError):
+    """Raised when librespot binary is not found."""
+
+    pass
+
+
+def find_librespot() -> Optional[str]:
+    """Find librespot binary in common locations.
+
+    Returns:
+        Path to librespot binary, or None if not found
+    """
+    locations = [
+        shutil.which("librespot"),
+        "/opt/homebrew/bin/librespot",
+        "/usr/local/bin/librespot",
+        os.path.expanduser("~/.cargo/bin/librespot"),
+    ]
+    for loc in locations:
+        if loc and os.path.isfile(loc):
+            return loc
+    return None
 
 
 class SpotifyDownloader(Downloader):
-    """Downloader for Spotify tracks using zotify/librespot.
+    """Downloader for Spotify tracks using librespot + Web API.
 
-    Downloads the encrypted stream from Spotify and decrypts it
-    using the librespot protocol. Output is OGG Vorbis at 320kbps.
+    Downloads work by:
+    1. Starting librespot with OAuth token and pipe backend
+    2. Using Web API to trigger playback on the librespot device
+    3. Capturing raw PCM audio from the pipe
+    4. Converting PCM to FLAC with ffmpeg
+
+    Requires:
+    - librespot binary (brew install librespot or cargo install librespot)
+    - ffmpeg for conversion
+    - Valid OAuth token from SpotifyProvider
     """
 
-    def __init__(
-        self,
-        credentials_path: Optional[str] = None,
-        output_format: str = "ogg",
-    ):
+    def __init__(self, provider: Optional["SpotifyProvider"] = None):
         """Initialize Spotify downloader.
 
         Args:
-            credentials_path: Path to Spotify credentials.json
-            output_format: Output format - 'ogg' (native, default)
+            provider: SpotifyProvider instance for OAuth token and Web API access.
+                     Required for downloading.
         """
-        self.credentials_path = self._resolve_credentials_path(credentials_path)
-        self.output_format = output_format.lower()
-        self._initialized = False
+        self._provider = provider
+        self._librespot_path = find_librespot()
 
-    def _resolve_credentials_path(self, provided_path: Optional[str]) -> Path:
-        """Resolve credentials file path with fallback locations."""
-        if provided_path:
-            path = Path(provided_path).expanduser()
-            if path.exists():
-                return path
-            return Path(provided_path)
-
-        env_path = os.environ.get("SPOTIFY_CREDENTIALS_PATH")
-        if env_path:
-            path = Path(env_path).expanduser()
-            if path.exists():
-                return path
-
-        search_paths = [
-            Path.home() / ".flacfetch" / "spotify_credentials.json",
-            Path.home() / ".config" / "zotify" / "credentials.json",
-            Path.home() / ".zotify" / "credentials.json",
-            Path.home() / "Library" / "Application Support" / "Zotify" / "credentials.json",
-        ]
-
-        for path in search_paths:
-            if path.exists():
-                return path
-
-        return search_paths[0]
-
-    def _init_zotify(self) -> bool:
-        """Initialize zotify with credentials."""
-        if self._initialized:
-            return True
-
-        if not self.credentials_path.exists():
-            raise FileNotFoundError(
-                f"Spotify credentials not found at {self.credentials_path}"
+        if not self._librespot_path:
+            logger.warning(
+                "librespot not found. Install with: brew install librespot"
             )
 
-        try:
-            from librespot.audio.decoders import AudioQuality
-            from zotify.config import Config
-            from zotify.zotify import Zotify
+    def _get_spotify_client(self) -> "spotipy.Spotify":
+        """Get Spotify Web API client from provider."""
+        if self._provider is None:
+            raise SpotifyDownloadError("SpotifyProvider not configured")
+        return self._provider._get_client()
 
-            args = SimpleNamespace(
-                config_location=None,
-                username=None,
-                password=None,
-            )
-
-            Config.Values = {}
-            Config.Values['CREDENTIALS_LOCATION'] = str(self.credentials_path)
-            Config.load(args)
-            Config.Values['CREDENTIALS_LOCATION'] = str(self.credentials_path)
-
-            Zotify.login(args)
-
-            # Set download quality
-            Zotify.DOWNLOAD_QUALITY = AudioQuality.VERY_HIGH if Zotify.check_premium() else AudioQuality.HIGH
-
-            self._initialized = True
-            return True
-
-        except ImportError as e:
-            raise ImportError(
-                "zotify is not installed. Install with: pip install git+https://github.com/zotify-dev/zotify.git"
-            ) from e
+    def _get_access_token(self) -> str:
+        """Get OAuth access token from provider."""
+        if self._provider is None:
+            raise SpotifyDownloadError("SpotifyProvider not configured")
+        return self._provider.get_access_token()
 
     def download(
         self,
@@ -120,18 +121,32 @@ class SpotifyDownloader(Downloader):
             output_filename: Optional filename (without extension)
 
         Returns:
-            Path to the downloaded file
+            Path to the downloaded FLAC file
+
+        Raises:
+            SpotifyDownloadError: If download fails
+            LibrespotNotFoundError: If librespot binary not found
         """
+        if not self._librespot_path:
+            raise LibrespotNotFoundError(
+                "librespot not found. Install with:\n"
+                "  brew install librespot\n"
+                "  # or\n"
+                "  cargo install librespot"
+            )
+
         if not release.download_url:
-            raise ValueError("Release has no download URL")
+            raise SpotifyDownloadError("Release has no download URL")
 
         track_id = self._extract_track_id(release.download_url)
         if not track_id:
-            raise ValueError(f"Invalid Spotify URI/URL: {release.download_url}")
+            raise SpotifyDownloadError(f"Invalid Spotify URI/URL: {release.download_url}")
 
+        track_uri = f"spotify:track:{track_id}"
         track_name = release.target_file or release.title
-        logger.info(f"Downloading from Spotify: {track_name}")
-        logger.debug(f"Track ID: {track_id}")
+        duration_secs = release.duration_seconds or 300  # Default 5 min if unknown
+
+        logger.info(f"Downloading from Spotify: {release.artist} - {track_name}")
 
         # Determine output filename
         if output_filename:
@@ -143,93 +158,222 @@ class SpotifyDownloader(Downloader):
 
         os.makedirs(output_path, exist_ok=True)
 
-        # Try zotify Python API first, fall back to CLI
+        pcm_path = Path(output_path) / f"{base_name}.pcm"
+        flac_path = Path(output_path) / f"{base_name}.flac"
+        log_path = Path(output_path) / f"{base_name}.librespot.log"
+
+        # Get OAuth token
         try:
-            output_file = self._download_via_api(track_id, output_path, base_name)
+            access_token = self._get_access_token()
+            sp = self._get_spotify_client()
         except Exception as e:
-            logger.debug(f"API download failed: {e}, trying CLI fallback")
-            output_file = self._download_via_cli(track_id, output_path, base_name)
+            raise SpotifyDownloadError(f"Authentication failed: {e}") from e
 
-        if not os.path.exists(output_file):
-            # Search for downloaded file with various extensions
-            for ext in [".ogg", ".mp3", ".m4a", ".flac"]:
-                alt_file = os.path.join(output_path, f"{base_name}{ext}")
-                if os.path.exists(alt_file):
-                    output_file = alt_file
-                    break
+        # Start librespot with OAuth token
+        logger.debug(f"Starting librespot: {self._librespot_path}")
+
+        with open(pcm_path, "wb") as pcm_file, open(log_path, "w") as log_file:
+            librespot_proc = subprocess.Popen(
+                [
+                    self._librespot_path,
+                    "-n", LIBRESPOT_DEVICE_NAME,
+                    "--backend", "pipe",
+                    "--bitrate", "320",
+                    "--disable-discovery",
+                    "-k", access_token,
+                ],
+                stdout=pcm_file,
+                stderr=log_file,
+            )
+
+            try:
+                # Wait for device to appear in Spotify
+                device = self._wait_for_device(sp, timeout=15)
+                if not device:
+                    raise SpotifyDownloadError(
+                        f"Device '{LIBRESPOT_DEVICE_NAME}' not found in Spotify"
+                    )
+
+                logger.debug(f"Device ready: {device['id']}")
+
+                # Start playback
+                logger.debug(f"Starting playback: {track_uri}")
+                sp.start_playback(device_id=device["id"], uris=[track_uri])
+
+                # Wait for track to load
+                self._wait_for_track_load(sp, track_uri, timeout=30)
+
+                # Wait for download to complete
+                # librespot downloads faster than real-time, so we monitor file size
+                self._wait_for_download(
+                    pcm_path, duration_secs, librespot_proc, timeout=duration_secs + 30
+                )
+
+                # Pause playback
+                try:
+                    sp.pause_playback(device_id=device["id"])
+                except Exception:
+                    pass
+
+            except KeyboardInterrupt:
+                logger.info("Download interrupted")
+                raise
+            except Exception as e:
+                # Read log for more info
+                log_content = ""
+                if log_path.exists():
+                    log_content = log_path.read_text()[-500:]  # Last 500 chars
+                logger.debug(f"librespot log: {log_content}")
+                raise SpotifyDownloadError(f"Download failed: {e}") from e
+            finally:
+                # Stop librespot gracefully
+                self._stop_librespot(librespot_proc)
+
+        # Verify PCM was captured
+        if not pcm_path.exists() or pcm_path.stat().st_size == 0:
+            log_content = log_path.read_text() if log_path.exists() else "No log"
+            raise SpotifyDownloadError(f"No audio captured. Log: {log_content[-500:]}")
+
+        pcm_size = pcm_path.stat().st_size
+        logger.debug(f"Captured {pcm_size / (1024*1024):.2f} MB PCM")
+
+        # Convert PCM to FLAC
+        if not self._convert_pcm_to_flac(pcm_path, flac_path):
+            raise SpotifyDownloadError("FLAC conversion failed")
+
+        # Cleanup temp files
+        pcm_path.unlink(missing_ok=True)
+        log_path.unlink(missing_ok=True)
+
+        logger.info(f"Download complete: {flac_path}")
+        return str(flac_path)
+
+    def _wait_for_device(self, sp: "spotipy.Spotify", timeout: int = 15) -> Optional[dict]:
+        """Wait for librespot device to appear in Spotify devices list."""
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                devices = sp.devices()
+                for device in devices.get("devices", []):
+                    if device["name"] == LIBRESPOT_DEVICE_NAME:
+                        return device
+            except Exception as e:
+                logger.debug(f"Device check error: {e}")
+            time.sleep(1)
+        return None
+
+    def _wait_for_track_load(
+        self, sp: "spotipy.Spotify", track_uri: str, timeout: int = 30
+    ) -> bool:
+        """Wait for track to load on the device."""
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                pb = sp.current_playback()
+                if pb and pb.get("item", {}).get("uri") == track_uri:
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.5)
+        return False
+
+    def _wait_for_download(
+        self,
+        pcm_path: Path,
+        duration_secs: int,
+        process: subprocess.Popen,
+        timeout: int,
+    ) -> None:
+        """Wait for PCM download to complete by monitoring file size."""
+        expected_size = duration_secs * SAMPLE_RATE * CHANNELS * (BIT_DEPTH // 8)
+        start = time.time()
+        last_size = 0
+        stall_count = 0
+
+        while time.time() - start < timeout:
+            # Check if process died
+            if process.poll() is not None:
+                logger.warning("librespot exited early")
+                break
+
+            if not pcm_path.exists():
+                time.sleep(0.5)
+                continue
+
+            current_size = pcm_path.stat().st_size
+
+            # Progress logging
+            if current_size > last_size:
+                pct = min(100, (current_size / expected_size) * 100)
+                logger.debug(f"Download progress: {pct:.0f}%")
+                last_size = current_size
+                stall_count = 0
+
+                # If we have enough data, we're done
+                if current_size >= expected_size * 0.95:
+                    logger.debug("Download complete (95%+ captured)")
+                    return
             else:
-                # Search for any file containing the base name
-                for f in os.listdir(output_path):
-                    if base_name in f or track_id in f:
-                        output_file = os.path.join(output_path, f)
-                        break
+                stall_count += 1
+                # If stalled for a while but we have significant data, consider done
+                if stall_count > 5 and current_size > expected_size * 0.8:
+                    logger.debug("Download complete (stalled with 80%+ data)")
+                    return
 
-        if not os.path.exists(output_file):
-            raise RuntimeError(f"Download completed but file not found: {output_file}")
+            time.sleep(1)
 
-        logger.info(f"Download complete: {output_file}")
-        return output_file
+        # Timeout reached, but check if we got enough data
+        if pcm_path.exists():
+            final_size = pcm_path.stat().st_size
+            if final_size >= expected_size * 0.5:
+                logger.warning(f"Timeout but captured {final_size/expected_size*100:.0f}% of expected data")
+                return
 
-    def _download_via_api(self, track_id: str, output_path: str, base_name: str) -> str:
-        """Download using zotify Python API."""
-        self._init_zotify()
+        raise SpotifyDownloadError("Download timeout")
 
-        from zotify.config import Config
-        from zotify.track import download_track
+    def _stop_librespot(self, process: subprocess.Popen) -> None:
+        """Stop librespot process gracefully."""
+        if process.poll() is None:
+            process.send_signal(signal.SIGINT)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
 
-        # Configure zotify output settings
-        Config.Values['ROOT_PATH'] = output_path
-        Config.Values['ROOT_PODCAST_PATH'] = output_path
-        Config.Values['DOWNLOAD_FORMAT'] = 'ogg'
-        Config.Values['SONG_ARCHIVE'] = ''  # Disable archive
-        Config.Values['SKIP_EXISTING'] = False
-
-        # Download the track
-        download_track('single', track_id, disable_progressbar=True)
-
-        # Find the downloaded file
-        output_file = os.path.join(output_path, f"{base_name}.ogg")
-        return output_file
-
-    def _download_via_cli(self, track_id: str, output_path: str, base_name: str) -> str:
-        """Download using zotify CLI as fallback."""
-        spotify_url = f"https://open.spotify.com/track/{track_id}"
-
+    def _convert_pcm_to_flac(self, input_path: Path, output_path: Path) -> bool:
+        """Convert raw PCM to FLAC using ffmpeg."""
         cmd = [
-            "zotify",
-            spotify_url,
-            "--root-path", output_path,
-            "--download-quality", "very_high",
-            "--download-format", "ogg",
+            "ffmpeg", "-y",
+            "-f", "s16le",
+            "-ar", str(SAMPLE_RATE),
+            "-ac", str(CHANNELS),
+            "-i", str(input_path),
+            "-c:a", "flac",
+            str(output_path),
         ]
 
-        if self.credentials_path.exists():
-            cmd.extend(["--credentials-location", str(self.credentials_path)])
-
-        logger.debug(f"Running: {' '.join(cmd)}")
-
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
+        logger.debug(f"Converting to FLAC: {output_path}")
+        result = subprocess.run(cmd, capture_output=True, text=True)
 
         if result.returncode != 0:
-            error_msg = result.stderr or result.stdout or "Unknown error"
-            raise RuntimeError(f"Zotify CLI failed: {error_msg}")
+            logger.error(f"ffmpeg error: {result.stderr}")
+            return False
 
-        return os.path.join(output_path, f"{base_name}.ogg")
+        return output_path.exists()
 
     def _extract_track_id(self, url_or_uri: str) -> Optional[str]:
         """Extract Spotify track ID from URI or URL."""
+        # spotify:track:XXXX format
         if url_or_uri.startswith("spotify:track:"):
             return url_or_uri.split(":")[-1]
 
+        # https://open.spotify.com/track/XXXX format
         url_match = re.search(r"open\.spotify\.com/track/([a-zA-Z0-9]+)", url_or_uri)
         if url_match:
             return url_match.group(1)
 
+        # Raw track ID (22 alphanumeric chars)
         if re.match(r"^[a-zA-Z0-9]{22}$", url_or_uri):
             return url_or_uri
 
@@ -240,14 +384,26 @@ class SpotifyDownloader(Downloader):
         if not name:
             return "Unknown"
 
+        # Remove invalid characters
         invalid_chars = '<>:"/\\|?*'
         for char in invalid_chars:
             name = name.replace(char, "_")
 
+        # Remove control characters
         name = "".join(c for c in name if ord(c) >= 32)
         name = name.strip(" .")
 
+        # Limit length
         if len(name) > 200:
             name = name[:200]
 
         return name or "Unknown"
+
+
+def is_librespot_available() -> bool:
+    """Check if librespot binary is available.
+
+    Returns:
+        True if librespot is found in PATH or common locations
+    """
+    return find_librespot() is not None

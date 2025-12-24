@@ -2,7 +2,6 @@ import argparse
 import os
 import re
 import sys
-from pathlib import Path
 from typing import Any, Callable, List, Optional, Union
 
 from ..core.interfaces import InteractionHandler
@@ -391,15 +390,19 @@ Environment Variables:
   RED_API_URL                  Base URL for RED API (required if using RED)
   OPS_API_KEY                  API key for OPS (lossless FLAC source)
   OPS_API_URL                  Base URL for OPS API (required if using OPS)
-  SPOTIFY_CREDENTIALS_PATH     Path to Spotify credentials.json (librespot-auth)
+  SPOTIPY_CLIENT_ID            Spotify app client ID
+  SPOTIPY_CLIENT_SECRET        Spotify app client secret
+  SPOTIPY_REDIRECT_URI         OAuth redirect URI (http://127.0.0.1:8888/callback)
   FLACFETCH_PROVIDER_PRIORITY  Provider priority (e.g. 'RED,OPS,Spotify,YouTube')
   FLACFETCH_API_KEY            API key for HTTP API authentication (serve mode)
   FLACFETCH_API_PORT           HTTP API port (serve mode, default: 8080)
 
 Spotify Setup (requires Premium account):
-  1. Install zotify: pip install git+https://github.com/zotify-dev/zotify.git
-  2. Generate credentials: zotify --credentials-location ~/.flacfetch/spotify_credentials.json --save-credentials true -s "test"
-  3. Spotify will auto-enable when credentials are found
+  1. Create app at https://developer.spotify.com/dashboard
+  2. Set redirect URI: http://127.0.0.1:8888/callback
+  3. Install librespot: brew install librespot (or cargo install librespot)
+  4. Export: SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SPOTIPY_REDIRECT_URI
+  5. First run opens browser for OAuth (token cached automatically)
         """.strip(),
         formatter_class=WideHelpFormatter
     )
@@ -479,14 +482,9 @@ Spotify Setup (requires Premium account):
         help="OPS API base URL (or use OPS_API_URL env var)"
     )
     provider_group.add_argument(
-        "--spotify-creds",
-        metavar="PATH",
-        help="Path to Spotify credentials.json (or use SPOTIFY_CREDENTIALS_PATH env var)"
-    )
-    provider_group.add_argument(
         "--no-spotify",
         action="store_true",
-        help="Disable Spotify provider even if credentials exist"
+        help="Disable Spotify provider even if configured"
     )
     provider_group.add_argument(
         "--provider-priority",
@@ -584,32 +582,31 @@ Spotify Setup (requires Premium account):
 
     # Register Spotify provider
     if not args.no_spotify and SPOTIFY_AVAILABLE:
-        spotify_creds = args.spotify_creds or os.environ.get("SPOTIFY_CREDENTIALS_PATH")
+        # Check if Spotify is configured via environment variables
+        spotify_client_id = os.environ.get("SPOTIPY_CLIENT_ID")
+        spotify_client_secret = os.environ.get("SPOTIPY_CLIENT_SECRET")
 
-        # Auto-detect credentials in default locations if not specified
-        if not spotify_creds:
-            default_paths = [
-                Path.home() / ".flacfetch" / "spotify_credentials.json",
-                Path.home() / ".config" / "zotify" / "credentials.json",
-                Path.home() / ".zotify" / "credentials.json",
-            ]
-            for path in default_paths:
-                if path.exists():
-                    spotify_creds = str(path)
-                    break
-
-        if spotify_creds and Path(spotify_creds).exists():
+        if spotify_client_id and spotify_client_secret:
             try:
-                sp = SpotifyProvider(credentials_path=spotify_creds)
-                manager.add_provider(sp)
-                manager.register_downloader("Spotify", SpotifyDownloader(credentials_path=spotify_creds))
-                if args.verbose:
-                    print(f"Info: Spotify provider enabled (credentials: {spotify_creds})")
+                from ..downloaders.spotify import is_librespot_available
+
+                if not is_librespot_available():
+                    if args.verbose:
+                        print(f"{Colors.YELLOW}Warning: librespot not found. Spotify downloads disabled.{Colors.RESET}")
+                        print(f"{Colors.DIM}  Install with: brew install librespot{Colors.RESET}")
+                else:
+                    sp = SpotifyProvider()
+                    manager.add_provider(sp)
+                    # Pass provider to downloader so they share OAuth
+                    manager.register_downloader("Spotify", SpotifyDownloader(provider=sp))
+                    if args.verbose:
+                        print("Info: Spotify provider enabled (OAuth)")
             except Exception as e:
                 if args.verbose:
                     print(f"{Colors.YELLOW}Warning: Could not initialize Spotify provider: {e}{Colors.RESET}")
-        elif args.verbose and spotify_creds:
-            print(f"{Colors.YELLOW}Warning: Spotify credentials not found at {spotify_creds}{Colors.RESET}")
+        elif args.verbose:
+            if spotify_client_id or spotify_client_secret:
+                print(f"{Colors.YELLOW}Warning: Spotify partially configured. Need both SPOTIPY_CLIENT_ID and SPOTIPY_CLIENT_SECRET.{Colors.RESET}")
     elif args.no_spotify and args.verbose:
         print("Info: Spotify provider disabled by --no-spotify flag.")
 

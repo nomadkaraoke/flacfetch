@@ -1,17 +1,17 @@
 """Spotify provider for flacfetch.
 
-This module provides search functionality for Spotify using the librespot protocol
-via zotify. Requires Spotify Premium credentials.
+This module provides search functionality for Spotify using the official Web API
+via spotipy. Requires Spotify Premium for downloading (handled by downloader).
 
-Quality: 320kbps OGG Vorbis (Premium) or 160kbps (Free)
+Authentication: OAuth2 via spotipy (browser-based login, cached automatically)
+Quality: 320kbps OGG Vorbis (Premium) - converted to FLAC by downloader
 """
 
-import os
-from pathlib import Path
-from types import SimpleNamespace
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
-import requests
+if TYPE_CHECKING:
+    import spotipy
+    from spotipy.oauth2 import SpotifyOAuth
 
 from ..core.interfaces import Provider
 from ..core.log import get_logger
@@ -20,139 +20,104 @@ from ..core.models import AudioFormat, MediaSource, Quality, Release, TrackQuery
 
 logger = get_logger("SpotifyProvider")
 
-# Spotify Web API search endpoint
-SEARCH_URL = "https://api.spotify.com/v1/search"
+# Required OAuth scopes for playback control
+SPOTIFY_SCOPES = [
+    "user-read-playback-state",
+    "user-modify-playback-state",
+    "streaming",
+]
+
+
+class SpotifyAuthError(Exception):
+    """Raised when Spotify authentication fails."""
+
+    pass
 
 
 class SpotifyProvider(Provider):
     """Provider for Spotify streaming service.
 
-    Requires Spotify Premium credentials. Credentials can be generated using
-    librespot-auth and should be placed at ~/.flacfetch/spotify_credentials.json
-    or specified via SPOTIFY_CREDENTIALS_PATH environment variable.
+    Uses the official Spotify Web API for search. Requires:
+    - Spotify Developer App (Client ID + Secret)
+    - OAuth2 authentication (browser login, cached automatically)
+    - Spotify Premium account (for downloading via SpotifyDownloader)
 
-    Quality: 320kbps OGG Vorbis (Premium) or 160kbps (Free)
+    Environment variables:
+        SPOTIPY_CLIENT_ID: Spotify app client ID
+        SPOTIPY_CLIENT_SECRET: Spotify app client secret
+        SPOTIPY_REDIRECT_URI: OAuth redirect URI (e.g. http://127.0.0.1:8888/callback)
     """
 
-    def __init__(self, credentials_path: Optional[str] = None):
+    def __init__(self, client_id: Optional[str] = None, client_secret: Optional[str] = None):
         """Initialize the Spotify provider.
 
         Args:
-            credentials_path: Path to credentials.json from librespot-auth.
-                            Defaults to ~/.flacfetch/spotify_credentials.json
+            client_id: Spotify app client ID (or use SPOTIPY_CLIENT_ID env var)
+            client_secret: Spotify app client secret (or use SPOTIPY_CLIENT_SECRET env var)
         """
-        self.credentials_path = self._resolve_credentials_path(credentials_path)
-        self._initialized = False
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._sp: Optional["spotipy.Spotify"] = None
+        self._auth_manager: Optional["SpotifyOAuth"] = None
         self._search_limit = 10
 
     @property
     def name(self) -> str:
         return "Spotify"
 
-    def _resolve_credentials_path(self, provided_path: Optional[str]) -> Path:
-        """Resolve credentials file path with fallback locations."""
-        if provided_path:
-            path = Path(provided_path).expanduser()
-            if path.exists():
-                return path
-            return Path(provided_path)
-
-        # Check environment variable
-        env_path = os.environ.get("SPOTIFY_CREDENTIALS_PATH")
-        if env_path:
-            path = Path(env_path).expanduser()
-            if path.exists():
-                return path
-
-        # Default locations in priority order
-        search_paths = [
-            Path.home() / ".flacfetch" / "spotify_credentials.json",
-            Path.home() / ".config" / "zotify" / "credentials.json",
-            Path.home() / ".zotify" / "credentials.json",
-            Path.home() / "Library" / "Application Support" / "Zotify" / "credentials.json",
-        ]
-
-        for path in search_paths:
-            if path.exists():
-                logger.debug(f"Found Spotify credentials at: {path}")
-                return path
-
-        return search_paths[0]
-
-    def _validate_credentials(self) -> bool:
-        """Check if credentials file exists."""
-        return self.credentials_path.exists()
-
-    def _init_zotify(self) -> bool:
-        """Initialize zotify with our credentials.
-
-        Returns:
-            True if initialization succeeded, False otherwise.
-        """
-        if self._initialized:
-            return True
-
-        if not self.credentials_path.exists():
-            logger.warning(f"Spotify credentials not found at {self.credentials_path}")
-            return False
+    def _get_client(self) -> "spotipy.Spotify":
+        """Get or create authenticated Spotify client."""
+        if self._sp is not None:
+            return self._sp
 
         try:
-            from zotify.config import Config
-            from zotify.zotify import Zotify
-
-            # Create mock args object that zotify expects
-            args = SimpleNamespace(
-                config_location=None,
-                username=None,
-                password=None,
-            )
-
-            # Set credentials location in config before loading
-            # We need to set this as an environment or config override
-            Config.Values = {}
-            Config.Values['CREDENTIALS_LOCATION'] = str(self.credentials_path)
-
-            # Load config
-            Config.load(args)
-
-            # Override credentials location after load
-            Config.Values['CREDENTIALS_LOCATION'] = str(self.credentials_path)
-
-            # Initialize session
-            Zotify.login(args)
-
-            self._initialized = True
-            logger.info("Spotify session initialized successfully")
-            return True
-
+            import spotipy
+            from spotipy.oauth2 import SpotifyOAuth
         except ImportError as e:
-            logger.warning(f"zotify not installed: {e}")
-            return False
+            raise SpotifyAuthError(
+                "spotipy not installed. Install with: pip install spotipy"
+            ) from e
+
+        try:
+            self._auth_manager = SpotifyOAuth(
+                client_id=self._client_id,
+                client_secret=self._client_secret,
+                scope=" ".join(SPOTIFY_SCOPES),
+            )
+            self._sp = spotipy.Spotify(auth_manager=self._auth_manager)
+
+            # Verify auth works
+            user = self._sp.current_user()
+            logger.info(f"Authenticated as: {user.get('display_name', user.get('id'))}")
+
+            return self._sp
+
         except Exception as e:
-            logger.error(f"Failed to initialize Spotify session: {e}")
-            return False
+            raise SpotifyAuthError(f"Spotify authentication failed: {e}") from e
 
-    def _get_auth_header(self) -> dict:
-        """Get auth header from zotify session."""
-        from zotify.zotify import Zotify
-        return Zotify.get_auth_header()
+    def get_access_token(self) -> str:
+        """Get current OAuth access token for use by downloader.
 
-    def _execute_search(self, search_query: str) -> dict:
-        """Execute search against Spotify API."""
-        params = {
-            "q": search_query,
-            "type": "track",
-            "limit": str(self._search_limit),
-            "offset": "0",
-        }
-        headers = self._get_auth_header()
-        response = requests.get(SEARCH_URL, headers=headers, params=params)
+        Returns:
+            Valid OAuth access token string
 
-        if response.status_code != 200:
-            logger.error(f"Spotify API error: {response.status_code}")
-            return {}
+        Raises:
+            SpotifyAuthError: If token cannot be obtained
+        """
+        self._get_client()  # Ensure we're authenticated
 
-        return response.json()
+        if self._auth_manager is None:
+            raise SpotifyAuthError("Auth manager not initialized")
+
+        token_info = self._auth_manager.get_cached_token()
+        if not token_info:
+            raise SpotifyAuthError("No cached token available")
+
+        # Refresh if expired
+        if self._auth_manager.is_token_expired(token_info):
+            token_info = self._auth_manager.refresh_access_token(token_info["refresh_token"])
+
+        return token_info["access_token"]
 
     def search(self, query: TrackQuery) -> list[Release]:
         """Search Spotify for tracks matching the query.
@@ -163,15 +128,18 @@ class SpotifyProvider(Provider):
         Returns:
             List of Release objects matching the query
         """
-        if not self._init_zotify():
+        try:
+            sp = self._get_client()
+        except SpotifyAuthError as e:
+            logger.warning(f"Spotify not available: {e}")
             return []
 
         search_query = f"{query.artist} {query.title}".strip()
         logger.info(f"Searching Spotify for: {search_query}")
 
         try:
-            data = self._execute_search(search_query)
-            tracks = data.get("tracks", {}).get("items", [])
+            results = sp.search(q=search_query, type="track", limit=self._search_limit)
+            tracks = results.get("tracks", {}).get("items", [])
 
             releases = []
             for track in tracks:
@@ -215,26 +183,28 @@ class SpotifyProvider(Provider):
                 except ValueError:
                     pass
 
-            # Spotify URI
+            # Spotify URI for download
             spotify_uri = f"spotify:track:{track_id}"
 
-            # Quality (320kbps Vorbis for Premium)
+            # Quality - librespot captures at 44.1kHz/16-bit, converted to FLAC
             quality = Quality(
-                format=AudioFormat.VORBIS,
-                bitrate=320,
+                format=AudioFormat.FLAC,  # Output format after conversion
+                bitrate=None,  # Lossless
                 media=MediaSource.WEB,
             )
 
-            # Duration and file size estimate
+            # Duration and file size estimate (FLAC ~900kbps average)
             duration_ms = track.get("duration_ms", 0)
             duration_secs = duration_ms // 1000 if duration_ms else None
-            estimated_size = int(duration_secs * 320 * 1000 / 8) if duration_secs else None
+            estimated_size = int(duration_secs * 900 * 1000 / 8) if duration_secs else None
 
             # Match score
             match_score = calculate_match_score(query.title, track_name)
 
-            # Popularity and release type
+            # Popularity (0-100) - scale for sorting compatibility
             popularity = track.get("popularity", 0)
+
+            # Release type mapping
             release_type_map = {
                 "album": "Album",
                 "single": "Single",
@@ -262,3 +232,16 @@ class SpotifyProvider(Provider):
         except Exception as e:
             logger.warning(f"Failed to parse track: {e}")
             return None
+
+
+def is_spotify_configured() -> bool:
+    """Check if Spotify credentials are configured via environment variables.
+
+    Returns:
+        True if SPOTIPY_CLIENT_ID and SPOTIPY_CLIENT_SECRET are set
+    """
+    import os
+
+    return bool(
+        os.environ.get("SPOTIPY_CLIENT_ID") and os.environ.get("SPOTIPY_CLIENT_SECRET")
+    )

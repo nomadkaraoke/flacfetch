@@ -44,9 +44,7 @@ api = [
     "google-cloud-storage>=2.13.0",
 ]
 spotify = [
-    # Note: zotify must be installed manually from GitHub:
-    # pip install git+https://github.com/zotify-dev/zotify.git
-    # The spotify extra is a marker for documentation purposes.
+    "spotipy>=2.23.0",
 ]
 dev = [
     "pytest>=7.0.0",

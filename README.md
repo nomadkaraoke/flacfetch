@@ -12,13 +12,13 @@
 
 -   **Precise Track Search**:
     -   **Private Music Trackers**: RED and OPS (API integration). Uses advanced file list filtering to find specific songs within album torrents, downloading only the required track.
-    -   **Streaming Services**: Spotify (via `zotify`, requires Premium account) - 320kbps OGG Vorbis.
+    -   **Streaming Services**: Spotify (via `librespot`, requires Premium account) - CD Quality FLAC (44.1kHz/16-bit).
     -   **Public Sources**: YouTube (via `yt-dlp`).
 -   **Smart Prioritization**:
     -   **Official Sources**: Automatically prioritizes "Topic" channels and "Official Audio" on YouTube. Spotify results are always from official sources.
     -   **Quality Heuristics**: 
         -   **Trackers (RED/OPS)**: Prioritizes Lossless (FLAC) and healthy torrents (Seeders). Matches filename exactly to your query.
-        -   **Spotify**: High-quality 320kbps OGG Vorbis, single transcode from masters. Prioritizes by popularity.
+        -   **Spotify**: CD quality FLAC (44.1kHz/16-bit) via librespot capture. Prioritizes by popularity.
         -   **YouTube**: Prioritizes newer uploads (Opus codec) over legacy uploads (AAC). Color-codes upload years to help you spot modern, high-quality streams (Green: 2020+, Yellow: 2015-2019, Red: <2015).
 -   **Flexible Interaction**:
     -   **Interactive Mode**: Present search results to the user for manual selection with rich, color-coded metadata (Seeders, Views, Duration).
@@ -127,42 +127,43 @@ flacfetch "..." --ops-key "your_key" --ops-url "your_url"
 
 **Spotify Configuration** (Optional - requires Premium account)
 
-Spotify provides high-quality 320kbps OGG Vorbis streams, single-encoded from masters (often better than YouTube's re-encoded content).
+Spotify provides CD-quality audio (44.1kHz/16-bit) captured via librespot and converted to FLAC. This uses the official Spotify Web API for authentication (OAuth) and librespot for audio capture.
 
+**Prerequisites:**
+- Spotify Premium account
+- `librespot` binary: `brew install librespot` or `cargo install librespot`
+- `ffmpeg` for audio conversion
+
+**Setup:**
 ```bash
-# 1. Install zotify from GitHub (not on PyPI)
-pip install git+https://github.com/zotify-dev/zotify.git
+# 1. Install Spotify extra dependencies
+pip install flacfetch[spotify]
 
-# 2. Generate credentials (one-time setup - will prompt for Spotify login)
-mkdir -p ~/.flacfetch
-zotify --credentials-location ~/.flacfetch/spotify_credentials.json --save-credentials true -s "test"
-# Enter your Spotify username/email and password when prompted
+# 2. Create a Spotify Developer App
+# Go to: https://developer.spotify.com/dashboard
+# Click "Create App"
+# Set redirect URI to: http://127.0.0.1:8888/callback
+# Note your Client ID and Client Secret
 
-# ⚠️  NOTE: Spotify's recent security changes may cause authentication failures
-# with newer accounts. If you get "BadCredentials" errors, this feature may not
-# work with your account. See troubleshooting section below.
+# 3. Set environment variables
+export SPOTIPY_CLIENT_ID='your-client-id'
+export SPOTIPY_CLIENT_SECRET='your-client-secret'
+export SPOTIPY_REDIRECT_URI='http://127.0.0.1:8888/callback'
 
-# 4. flacfetch will now auto-detect Spotify and enable it
+# 4. First run will open browser for OAuth login (token cached automatically)
 flacfetch "Artist" "Title"
-
-# Or specify credentials explicitly
-flacfetch "Artist" "Title" --spotify-creds /path/to/credentials.json
 
 # Disable Spotify if needed
 flacfetch "Artist" "Title" --no-spotify
 ```
 
-**Spotify Troubleshooting**
+**How it works:**
+1. Uses Spotify Web API (via spotipy) for search and playback control
+2. Starts librespot as a Spotify Connect device with OAuth token
+3. Triggers playback via Web API, captures raw PCM via pipe backend
+4. Converts PCM to FLAC using ffmpeg
 
-If you get `BadCredentials` or `SpotifyAuthenticationException` errors:
-
-1. **Account Security**: Spotify's recent security changes (invisible 2FA) break librespot-based tools for many accounts. Unfortunately, there's no reliable workaround.
-
-2. **Try your actual username**: Your Spotify username (found at spotify.com/account) may differ from your email. Try the random string username like `31abc123...`.
-
-3. **Alternative accounts**: Older Spotify accounts or those created without social login may work better.
-
-4. **Known limitation**: This feature is experimental and may not work with all Spotify accounts due to Spotify's evolving security measures.
+**Note:** The redirect URI must use `127.0.0.1` (not `localhost`) as per Spotify's updated security requirements.
 
 **Provider Priority**
 
@@ -199,11 +200,16 @@ from flacfetch.core.models import TrackQuery
 from flacfetch.providers.red import REDProvider
 from flacfetch.providers.ops import OPSProvider
 from flacfetch.providers.spotify import SpotifyProvider  # Optional
+from flacfetch.downloaders.spotify import SpotifyDownloader  # Optional
 
 manager = FetchManager()
 manager.add_provider(REDProvider(api_key="...", base_url="..."))
 manager.add_provider(OPSProvider(api_key="...", base_url="..."))
-manager.add_provider(SpotifyProvider(credentials_path="~/.flacfetch/spotify_credentials.json"))  # Optional
+
+# Spotify (requires SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SPOTIPY_REDIRECT_URI env vars)
+spotify_provider = SpotifyProvider()
+manager.add_provider(spotify_provider)
+manager.register_downloader("Spotify", SpotifyDownloader(provider=spotify_provider))
 
 # Search for a specific track
 results = manager.search(TrackQuery(artist="Seether", title="Tonight"))
