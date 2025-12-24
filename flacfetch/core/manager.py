@@ -104,7 +104,7 @@ class FetchManager:
 
         return ordered
 
-    def _sort_releases(self, releases: list[Release], query: TrackQuery = None) -> list[Release]:
+    def _sort_releases(self, releases: list[Release], query: Optional[TrackQuery] = None) -> list[Release]:
         """
         Sort releases by quality and relevance.
 

@@ -16,15 +16,15 @@ from ..providers.youtube import YoutubeProvider
 try:
     from ..downloaders.torrent import TorrentDownloader
 except ImportError:
-    TorrentDownloader = None
+    TorrentDownloader = None  # type: ignore[assignment,misc]
 
 try:
     from ..downloaders.spotify import SpotifyDownloader
     from ..providers.spotify import SpotifyProvider
     SPOTIFY_AVAILABLE = True
 except ImportError:
-    SpotifyProvider = None
-    SpotifyDownloader = None
+    SpotifyProvider = None  # type: ignore[assignment,misc]
+    SpotifyDownloader = None  # type: ignore[assignment,misc]
     SPOTIFY_AVAILABLE = False
 
 

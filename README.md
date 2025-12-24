@@ -18,7 +18,7 @@
     -   **Official Sources**: Automatically prioritizes "Topic" channels and "Official Audio" on YouTube. Spotify results are always from official sources.
     -   **Quality Heuristics**: 
         -   **Trackers (RED/OPS)**: Prioritizes Lossless (FLAC) and healthy torrents (Seeders). Matches filename exactly to your query.
-        -   **Spotify**: CD quality FLAC (44.1kHz/16-bit) via librespot capture. Prioritizes by popularity.
+        -   **Spotify**: CD-quality FLAC (44.1kHz/16-bit) via librespot capture. Prioritizes by popularity.
         -   **YouTube**: Prioritizes newer uploads (Opus codec) over legacy uploads (AAC). Color-codes upload years to help you spot modern, high-quality streams (Green: 2020+, Yellow: 2015-2019, Red: <2015).
 -   **Flexible Interaction**:
     -   **Interactive Mode**: Present search results to the user for manual selection with rich, color-coded metadata (Seeders, Views, Duration).

@@ -254,9 +254,10 @@ class SpotifyDownloader(Downloader):
         while time.time() - start < timeout:
             try:
                 devices = sp.devices()
-                for device in devices.get("devices", []):
+                device_list: list = devices.get("devices", [])
+                for device in device_list:
                     if device["name"] == LIBRESPOT_DEVICE_NAME:
-                        return device
+                        return dict(device)
             except Exception as e:
                 logger.debug(f"Device check error: {e}")
             time.sleep(1)

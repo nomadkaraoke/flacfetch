@@ -117,7 +117,8 @@ class SpotifyProvider(Provider):
         if self._auth_manager.is_token_expired(token_info):
             token_info = self._auth_manager.refresh_access_token(token_info["refresh_token"])
 
-        return token_info["access_token"]
+        access_token: str = token_info["access_token"]
+        return access_token
 
     def search(self, query: TrackQuery) -> list[Release]:
         """Search Spotify for tracks matching the query.

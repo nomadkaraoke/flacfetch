@@ -44,7 +44,7 @@ api = [
     "google-cloud-storage>=2.13.0",
 ]
 spotify = [
-    "spotipy>=2.23.0",
+    "spotipy>=2.25.1",  # CVE-2025-27154 fixed in 2.25.1
 ]
 dev = [
     "pytest>=7.0.0",
@@ -64,7 +64,7 @@ all = [
     "pydantic>=2.0.0",
     "google-cloud-storage>=2.13.0",
     # spotify
-    "spotipy>=2.23.0",
+    "spotipy>=2.25.1",
     # dev
     "pytest>=7.0.0",
     "pytest-mock>=3.10.0",
