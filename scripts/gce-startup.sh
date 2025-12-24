@@ -1,11 +1,13 @@
 #!/bin/bash
 # GCE Startup Script for flacfetch
 # This script runs on every VM boot and handles:
-# 1. Installing/updating flacfetch
-# 2. Configuring Transmission (only if not already configured)
-# 3. Starting the flacfetch API service
+# 1. Mounting persistent disk for torrent data
+# 2. Installing/updating flacfetch
+# 3. Configuring Transmission to use persistent storage
+# 4. Starting the flacfetch API service
 #
-# IMPORTANT: This script is designed to preserve torrent state across reboots.
+# IMPORTANT: Torrent data is stored on a separate persistent disk (flacfetch-data)
+# that survives VM deletion, ensuring torrents are never lost.
 
 set -e
 
@@ -21,38 +23,107 @@ apt-get update
 apt-get install -y python3-pip python3-venv transmission-daemon ffmpeg git curl
 
 # =============================================================================
-# Transmission Configuration (only if not already configured)
+# Persistent Disk Setup
 # =============================================================================
+PERSISTENT_MOUNT="/mnt/flacfetch-data"
+TRANSMISSION_DATA="$PERSISTENT_MOUNT/transmission"
 TRANSMISSION_CONFIG_DIR="/var/lib/transmission-daemon/.config/transmission-daemon"
 TRANSMISSION_SETTINGS="/etc/transmission-daemon/settings.json"
 
-# Check if this is first-time setup or if transmission needs configuration
-NEEDS_TRANSMISSION_CONFIG=false
+echo "Setting up persistent storage..."
 
-if [ ! -f "$TRANSMISSION_SETTINGS" ]; then
-    NEEDS_TRANSMISSION_CONFIG=true
-    echo "Transmission settings not found - first time setup"
-elif ! grep -q '"rpc-authentication-required": false' "$TRANSMISSION_SETTINGS" 2>/dev/null; then
-    # Check if RPC is properly configured
-    NEEDS_TRANSMISSION_CONFIG=true
-    echo "Transmission RPC not configured for local access"
+# Check if the persistent disk is attached (should be /dev/sdb)
+if [ -b /dev/sdb ]; then
+    echo "Persistent disk found at /dev/sdb"
+    
+    # Create mount point
+    mkdir -p "$PERSISTENT_MOUNT"
+    
+    # Check if disk is formatted
+    if ! blkid /dev/sdb | grep -q 'TYPE="ext4"'; then
+        echo "Formatting persistent disk..."
+        mkfs.ext4 -F /dev/sdb
+    fi
+    
+    # Mount if not already mounted
+    if ! mountpoint -q "$PERSISTENT_MOUNT"; then
+        echo "Mounting persistent disk..."
+        mount /dev/sdb "$PERSISTENT_MOUNT"
+    fi
+    
+    # Add to fstab if not already there
+    UUID=$(blkid -s UUID -o value /dev/sdb)
+    if ! grep -q "$UUID" /etc/fstab; then
+        echo "UUID=$UUID $PERSISTENT_MOUNT ext4 defaults,nofail,discard 0 2" >> /etc/fstab
+        echo "Added persistent disk to fstab"
+    fi
+    
+    # Create directory structure on persistent disk
+    mkdir -p "$TRANSMISSION_DATA/downloads"
+    mkdir -p "$TRANSMISSION_DATA/.incomplete"
+    mkdir -p "$TRANSMISSION_DATA/config/torrents"
+    mkdir -p "$TRANSMISSION_DATA/config/resume"
+    chown -R debian-transmission:debian-transmission "$TRANSMISSION_DATA"
+    
+    echo "Persistent disk mounted at $PERSISTENT_MOUNT"
+    df -h "$PERSISTENT_MOUNT"
+    
+    USE_PERSISTENT_DISK=true
+else
+    echo "WARNING: No persistent disk found. Torrent data will be stored on boot disk."
+    echo "To enable persistent storage, attach a disk named 'flacfetch-data'"
+    USE_PERSISTENT_DISK=false
 fi
 
-if [ "$NEEDS_TRANSMISSION_CONFIG" = true ]; then
-    echo "Configuring Transmission daemon..."
+# =============================================================================
+# Transmission Configuration
+# =============================================================================
+echo "Configuring Transmission daemon..."
+
+# Stop transmission to configure
+systemctl stop transmission-daemon || true
+sleep 2
+
+if [ "$USE_PERSISTENT_DISK" = true ]; then
+    # Configure transmission to use persistent disk
+    cat > "$TRANSMISSION_SETTINGS" << SETTINGS
+{
+    "download-dir": "$TRANSMISSION_DATA/downloads",
+    "incomplete-dir": "$TRANSMISSION_DATA/.incomplete",
+    "incomplete-dir-enabled": true,
+    "rpc-authentication-required": false,
+    "rpc-bind-address": "127.0.0.1",
+    "rpc-enabled": true,
+    "rpc-port": 9091,
+    "rpc-whitelist-enabled": false,
+    "peer-port": 51413,
+    "port-forwarding-enabled": false,
+    "speed-limit-down": 0,
+    "speed-limit-down-enabled": false,
+    "speed-limit-up": 0,
+    "speed-limit-up-enabled": false,
+    "ratio-limit-enabled": false,
+    "umask": 2,
+    "encryption": 1,
+    "dht-enabled": true,
+    "pex-enabled": true,
+    "utp-enabled": true
+}
+SETTINGS
     
-    # Stop transmission gracefully to modify settings
-    systemctl stop transmission-daemon || true
-    sleep 2  # Give it time to save state
+    # Set up symlinks for torrent/resume data (transmission looks in config dir)
+    mkdir -p "$TRANSMISSION_CONFIG_DIR"
+    rm -rf "$TRANSMISSION_CONFIG_DIR/torrents" 2>/dev/null || true
+    rm -rf "$TRANSMISSION_CONFIG_DIR/resume" 2>/dev/null || true
+    ln -sf "$TRANSMISSION_DATA/config/torrents" "$TRANSMISSION_CONFIG_DIR/torrents"
+    ln -sf "$TRANSMISSION_DATA/config/resume" "$TRANSMISSION_CONFIG_DIR/resume"
+    chown -h debian-transmission:debian-transmission "$TRANSMISSION_CONFIG_DIR/torrents" "$TRANSMISSION_CONFIG_DIR/resume"
     
-    # Create transmission directories (preserves existing data)
-    mkdir -p /var/lib/transmission-daemon/downloads
-    mkdir -p /var/lib/transmission-daemon/.incomplete
-    mkdir -p "$TRANSMISSION_CONFIG_DIR/torrents"
-    mkdir -p "$TRANSMISSION_CONFIG_DIR/resume"
-    chown -R debian-transmission:debian-transmission /var/lib/transmission-daemon
-    
-    # Write settings to the correct location (Debian uses /etc/transmission-daemon/)
+    echo "Transmission configured to use persistent disk"
+    echo "  Downloads: $TRANSMISSION_DATA/downloads"
+    echo "  Torrents:  $TRANSMISSION_DATA/config/torrents"
+else
+    # Fallback: use default paths on boot disk
     cat > "$TRANSMISSION_SETTINGS" << 'SETTINGS'
 {
     "download-dir": "/var/lib/transmission-daemon/downloads",
@@ -78,18 +149,17 @@ if [ "$NEEDS_TRANSMISSION_CONFIG" = true ]; then
 }
 SETTINGS
     
-    chown debian-transmission:debian-transmission "$TRANSMISSION_SETTINGS"
-    echo "Transmission settings configured"
-else
-    echo "Transmission already configured, preserving existing settings and state"
+    mkdir -p /var/lib/transmission-daemon/downloads
+    mkdir -p /var/lib/transmission-daemon/.incomplete
+    mkdir -p "$TRANSMISSION_CONFIG_DIR/torrents"
+    mkdir -p "$TRANSMISSION_CONFIG_DIR/resume"
+    chown -R debian-transmission:debian-transmission /var/lib/transmission-daemon
 fi
 
-# Ensure transmission is running
-if ! systemctl is-active --quiet transmission-daemon; then
-    echo "Starting Transmission daemon..."
-    systemctl start transmission-daemon
-    sleep 2
-fi
+# Start transmission
+echo "Starting Transmission daemon..."
+systemctl start transmission-daemon
+sleep 2
 
 # Verify transmission is responding
 echo "Verifying Transmission daemon..."
@@ -162,6 +232,14 @@ echo "Using GCS bucket: $GCS_BUCKET"
 # Create/Update Systemd Service
 # =============================================================================
 echo "Creating/updating systemd service..."
+
+# Set download dir based on whether persistent disk is available
+if [ "$USE_PERSISTENT_DISK" = true ]; then
+    DOWNLOAD_DIR="$TRANSMISSION_DATA/downloads"
+else
+    DOWNLOAD_DIR="/var/lib/transmission-daemon/downloads"
+fi
+
 cat > /etc/systemd/system/flacfetch.service << SYSTEMD
 [Unit]
 Description=Flacfetch HTTP API Service
@@ -180,7 +258,7 @@ Environment="OPS_API_URL=${OPS_API_URL}"
 Environment="GCS_BUCKET=${GCS_BUCKET}"
 Environment="FLACFETCH_KEEP_SEEDING=true"
 Environment="FLACFETCH_MIN_FREE_GB=5"
-Environment="FLACFETCH_DOWNLOAD_DIR=/var/lib/transmission-daemon/downloads"
+Environment="FLACFETCH_DOWNLOAD_DIR=${DOWNLOAD_DIR}"
 Environment="TRANSMISSION_HOST=localhost"
 Environment="TRANSMISSION_PORT=9091"
 ExecStart=/opt/flacfetch/venv/bin/flacfetch serve --host 0.0.0.0 --port 8080
@@ -218,7 +296,21 @@ echo "Setup complete at $(date)"
 echo "========================================"
 echo ""
 
-# Show current status
+# Show storage status
+echo "Storage Status:"
+echo "---------------"
+if [ "$USE_PERSISTENT_DISK" = true ]; then
+    echo "✅ Persistent disk mounted at $PERSISTENT_MOUNT"
+    echo "   Torrent data will survive VM deletion!"
+    df -h "$PERSISTENT_MOUNT"
+    echo ""
+    echo "   Torrent files: $(find $TRANSMISSION_DATA/config/torrents -name '*.torrent' 2>/dev/null | wc -l)"
+    echo "   Downloaded files: $(find $TRANSMISSION_DATA/downloads -type f 2>/dev/null | wc -l)"
+else
+    echo "⚠️  No persistent disk - using boot disk (data will be lost on VM deletion)"
+fi
+
+echo ""
 echo "Service Status:"
 echo "---------------"
 systemctl status flacfetch --no-pager -l | head -20
