@@ -295,6 +295,8 @@ class TestSpotifyDownloader:
     def test_download_raises_without_provider(self):
         """Should raise error when provider not configured."""
         downloader = SpotifyDownloader(provider=None)
+        # Mock librespot as available so we can test the provider check
+        downloader._librespot_path = "/fake/librespot"
         release = Release(
             title="Test",
             artist="Test",
