@@ -79,7 +79,8 @@ async def search_audio(
                 "bitrate": release.quality.bitrate,
                 "media": release.quality.media.name,
             }
-            is_lossless = release.quality.is_lossless()
+            # Use is_true_lossless - Spotify is transcoded from lossy source
+            is_lossless = release.quality.is_true_lossless(release.source_name)
 
         results.append(SearchResultItem(
             index=idx,

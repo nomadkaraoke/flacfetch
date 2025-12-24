@@ -119,14 +119,21 @@ class FetchManager:
         """
         searched_artist = query.artist.lower() if query and query.artist else None
 
-        def is_lossless(r: Release) -> int:
-            """Lossless formats should always come first."""
+        def quality_tier(r: Release) -> int:
+            """
+            Quality tier score - higher is better:
+            - True lossless (torrent FLAC from CD/WEB): 100
+            - Spotify (320kbps Vorbis transcoded to FLAC): 50
+            - YouTube/other lossy: 0
+            """
             if r.quality and r.quality.format:
-                # r.quality.format is an AudioFormat enum, use .name to get string
                 fmt = r.quality.format.name
                 if fmt in ("FLAC", "WAV", "ALAC", "APE"):
-                    return 1
-            return 0
+                    # Check if true lossless or Spotify transcoded
+                    if r.source_name.lower() == "spotify":
+                        return 50  # Spotify: better than YouTube, worse than true lossless
+                    return 100  # True lossless
+            return 0  # Lossy
 
         def artist_match_score(r: Release) -> int:
             """
@@ -289,7 +296,7 @@ class FetchManager:
             return 0
 
         return sorted(releases, key=lambda r: (
-            is_lossless(r),           # 1. Lossless first
+            quality_tier(r),          # 1. True lossless > Spotify > YouTube
             artist_match_score(r),    # 2. Artist matches searched artist
             release_type_score(r),    # 3. Album > Single > Compilation
             seeder_score(r),          # 4. More seeders = more reliable

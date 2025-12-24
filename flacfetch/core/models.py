@@ -66,7 +66,22 @@ class Quality:
         return s_br < o_br
 
     def is_lossless(self) -> bool:
+        """Check if format is lossless (FLAC/WAV). Note: doesn't check source quality."""
         return self.format in (AudioFormat.FLAC, AudioFormat.WAV)
+
+    def is_true_lossless(self, source_name: str = "") -> bool:
+        """
+        Check if truly lossless (not transcoded from lossy source).
+
+        Spotify outputs FLAC but source is 320kbps Vorbis, so it's not true lossless.
+        YouTube is always lossy.
+        """
+        if not self.is_lossless():
+            return False
+        # Spotify is transcoded from 320kbps Vorbis - not true lossless
+        if source_name.lower() == "spotify":
+            return False
+        return True
 
     def __str__(self) -> str:
         parts = []

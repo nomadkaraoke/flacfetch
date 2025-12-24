@@ -98,12 +98,16 @@ def categorize_releases(
     # Category definitions with filters
     categories = []
 
-    # 1. Top Seeded (lossless with high seeders)
+    # Helper to check true lossless (not Spotify transcoded)
+    def is_true_lossless(r: Release) -> bool:
+        return r.quality and r.quality.is_true_lossless(r.source_name)
+
+    # 1. Top Seeded (TRUE lossless with high seeders - excludes Spotify)
     top_seeded = []
     for r in releases:
         if is_assigned(r):
             continue
-        if r.quality and r.quality.is_lossless() and r.seeders and r.seeders >= 50:
+        if is_true_lossless(r) and r.seeders and r.seeders >= 50:
             if artist_matches(r):
                 top_seeded.append(r)
                 mark_assigned(r)
@@ -111,12 +115,12 @@ def categorize_releases(
     if top_seeded:
         categories.append(Category(name="TOP SEEDED", releases=top_seeded[:5], max_display=3))
 
-    # 2. Album Releases (by matching artist)
+    # 2. Album Releases (TRUE lossless albums - excludes Spotify)
     albums = []
     for r in releases:
         if is_assigned(r):
             continue
-        if r.quality and r.quality.is_lossless() and r.release_type == "Album":
+        if is_true_lossless(r) and r.release_type == "Album":
             if artist_matches(r):
                 albums.append(r)
                 mark_assigned(r)
@@ -124,12 +128,12 @@ def categorize_releases(
     if albums:
         categories.append(Category(name="ALBUM RELEASES", releases=albums[:5], max_display=3))
 
-    # 3. Hi-Res 24-bit
+    # 3. Hi-Res 24-bit (TRUE lossless)
     hires = []
     for r in releases:
         if is_assigned(r):
             continue
-        if (r.quality and r.quality.is_lossless() and
+        if (is_true_lossless(r) and
             r.quality.bit_depth and r.quality.bit_depth >= 24):
             if artist_matches(r):
                 hires.append(r)
@@ -138,12 +142,12 @@ def categorize_releases(
     if hires:
         categories.append(Category(name="HI-RES 24-BIT", releases=hires[:5], max_display=3))
 
-    # 4. Singles
+    # 4. Singles (TRUE lossless)
     singles = []
     for r in releases:
         if is_assigned(r):
             continue
-        if r.quality and r.quality.is_lossless() and r.release_type in ("Single", "EP"):
+        if is_true_lossless(r) and r.release_type in ("Single", "EP"):
             if artist_matches(r):
                 singles.append(r)
                 mark_assigned(r)
@@ -151,12 +155,12 @@ def categorize_releases(
     if singles:
         categories.append(Category(name="SINGLES", releases=singles[:3], max_display=2))
 
-    # 5. Live Versions
+    # 5. Live Versions (TRUE lossless)
     live = []
     for r in releases:
         if is_assigned(r):
             continue
-        if r.quality and r.quality.is_lossless():
+        if is_true_lossless(r):
             if r.release_type in ("Live album", "Bootleg", "Concert Recording"):
                 live.append(r)
                 mark_assigned(r)
@@ -164,12 +168,12 @@ def categorize_releases(
     if live:
         categories.append(Category(name="LIVE VERSIONS", releases=live[:3], max_display=2))
 
-    # 6. Compilations (including soundtracks)
+    # 6. Compilations (TRUE lossless, including soundtracks)
     compilations = []
     for r in releases:
         if is_assigned(r):
             continue
-        if r.quality and r.quality.is_lossless():
+        if is_true_lossless(r):
             if r.release_type in ("Compilation", "Soundtrack", "Anthology"):
                 compilations.append(r)
                 mark_assigned(r)
@@ -177,12 +181,12 @@ def categorize_releases(
     if compilations:
         categories.append(Category(name="COMPILATIONS", releases=compilations[:3], max_display=2))
 
-    # 7. Vinyl Rips
+    # 7. Vinyl Rips (TRUE lossless)
     vinyl = []
     for r in releases:
         if is_assigned(r):
             continue
-        if r.quality and r.quality.is_lossless():
+        if is_true_lossless(r):
             from .models import MediaSource
             if r.quality.media == MediaSource.VINYL:
                 vinyl.append(r)
@@ -191,39 +195,52 @@ def categorize_releases(
     if vinyl:
         categories.append(Category(name="VINYL RIPS", releases=vinyl[:3], max_display=2))
 
-    # 8. Non-Matching Artist (lossless releases where artist doesn't match)
+    # 8. Non-Matching Artist (TRUE lossless releases where artist doesn't match)
     non_matching = []
     for r in releases:
         if is_assigned(r):
             continue
-        if r.quality and r.quality.is_lossless() and not artist_matches(r):
+        if is_true_lossless(r) and not artist_matches(r):
             non_matching.append(r)
             mark_assigned(r)
     non_matching.sort(key=lambda r: r.seeders or 0, reverse=True)
     if non_matching:
         categories.append(Category(name="OTHER ARTISTS", releases=non_matching[:3], max_display=2))
 
-    # 9. Remaining Lossless (catch-all for any remaining lossless)
+    # 9. Remaining TRUE Lossless (catch-all for any remaining true lossless)
     remaining_lossless = []
     for r in releases:
         if is_assigned(r):
             continue
-        if r.quality and r.quality.is_lossless():
+        if is_true_lossless(r):
             remaining_lossless.append(r)
             mark_assigned(r)
     remaining_lossless.sort(key=lambda r: r.seeders or 0, reverse=True)
     if remaining_lossless:
         categories.append(Category(name="OTHER LOSSLESS", releases=remaining_lossless[:3], max_display=2))
 
-    # 10. YouTube/Lossy
+    # 10. Spotify (lossy source transcoded to FLAC - better than YouTube but not true lossless)
+    spotify = []
+    for r in releases:
+        if is_assigned(r):
+            continue
+        if r.source_name.lower() == "spotify":
+            spotify.append(r)
+            mark_assigned(r)
+    # Sort by popularity (stored in view_count for Spotify)
+    spotify.sort(key=lambda r: r.view_count or 0, reverse=True)
+    if spotify:
+        categories.append(Category(name="SPOTIFY (320kbps source)", releases=spotify[:5], max_display=3))
+
+    # 11. YouTube/Lossy
     lossy = []
     for r in releases:
         if is_assigned(r):
             continue
-        # All remaining are lossy (YouTube, Spotify, etc.)
+        # All remaining are lossy (YouTube, etc.)
         lossy.append(r)
         mark_assigned(r)
-    # Sort YouTube by view count, others by whatever metric available
+    # Sort YouTube by view count
     lossy.sort(key=lambda r: (r.view_count or 0, r.seeders or 0), reverse=True)
     if lossy:
         categories.append(Category(name="YOUTUBE/LOSSY", releases=lossy[:3], max_display=3))

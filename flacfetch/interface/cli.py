@@ -117,6 +117,7 @@ def format_release_line(
     # Get quality info - handle both Release and dict
     if isinstance(release, Release):
         is_lossless = release.quality.is_lossless()
+        is_true_lossless = release.quality.is_true_lossless(source_name)
         quality_str = str(release.quality)
         media_name = release.quality.media.name
         formatted_size = release.formatted_size
@@ -125,6 +126,8 @@ def format_release_line(
     else:
         # Dict from to_dict()
         is_lossless = release.get("is_lossless", False)
+        # Spotify is not true lossless (transcoded from 320kbps)
+        is_true_lossless = is_lossless and source_name.lower() != "spotify"
         quality_str = release.get("quality_str", "")
         quality_data = release.get("quality", {})
         media_name = quality_data.get("media", "OTHER") if isinstance(quality_data, dict) else "OTHER"
@@ -132,9 +135,12 @@ def format_release_line(
         formatted_duration = release.get("formatted_duration")
         formatted_views = release.get("formatted_views")
 
-    # 1. Format indicator (lossless vs lossy)
-    if is_lossless:
+    # 1. Format indicator (true lossless vs spotify vs lossy)
+    if is_true_lossless:
         format_indicator = f"{C.GREEN}[LOSSLESS]{C.RESET}"
+    elif source_name.lower() == "spotify":
+        # Spotify is 320kbps Vorbis transcoded to FLAC - better than YouTube but not true lossless
+        format_indicator = f"{C.YELLOW}[320kbps]{C.RESET}"
     else:
         format_indicator = f"{C.DIM}[lossy]{C.RESET}"
 
