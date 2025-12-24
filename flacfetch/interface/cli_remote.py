@@ -582,14 +582,21 @@ Optional:
                             print(f"\n{Colors.YELLOW}Cancelled.{Colors.RESET}")
                             sys.exit(0)
                         if 1 <= idx <= len(cat_display):
-                            # Find the index in original results
+                            # Find the original API index for the selected release
                             selected_release = cat_display[idx - 1]
-                            # Find matching result in display_results by download_url
-                            for i, r in enumerate(display_results):
-                                if r.get('download_url') == selected_release.download_url:
-                                    selected_idx = i
+                            # Match by provider + title + artist to find the correct result
+                            found = False
+                            for r in display_results:
+                                if (r.get('provider') == selected_release.source_name and
+                                    r.get('title') == selected_release.title and
+                                    r.get('artist') == selected_release.artist):
+                                    selected_idx = r.get('index', 0)
+                                    selected = r
+                                    found = True
                                     break
-                            selected = display_results[selected_idx]
+                            if not found:
+                                print(f"{Colors.RED}Error: Could not find matching release{Colors.RESET}")
+                                continue
                             break
                         print(f"{Colors.RED}Invalid selection. Enter 1-{len(cat_display)}, 'more', or 0.{Colors.RESET}")
                     except ValueError:
@@ -638,6 +645,9 @@ Optional:
 
     # Start download
     print(f"\n{Colors.BOLD}Starting download...{Colors.RESET}")
+
+    if args.verbose:
+        print(f"{Colors.DIM}Selected: index={selected_idx}, provider={selected.get('provider')}, title={selected.get('title')}{Colors.RESET}")
 
     try:
         download_id = client.download(

@@ -51,6 +51,14 @@ async def start_download(
             detail=f"Invalid result index {request.result_index}. Valid range: 0-{len(search.results)-1}"
         )
 
+    # Log which release is being downloaded
+    selected_release = search.results[request.result_index]
+    logger.info(
+        f"Download requested: index={request.result_index}, "
+        f"provider={getattr(selected_release, 'source_name', 'Unknown')}, "
+        f"title={getattr(selected_release, 'title', 'Unknown')}"
+    )
+
     # Validate GCS params
     if request.upload_to_gcs and not request.gcs_path:
         raise HTTPException(
