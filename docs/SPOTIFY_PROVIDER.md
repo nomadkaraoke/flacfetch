@@ -52,12 +52,16 @@ You need to create a Spotify Developer application to get API credentials:
   # macOS
   brew install librespot
   
-  # Linux (Debian/Ubuntu) - use pre-built binary
+  # Linux (Debian/Ubuntu) - use pre-built binary from GCS (flacfetch infra)
+  gsutil cp gs://karaoke-gen-storage-nomadkaraoke/binaries/librespot-0.8.0-linux-x86_64 /usr/local/bin/librespot
+  chmod +x /usr/local/bin/librespot
+  
+  # Or download from GitHub releases
   wget https://github.com/librespot-org/librespot/releases/download/v0.5.0/librespot-linux-x86_64.tar.gz
   tar -xzf librespot-linux-x86_64.tar.gz
   sudo mv librespot /usr/local/bin/
   
-  # From source (slow, requires Rust)
+  # From source (slow ~30min, requires Rust)
   cargo install librespot --locked
   ```
 

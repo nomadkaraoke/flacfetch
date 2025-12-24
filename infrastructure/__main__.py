@@ -196,21 +196,26 @@ echo "========================================"
 # Install dependencies (idempotent)
 echo "Installing/updating system dependencies..."
 apt-get update
-apt-get install -y python3-pip python3-venv transmission-daemon ffmpeg git curl cargo
+apt-get install -y python3-pip python3-venv transmission-daemon ffmpeg git curl
 
 # =============================================================================
 # Install librespot (for Spotify audio capture)
 # =============================================================================
+# Pre-compiled binary is stored in GCS to avoid 30+ minute compilation time
 echo "Installing/updating librespot..."
-if ! command -v librespot &> /dev/null; then
-    echo "Installing librespot via cargo (this may take a few minutes on first run)..."
-    cargo install librespot --locked
-    # Add cargo bin to PATH for this session
-    export PATH="$HOME/.cargo/bin:$PATH"
-    # Add to system profile for future sessions
-    echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> /etc/profile.d/cargo.sh
-else
-    echo "librespot already installed: $(librespot --version 2>&1 | head -1)"
+LIBRESPOT_VERSION="0.8.0"
+LIBRESPOT_BIN="/usr/local/bin/librespot"
+
+if [ -f "$LIBRESPOT_BIN" ]; then
+    INSTALLED_VERSION=$("$LIBRESPOT_BIN" --version 2>&1 | grep -oP 'librespot \K[0-9.]+' || echo "unknown")
+    echo "librespot already installed: $INSTALLED_VERSION"
+fi
+
+if [ ! -f "$LIBRESPOT_BIN" ] || [ "$INSTALLED_VERSION" != "$LIBRESPOT_VERSION" ]; then
+    echo "Downloading librespot $LIBRESPOT_VERSION from GCS..."
+    gsutil cp gs://karaoke-gen-storage-nomadkaraoke/binaries/librespot-${LIBRESPOT_VERSION}-linux-x86_64 "$LIBRESPOT_BIN"
+    chmod +x "$LIBRESPOT_BIN"
+    echo "Installed: $($LIBRESPOT_BIN --version 2>&1 | head -1)"
 fi
 
 # =============================================================================
@@ -452,6 +457,7 @@ Environment="OPS_API_URL=${OPS_API_URL}"
 Environment="SPOTIPY_CLIENT_ID=${SPOTIPY_CLIENT_ID}"
 Environment="SPOTIPY_CLIENT_SECRET=${SPOTIPY_CLIENT_SECRET}"
 Environment="SPOTIPY_REDIRECT_URI=${SPOTIPY_REDIRECT_URI}"
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
 Environment="GCS_BUCKET=${GCS_BUCKET}"
 Environment="FLACFETCH_KEEP_SEEDING=true"
 Environment="FLACFETCH_MIN_FREE_GB=5"
