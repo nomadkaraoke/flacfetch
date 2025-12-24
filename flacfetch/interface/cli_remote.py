@@ -487,6 +487,19 @@ Optional:
     results = search_result.get("results", [])
     search_id = search_result.get("search_id")
 
+    # Display provider stats if available
+    provider_stats = search_result.get("provider_stats", [])
+    if provider_stats:
+        stats_parts = []
+        for stat in provider_stats:
+            provider = stat.get("provider", "?")
+            count = stat.get("results_count", 0)
+            if count > 0:
+                stats_parts.append(f"{Colors.GREEN}{provider}: {count}{Colors.RESET}")
+            else:
+                stats_parts.append(f"{Colors.DIM}{provider}: 0{Colors.RESET}")
+        print(f"{Colors.BOLD}Results:{Colors.RESET}   {' | '.join(stats_parts)}\n")
+
     if not results:
         print(f"{Colors.YELLOW}No results found.{Colors.RESET}")
         sys.exit(0)

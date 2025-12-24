@@ -48,6 +48,13 @@ class SearchResultItem(BaseModel):
     download_url: Optional[str] = None  # For internal use, not exposed
 
 
+class ProviderSearchStats(BaseModel):
+    """Stats for a single provider's search results."""
+    provider: str
+    results_count: int
+    searched: bool = True
+
+
 class SearchResponse(BaseModel):
     """Response from search endpoint."""
     search_id: str
@@ -55,6 +62,7 @@ class SearchResponse(BaseModel):
     title: str
     results: List[SearchResultItem]
     results_count: int
+    provider_stats: Optional[List[ProviderSearchStats]] = None
 
 
 # =============================================================================
