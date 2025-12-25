@@ -65,3 +65,36 @@ def test_hf_noise_floor_and_fill_detects_missing_haze():
     assert res_lossy.score > res_lossless.score
 
 
+def test_hf_texture_detects_patchiness():
+    dt = _import_detect_transcode()
+
+    sr = 44100
+    dur = 6.0
+    t = np.arange(int(sr * dur)) / sr
+
+    # Make mid-band "quiet" half the time.
+    envelope = (0.2 + 0.8 * (np.sin(2 * np.pi * 0.5 * t) > 0)).astype(np.float32)
+    y_base = (0.02 * envelope * np.sin(2 * np.pi * 1000.0 * t)).astype(np.float32)
+
+    rng = np.random.default_rng(1)
+    noise = rng.standard_normal(t.shape[0]).astype(np.float32)
+
+    from scipy import signal
+
+    sos = signal.butter(6, 19000.0, btype="highpass", fs=sr, output="sos")
+    hf_noise = signal.sosfilt(sos, noise).astype(np.float32)
+
+    # Stationary haze: constant *very low-level* HF noise so that "fill" is not saturated at 1.0.
+    # (The detector uses a -110 dBFS-like threshold for fill.)
+    y_stationary = y_base + 2.0e-5 * hf_noise
+
+    # Patchy haze: gated on/off in blocks to create striping/dropouts.
+    gate = ((np.floor(t / 0.15) % 2) == 0).astype(np.float32)  # 150ms blocks
+    y_patchy = y_base + 6.0e-5 * hf_noise * gate
+
+    res_stationary, *_ = dt.analyze_hf_multiband_texture(y_stationary, sr, verbose=True)
+    res_patchy, *_ = dt.analyze_hf_multiband_texture(y_patchy, sr, verbose=True)
+
+    assert res_patchy.score > res_stationary.score
+
+

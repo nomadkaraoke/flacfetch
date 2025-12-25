@@ -159,6 +159,9 @@ class TranscodeAnalysis:
     hf_noise_floor_db: float | None
     hf_noise_sparsity: float | None
     hf_noise_fill: float | None
+    hf_texture_band: str | None
+    hf_texture_score: float | None
+    hf_texture_details: dict | None
     individual_results: list[AnalysisResult] = field(default_factory=list)
     details: dict = field(default_factory=dict)
 
@@ -232,6 +235,21 @@ class TranscodeAnalysis:
                 hf_status = "\033[92m✓ Normal\033[0m"
             print(
                 f"  • HF Noise Floor (quiet frames): {self.hf_noise_floor_db:.1f} dB (sparsity: {self.hf_noise_sparsity:.2f}{fill_txt}) {hf_status}"
+            )
+
+        # HF texture / patchiness (captures Spek-visible "striping" vs continuous haze)
+        if self.hf_texture_band and self.hf_texture_score is not None and self.hf_texture_details:
+            suspicious = self.hf_texture_score >= 0.55
+            status = "\033[93m⚠️  SUSPICIOUS\033[0m" if suspicious else "\033[92m✓ Normal\033[0m"
+            d = self.hf_texture_details
+            print(
+                "  • HF Texture (quiet frames): "
+                f"{self.hf_texture_band} "
+                f"(fill med/p10: {d.get('fill_median', 0):.2f}/{d.get('fill_p10', 0):.2f}, "
+                f"Δfill: {d.get('fill_drop', 0):.2f}; "
+                f"HF floor med/p10: {d.get('hf_floor_db_median', 0):.1f}/{d.get('hf_floor_db_p10', 0):.1f} dB, "
+                f"ΔdB: {d.get('hf_floor_db_drop', 0):.1f}) "
+                f"{status}"
             )
 
         print(f"\n{bold}File Information:{reset}")
@@ -803,6 +821,195 @@ def analyze_hf_noise_floor(
     return AnalysisResult(name="HF Noise Floor", score=score, confidence=confidence, details=details), hf_floor_db, hf_sparsity, hf_fill
 
 
+def analyze_hf_multiband_texture(
+    y: NDArray[np.float32], sr: int, verbose: bool = False
+) -> tuple[AnalysisResult, str | None, float | None, dict | None]:
+    """
+    Detect "striping/patchiness" in high-frequency bands during quiet/very-quiet frames.
+
+    This targets what Spek often makes obvious even when average HF power looks similar:
+    - Lossless sources often show a relatively stationary HF "haze" (consistent background).
+    - Perceptual codecs may retain HF on transients but collapse HF background intermittently,
+      creating a darker, patchier top band (low 10th percentile fill / larger dropouts).
+
+    Returns (AnalysisResult, worst_band_label, worst_band_score, worst_band_details).
+    """
+    nyquist = sr / 2
+    if nyquist < 12000:
+        return (
+            AnalysisResult(
+                name="HF Texture",
+                score=0.0,
+                confidence=0.2,
+                details=f"Sample rate too low for HF texture analysis (Nyquist={nyquist:.0f} Hz)",
+            ),
+            None,
+            None,
+            None,
+        )
+
+    magnitude, frequencies, _times = compute_spectrogram(y, sr, n_fft=8192, hop_length=1024)
+    power = magnitude * magnitude
+    peak_power = float(np.max(power))
+    if peak_power <= 0:
+        return (
+            AnalysisResult(name="HF Texture", score=0.0, confidence=0.1, details="Could not analyze - silent audio"),
+            None,
+            None,
+            None,
+        )
+    power_norm = power / (peak_power + 1e-20)
+
+    mid_mask = (frequencies >= 2000) & (frequencies <= 10000)
+    if np.count_nonzero(mid_mask) < 5:
+        return (
+            AnalysisResult(name="HF Texture", score=0.0, confidence=0.2, details="Not enough mid-band resolution"),
+            None,
+            None,
+            None,
+        )
+
+    frame_mid = np.mean(power[mid_mask, :], axis=0)
+    p1 = float(np.percentile(frame_mid, 1))
+    p5 = float(np.percentile(frame_mid, 5))
+    p25 = float(np.percentile(frame_mid, 25))
+    if p25 <= 0:
+        return (
+            AnalysisResult(name="HF Texture", score=0.0, confidence=0.1, details="Could not analyze - silent/near-silent audio"),
+            None,
+            None,
+            None,
+        )
+
+    quiet_mask = (frame_mid > p5) & (frame_mid <= p25)
+    tiny_floor = max(p1 * 0.5, 1e-12)
+    very_quiet_mask = (frame_mid > tiny_floor) & (frame_mid <= p5)
+    mask_frames = quiet_mask | very_quiet_mask
+    n_frames = int(np.count_nonzero(mask_frames))
+    if n_frames < 30:
+        return (
+            AnalysisResult(
+                name="HF Texture",
+                score=0.0,
+                confidence=0.2,
+                details="Not enough quiet/very-quiet frames for HF texture analysis",
+            ),
+            None,
+            None,
+            None,
+        )
+
+    # Bands chosen to align with common Spek observations at 44.1k (top haze often >18k).
+    # Clamp to Nyquist to keep working for other sample rates.
+    band_edges = [
+        (16000.0, 18000.0),
+        (18000.0, 20000.0),
+        (20000.0, nyquist * 0.98),
+    ]
+
+    def _band_metrics(f_lo: float, f_hi: float) -> dict | None:
+        if f_lo >= nyquist:
+            return None
+        lo = f_lo
+        hi = min(f_hi, nyquist * 0.98)
+        if hi <= lo:
+            return None
+        band_mask = (frequencies >= lo) & (frequencies <= hi)
+        if np.count_nonzero(band_mask) < 5:
+            return None
+
+        # "Fill" is Spek-like: fraction of bins above a very low threshold in dBFS.
+        band_bins_dbfs = 10.0 * np.log10(power_norm[band_mask, :] + 1e-20)
+        fill_per_frame = np.mean(band_bins_dbfs > -110.0, axis=0)
+
+        fill_med = float(np.median(fill_per_frame[mask_frames]))
+        fill_p10 = float(np.percentile(fill_per_frame[mask_frames], 10))
+        fill_drop = float(fill_med - fill_p10)
+
+        # Also track HF band floor for these frames
+        frame_band_power = np.mean(power[band_mask, :], axis=0)
+        band_db = 10.0 * np.log10(frame_band_power + 1e-20)
+        band_db_med = float(np.median(band_db[mask_frames]))
+        band_db_p10 = float(np.percentile(band_db[mask_frames], 10))
+        band_db_drop = float(band_db_med - band_db_p10)
+
+        return {
+            "band_hz": (float(lo), float(hi)),
+            "fill_median": fill_med,
+            "fill_p10": fill_p10,
+            "fill_drop": fill_drop,
+            "hf_floor_db_median": band_db_med,
+            "hf_floor_db_p10": band_db_p10,
+            "hf_floor_db_drop": band_db_drop,
+            "n_frames": n_frames,
+        }
+
+    best = None
+    best_label = None
+    best_score = -1.0
+
+    for lo, hi in band_edges:
+        m = _band_metrics(lo, hi)
+        if not m:
+            continue
+
+        # Score: focus on *dropouts* (patchiness) and low fill in very top bands.
+        # The thresholds are intentionally conservative; we only want to flag strong Spek-like striping.
+        fill_med = m["fill_median"]
+        fill_drop = m["fill_drop"]
+        db_drop = m["hf_floor_db_drop"]
+
+        score = 0.10
+        confidence = 0.45
+
+        # Strong patchiness: big dropout tail (fill collapse) + large dB-drop tail.
+        # We intentionally require a *fill* tail collapse here to avoid false positives on real lossless
+        # material where musical HF content is naturally intermittent (especially in 16–18 kHz).
+        if fill_drop > 0.25 and db_drop > 8.0:
+            score = 0.70
+            confidence = 0.60
+        elif fill_drop > 0.18 and db_drop > 6.0:
+            score = 0.50
+            confidence = 0.55
+        elif fill_med < 0.25 and fill_drop > 0.10:
+            # Consistently dark in this band
+            score = 0.55
+            confidence = 0.55
+
+        # Prefer higher bands when scores tie (more indicative of codec behavior)
+        label = f"{int(lo/1000)}–{int(min(hi, nyquist)/1000)} kHz"
+        tie_break = lo / 1000.0
+        if (score > best_score) or (score == best_score and (best is None or tie_break > best["band_hz"][0] / 1000.0)):
+            best_score = score
+            best = m
+            best_label = label
+            best_conf = confidence
+
+    if best is None or best_label is None:
+        return (
+            AnalysisResult(name="HF Texture", score=0.0, confidence=0.2, details="Could not compute HF texture metrics"),
+            None,
+            None,
+            None,
+        )
+
+    details = (
+        f"Most suspicious HF band: {best_label} "
+        f"(fill med/p10={best['fill_median']:.2f}/{best['fill_p10']:.2f}, Δfill={best['fill_drop']:.2f}; "
+        f"HF floor med/p10={best['hf_floor_db_median']:.1f}/{best['hf_floor_db_p10']:.1f} dB, "
+        f"ΔdB={best['hf_floor_db_drop']:.1f})"
+    )
+    if verbose:
+        details += f" | quiet frames: {int(np.count_nonzero(quiet_mask))}; very quiet frames: {int(np.count_nonzero(very_quiet_mask))}"
+
+    return (
+        AnalysisResult(name="HF Texture", score=float(best_score), confidence=float(best_conf), details=details),
+        best_label,
+        float(best_score),
+        best,
+    )
+
+
 def identify_codec(cutoff_hz: float | None, sr: int) -> tuple[str | None, int | None]:
     """
     Attempt to identify the source codec and bitrate from the frequency cutoff.
@@ -881,6 +1088,10 @@ def analyze_file(file_path: str | Path, verbose: bool = False) -> TranscodeAnaly
     hf_noise_result, hf_floor_db, hf_sparsity, hf_fill = analyze_hf_noise_floor(y, sr, verbose)
     results.append(hf_noise_result)
 
+    # 6. HF multiband texture / patchiness (captures Spek-visible striping)
+    hf_texture_result, hf_texture_band, hf_texture_score, hf_texture_details = analyze_hf_multiband_texture(y, sr, verbose)
+    results.append(hf_texture_result)
+
     # Extract specific findings
     detected_cutoff = None
     # Parse cutoff frequency from various detail message formats
@@ -910,6 +1121,7 @@ def analyze_file(file_path: str | Path, verbose: bool = False) -> TranscodeAnaly
         "Pre-echo Detection": 1.0,
         "Spectral Holes": 1.0,
         "HF Noise Floor": 2.0,
+        "HF Texture": 1.5,
     }
 
     total_weight = sum(r.confidence * weights.get(r.name, 1.0) for r in results)
@@ -957,6 +1169,9 @@ def analyze_file(file_path: str | Path, verbose: bool = False) -> TranscodeAnaly
         hf_noise_floor_db=hf_floor_db,
         hf_noise_sparsity=hf_sparsity,
         hf_noise_fill=hf_fill,
+        hf_texture_band=hf_texture_band,
+        hf_texture_score=hf_texture_score,
+        hf_texture_details=hf_texture_details,
         individual_results=results,
         details={
             "sample_rate": sr,
@@ -1063,6 +1278,9 @@ Examples:
                 "hf_noise_floor_db": result.hf_noise_floor_db,
                 "hf_noise_sparsity": result.hf_noise_sparsity,
                 "hf_noise_fill": result.hf_noise_fill,
+                "hf_texture_band": result.hf_texture_band,
+                "hf_texture_score": result.hf_texture_score,
+                "hf_texture_details": result.hf_texture_details,
                 "details": result.details,
             }
             print(json.dumps(output, indent=2))
