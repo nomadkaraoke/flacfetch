@@ -48,7 +48,7 @@ spotify = [
     "spotipy>=2.25.1",  # CVE-2025-27154 fixed in 2.25.1
 ]
 ejs = [
-    "yt-dlp-ejs>=2024.0.0",
+    "yt-dlp-ejs>=0.3.0",
 ]
 dev = [
     "pytest>=7.0.0",
@@ -71,7 +71,7 @@ all = [
     # spotify
     "spotipy>=2.25.1",
     # ejs
-    "yt-dlp-ejs>=2024.0.0",
+    "yt-dlp-ejs>=0.3.0",
     # dev
     "pytest>=7.0.0",
     "pytest-mock>=3.10.0",
