@@ -282,6 +282,9 @@ def compute_spectrogram(
 def analyze_frequency_cutoff(y: NDArray[np.float32], sr: int, verbose: bool = False) -> AnalysisResult:
     """
     Detect hard frequency cutoffs typical of MP3/AAC.
+
+    Uses a reference-based approach: compare high-frequency power to mid-frequency power.
+    A hard cutoff is detected when power drops to near-zero relative to mid frequencies.
     """
     magnitude, frequencies, _ = compute_spectrogram(y, sr, n_fft=4096)
 
@@ -294,9 +297,25 @@ def analyze_frequency_cutoff(y: NDArray[np.float32], sr: int, verbose: bool = Fa
         return AnalysisResult(name="Frequency Cutoff", score=0.0, confidence=0.0, details="Could not analyze - silent audio")
 
     normalized = mean_power / max_power
+    nyquist = sr / 2
 
-    # Find the frequency where power drops significantly
-    # Look only in the upper frequency range (above 10kHz)
+    # Get reference power from mid-frequencies (5-10kHz) where most audio has content
+    mid_freq_mask = (frequencies >= 5000) & (frequencies <= 10000)
+    mid_freq_power = np.mean(normalized[mid_freq_mask])
+
+    if mid_freq_power < 0.0001:
+        return AnalysisResult(
+            name="Frequency Cutoff",
+            score=0.0,
+            confidence=0.2,
+            details="Very low mid-frequency content - cannot reliably analyze",
+        )
+
+    # Define threshold: frequencies with power < 1% of mid-frequency average are "dead"
+    dead_threshold = mid_freq_power * 0.01
+
+    # Find the highest frequency that still has significant power
+    # Scan from Nyquist downward to find where audio content exists
     high_freq_mask = frequencies > 10000
     high_freq_indices = np.where(high_freq_mask)[0]
 
@@ -308,58 +327,87 @@ def analyze_frequency_cutoff(y: NDArray[np.float32], sr: int, verbose: bool = Fa
             details=f"Sample rate too low to analyze HF content (sr={sr})",
         )
 
-    # Calculate the gradient of power in high frequencies
-    high_freq_power = normalized[high_freq_indices]
-    gradient = np.gradient(high_freq_power)
+    # Find the effective cutoff: highest frequency with power > dead_threshold
+    effective_cutoff = None
+    for idx in reversed(high_freq_indices):
+        if normalized[idx] > dead_threshold:
+            effective_cutoff = frequencies[idx]
+            break
 
-    # Find where there's a sharp negative gradient (sudden drop)
-    sharp_drop_threshold = -0.01
-    sharp_drops = np.where(gradient < sharp_drop_threshold)[0]
+    if effective_cutoff is None:
+        # No significant HF content at all
+        effective_cutoff = 10000.0
 
-    detected_cutoff = None
-    score = 0.0
-    confidence = 0.5
+    # Calculate how far below Nyquist the cutoff is
+    gap_to_nyquist = nyquist - effective_cutoff
 
-    if len(sharp_drops) > 0:
-        # Find the first significant drop
-        for drop_idx in sharp_drops:
-            actual_freq_idx = high_freq_indices[drop_idx]
-            cutoff_freq = frequencies[actual_freq_idx]
+    # Also check for hard cutoff pattern: sharp drop between adjacent frequencies
+    # Look for where power ratio drops by 10x or more within a small frequency range
+    hard_cutoff_detected = False
+    hard_cutoff_freq = None
 
-            # Verify this is a real cutoff by checking power ratio
-            if drop_idx + 5 < len(high_freq_power):
-                power_before = high_freq_power[drop_idx]
-                power_after = np.mean(high_freq_power[drop_idx + 1 : drop_idx + 5])
+    for i in range(len(high_freq_indices) - 3):
+        idx = high_freq_indices[i]
+        idx_next = high_freq_indices[i + 3]  # Check 3 bins ahead (~35 Hz at 4096 FFT)
 
-                if power_before > 0 and power_after / power_before < 0.1:
-                    detected_cutoff = cutoff_freq
-                    nyquist = sr / 2
+        power_here = normalized[idx]
+        power_ahead = normalized[idx_next]
 
-                    # Score based on how far below Nyquist the cutoff is
-                    if cutoff_freq < nyquist - 2000:
-                        score = 0.9
-                        confidence = 0.9
-                    elif cutoff_freq < nyquist - 1000:
-                        score = 0.6
-                        confidence = 0.7
-                    else:
-                        score = 0.2
-                        confidence = 0.4
-                    break
+        # If power drops by 10x or more, it's a hard cutoff
+        if power_here > dead_threshold and power_ahead < dead_threshold * 0.1:
+            hard_cutoff_detected = True
+            hard_cutoff_freq = frequencies[idx]
+            break
 
-    if detected_cutoff:
-        details = f"Sharp cutoff detected at {detected_cutoff:.0f} Hz (Nyquist: {sr/2:.0f} Hz)"
-    else:
-        # Check if there's energy up to Nyquist
-        nyquist_idx = np.argmin(np.abs(frequencies - sr / 2 * 0.95))
-        if normalized[nyquist_idx] > 0.001:
-            details = f"Full spectrum present up to {sr/2:.0f} Hz"
-            score = 0.0
-            confidence = 0.7
+    # Calculate gap as percentage of Nyquist (more meaningful across sample rates)
+    gap_percentage = gap_to_nyquist / nyquist * 100
+
+    # Also check if there's ANY significant power near Nyquist (95%)
+    near_nyquist_idx = np.argmin(np.abs(frequencies - nyquist * 0.95))
+    near_nyquist_power = normalized[near_nyquist_idx]
+    has_near_nyquist_content = near_nyquist_power > dead_threshold
+
+    # Determine score based on findings
+    if hard_cutoff_detected and hard_cutoff_freq:
+        # Hard cutoff detected - very suspicious
+        if gap_percentage > 15:
+            score = 0.95
+            confidence = 0.95
+            details = f"Hard cutoff at {hard_cutoff_freq:.0f} Hz (Nyquist: {nyquist:.0f} Hz) - likely MP3/AAC"
+        elif gap_percentage > 8:
+            score = 0.85
+            confidence = 0.9
+            details = f"Cutoff at {hard_cutoff_freq:.0f} Hz (Nyquist: {nyquist:.0f} Hz) - possibly high-bitrate lossy"
         else:
-            details = "Gradual rolloff (natural for most audio)"
-            score = 0.1
-            confidence = 0.3
+            score = 0.5
+            confidence = 0.7
+            details = f"Slight cutoff at {hard_cutoff_freq:.0f} Hz (Nyquist: {nyquist:.0f} Hz)"
+    elif gap_percentage > 10:
+        # Large percentage gap - very suspicious even without hard cutoff
+        # This catches YouTube/Opus which has gradual rolloff but clear gap
+        score = 0.85
+        confidence = 0.85
+        details = f"Significant HF gap - content ends at {effective_cutoff:.0f} Hz ({gap_percentage:.0f}% below Nyquist)"
+    elif gap_percentage > 5:
+        # Moderate gap - suspicious
+        score = 0.6
+        confidence = 0.7
+        details = f"Limited HF content - effective range up to {effective_cutoff:.0f} Hz (Nyquist: {nyquist:.0f} Hz)"
+    elif gap_percentage > 2:
+        # Small gap - could be natural rolloff or high-bitrate lossy
+        score = 0.3
+        confidence = 0.5
+        details = f"Slight HF rolloff - content up to {effective_cutoff:.0f} Hz"
+    elif not has_near_nyquist_content:
+        # No gap but no power near Nyquist - might be suspicious
+        score = 0.2
+        confidence = 0.4
+        details = f"Low power near Nyquist - content up to {effective_cutoff:.0f} Hz"
+    else:
+        # Full spectrum content with power near Nyquist
+        score = 0.0
+        confidence = 0.9
+        details = f"Full spectrum up to {effective_cutoff:.0f} Hz (Nyquist: {nyquist:.0f} Hz)"
 
     return AnalysisResult(name="Frequency Cutoff", score=score, confidence=confidence, details=details)
 
@@ -617,22 +665,47 @@ def analyze_file(file_path: str | Path, verbose: bool = False) -> TranscodeAnaly
 
     # Extract specific findings
     detected_cutoff = None
-    if "cutoff detected at" in cutoff_result.details:
-        import re
-
-        match = re.search(r"(\d+)", cutoff_result.details)
+    # Parse cutoff frequency from various detail message formats
+    import re
+    cutoff_patterns = [
+        r"cutoff at (\d+)",           # "Hard cutoff at 20000 Hz"
+        r"Cutoff at (\d+)",           # "Cutoff at 20000 Hz"
+        r"range up to (\d+)",          # "effective range up to 20062 Hz"
+        r"content up to (\d+)",        # "content up to 20000 Hz"
+        r"ends at (\d+)",              # "content ends at 20062 Hz"
+        r"spectrum up to (\d+)",       # "Full spectrum up to 22050 Hz"
+    ]
+    for pattern in cutoff_patterns:
+        match = re.search(pattern, cutoff_result.details)
         if match:
             detected_cutoff = float(match.group(1))
+            break
 
     # Identify probable codec
     suspected_codec, suspected_bitrate = identify_codec(detected_cutoff, sr)
 
-    # Calculate weighted probability
-    total_weight = sum(r.confidence for r in results)
+    # Calculate weighted probability with emphasis on frequency cutoff
+    # Frequency cutoff is the most reliable indicator - weight it 3x
+    weights = {
+        "Frequency Cutoff": 3.0,
+        "Spectral Flatness": 1.0,
+        "Pre-echo Detection": 1.0,
+        "Spectral Holes": 1.0,
+    }
+
+    total_weight = sum(r.confidence * weights.get(r.name, 1.0) for r in results)
     if total_weight > 0:
-        probability = sum(r.score * r.confidence for r in results) / total_weight
+        probability = sum(r.score * r.confidence * weights.get(r.name, 1.0) for r in results) / total_weight
     else:
         probability = 0.0
+
+    # Additionally, if ANY single test has very high score+confidence, set a floor
+    # This prevents one strong signal from being diluted by weak signals
+    for r in results:
+        if r.score >= 0.8 and r.confidence >= 0.8:
+            # Strong signal - probability should be at least this high
+            floor = r.score * 0.9  # Slight reduction but still high
+            probability = max(probability, floor)
 
     # Determine confidence level
     if probability > 0.75:
