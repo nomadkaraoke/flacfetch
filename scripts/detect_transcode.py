@@ -48,23 +48,32 @@ except ImportError:
 class Confidence(Enum):
     """Confidence levels for transcode detection."""
 
-    DEFINITELY_LOSSY = "definitely_lossy"
-    PROBABLY_LOSSY = "probably_lossy"
-    UNCERTAIN = "uncertain"
-    PROBABLY_LOSSLESS = "probably_lossless"
-    DEFINITELY_LOSSLESS = "definitely_lossless"
+    LOSSY_DETECTED = "lossy_detected"           # Clear lossy artifacts found
+    PROBABLY_LOSSY = "probably_lossy"           # Suspicious patterns
+    UNCERTAIN = "uncertain"                      # Can't determine
+    NO_ARTIFACTS = "no_artifacts"               # No lossy artifacts detected
 
     @property
     def color(self) -> str:
         """ANSI color code for terminal output."""
         colors = {
-            "definitely_lossy": "\033[91m",  # Red
-            "probably_lossy": "\033[93m",  # Yellow
-            "uncertain": "\033[90m",  # Gray
-            "probably_lossless": "\033[92m",  # Green
-            "definitely_lossless": "\033[92m",  # Green
+            "lossy_detected": "\033[91m",       # Red
+            "probably_lossy": "\033[93m",       # Yellow
+            "uncertain": "\033[90m",            # Gray
+            "no_artifacts": "\033[92m",         # Green
         }
         return colors.get(self.value, "\033[0m")
+
+    @property
+    def display_text(self) -> str:
+        """Human-readable display text."""
+        texts = {
+            "lossy_detected": "LOSSY ARTIFACTS DETECTED",
+            "probably_lossy": "PROBABLY LOSSY",
+            "uncertain": "UNCERTAIN",
+            "no_artifacts": "NO LOSSY ARTIFACTS DETECTED",
+        }
+        return texts.get(self.value, self.value.upper())
 
 
 @dataclass
@@ -159,9 +168,13 @@ class TranscodeAnalysis:
         print(f"{bold}TRANSCODE ANALYSIS: {self.file_path.name}{reset}")
         print(f"{'='*65}")
 
-        verdict_text = self.confidence.value.replace("_", " ").upper()
+        verdict_text = self.confidence.display_text
         print(f"\n{bold}Verdict:{reset} {self.confidence.color}{verdict_text}{reset}")
         print(f"{bold}Lossy Probability:{reset} {self.probability_lossy:.1%}")
+
+        # Add caveat for "no artifacts" verdict
+        if self.confidence == Confidence.NO_ARTIFACTS:
+            print(f"\n{bold}⚠ Note:{reset} High-bitrate lossy (Vorbis/Opus 256kbps+) may be undetectable")
 
         if self.suspected_codec:
             print(f"{bold}Suspected Source:{reset} {self.suspected_codec}", end="")
@@ -708,16 +721,14 @@ def analyze_file(file_path: str | Path, verbose: bool = False) -> TranscodeAnaly
             probability = max(probability, floor)
 
     # Determine confidence level
-    if probability > 0.75:
-        confidence = Confidence.DEFINITELY_LOSSY
-    elif probability > 0.50:
+    if probability > 0.70:
+        confidence = Confidence.LOSSY_DETECTED
+    elif probability > 0.45:
         confidence = Confidence.PROBABLY_LOSSY
-    elif probability > 0.35:
+    elif probability > 0.25:
         confidence = Confidence.UNCERTAIN
-    elif probability > 0.15:
-        confidence = Confidence.PROBABLY_LOSSLESS
     else:
-        confidence = Confidence.DEFINITELY_LOSSLESS
+        confidence = Confidence.NO_ARTIFACTS
 
     # Extract spectral flatness score
     flatness_score = 0.0
@@ -850,7 +861,7 @@ Examples:
             plot_spectrogram(args.audio_file, args.save_plot)
 
         # Exit code based on result
-        if result.confidence in (Confidence.DEFINITELY_LOSSY, Confidence.PROBABLY_LOSSY):
+        if result.confidence in (Confidence.LOSSY_DETECTED, Confidence.PROBABLY_LOSSY):
             sys.exit(2)  # Likely lossy
         elif result.confidence == Confidence.UNCERTAIN:
             sys.exit(1)  # Uncertain
