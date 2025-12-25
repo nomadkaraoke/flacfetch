@@ -104,6 +104,7 @@ async def search_audio(
             formatted_size=release.formatted_size,
             formatted_duration=release.formatted_duration,
             is_lossless=is_lossless,
+            source_id=release.source_id,
         ))
 
     # Build provider stats

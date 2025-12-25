@@ -249,6 +249,9 @@ class REDProvider(Provider):
                 cat_num = remaster_catalogue_number or group.get("catalogueNumber")
                 year = remaster_year if (torrent.get("remastered") and remaster_year) else group_year
 
+                # Extract torrent ID for source identification
+                torrent_id = str(torrent.get("id", ""))
+
                 r = Release(
                     title=group_name,
                     artist=artist,
@@ -265,7 +268,8 @@ class REDProvider(Provider):
                     target_file=target_file,
                     target_file_size=target_size,
                     match_score=match_score,
-                    track_pattern=track_title # Ensure pattern is passed for highlighting
+                    track_pattern=track_title,  # Ensure pattern is passed for highlighting
+                    source_id=torrent_id,
                 )
                 releases.append(r)
 

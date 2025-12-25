@@ -324,6 +324,7 @@ def format_release_line(
     target_file = _get_release_field(release, "target_file")
     track_pattern = _get_release_field(release, "track_pattern")
     download_url = _get_release_field(release, "download_url")
+    source_id = _get_release_field(release, "source_id")
 
     # Get quality info - handle both Release and dict
     if isinstance(release, Release):
@@ -495,7 +496,21 @@ def format_release_line(
             fname = re.sub(f"({pattern})", f"{C.YELLOW}\\1{C.RESET}", fname, flags=re.IGNORECASE)
         file_str = f', "{fname}"'
 
-    return f"{header}{meta_str}{qual_str}{stats_str}{file_str}"
+    # Source ID and URL for easy copy/paste
+    source_str = ""
+    if source_id:
+        source_lower = source_name.lower()
+        if source_lower == "youtube":
+            source_url = f"youtu.be/{source_id}"
+            source_str = f"\n   {C.DIM}↳ {source_url}{C.RESET}"
+        elif source_lower == "spotify":
+            source_url = f"open.spotify.com/track/{source_id}"
+            source_str = f"\n   {C.DIM}↳ {source_url}{C.RESET}"
+        elif source_lower in ("red", "ops"):
+            # Show torrent ID for tracker sources (prefixed with 't')
+            source_str = f"\n   {C.DIM}↳ torrent: t{source_id}{C.RESET}"
+
+    return f"{header}{meta_str}{qual_str}{stats_str}{file_str}{source_str}"
 
 
 def print_releases(

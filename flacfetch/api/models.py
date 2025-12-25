@@ -47,6 +47,7 @@ class SearchResultItem(BaseModel):
     formatted_duration: Optional[str] = None
     is_lossless: bool = False
     download_url: Optional[str] = None  # For internal use, not exposed
+    source_id: Optional[str] = None  # YouTube video ID, Spotify track ID, torrent ID
 
 
 class ProviderSearchStats(BaseModel):

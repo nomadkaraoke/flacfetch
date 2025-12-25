@@ -130,6 +130,9 @@ class Release:
     # API index for remote CLI matching
     api_index: Optional[int] = None  # Original index in API response for accurate selection
 
+    # Source identification for traceability
+    source_id: Optional[str] = None  # Unique ID from source (e.g., YouTube video ID, Spotify track ID, torrent ID)
+
     def to_dict(self) -> dict:
         """
         Serialize Release to a dictionary for API/JSON transmission.
@@ -158,6 +161,7 @@ class Release:
             "track_pattern": self.track_pattern,
             "match_score": self.match_score,
             "api_index": self.api_index,
+            "source_id": self.source_id,
             # Quality as nested dict
             "quality": {
                 "format": self.quality.format.name,
@@ -218,6 +222,7 @@ class Release:
             track_pattern=data.get("track_pattern"),
             match_score=data.get("match_score", 0.0),
             api_index=data.get("api_index") or data.get("index"),  # Support both field names
+            source_id=data.get("source_id"),
         )
 
     @property
@@ -249,6 +254,30 @@ class Release:
         if self.view_count >= 1_000:
             return f"{self.view_count/1_000:.1f}K"
         return str(self.view_count)
+
+    @property
+    def source_url(self) -> Optional[str]:
+        """
+        Generate a URL to the source for easy copy/paste.
+
+        Returns URL formats:
+        - YouTube: https://youtu.be/{video_id}
+        - Spotify: https://open.spotify.com/track/{track_id}
+        - RED/OPS: Uses download_url (contains torrent page link)
+        """
+        if not self.source_id:
+            return None
+
+        source = self.source_name.lower()
+        if source == "youtube":
+            return f"https://youtu.be/{self.source_id}"
+        elif source == "spotify":
+            return f"https://open.spotify.com/track/{self.source_id}"
+        elif source in ("red", "ops"):
+            # For trackers, we can't construct a public URL without the base URL
+            # Return None and let the CLI handle it with download_url if available
+            return None
+        return None
 
     def __str__(self) -> str:
         # This is the basic string representation, CLI will handle colorization

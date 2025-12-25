@@ -53,10 +53,12 @@ class YoutubeProvider(Provider):
                         if not entry: continue
                         title = entry.get('title', 'Unknown')
 
+                        # Extract video ID for source identification
+                        vid_id = entry.get('id')
+
                         # URL Generation: Prefer webpage_url, fall back to constructed, then direct
                         url = entry.get('webpage_url')
                         if not url:
-                            vid_id = entry.get('id')
                             if vid_id:
                                 url = f"https://youtu.be/{vid_id}"
                             else:
@@ -153,7 +155,8 @@ class YoutubeProvider(Provider):
                             channel=channel,
                             view_count=view_count,
                             duration_seconds=duration,
-                            year=year
+                            year=year,
+                            source_id=vid_id,
                         ))
         except Exception:
             # print(f"YouTube search error: {e}")

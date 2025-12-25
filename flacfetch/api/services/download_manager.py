@@ -58,12 +58,13 @@ def _generate_descriptive_filename(search: SearchCache, release: Any) -> str:
     """
     Generate a descriptive filename that distinguishes different versions.
 
-    Format: Artist - Title (Type, Year, Media, Quality, Provider).ext
+    Format: Artist - Title (Type, Year, Media, Quality, Provider) [source_id].ext
 
     Examples:
-        Avril Lavigne - Unwanted (Album, 2002, CD, 16bit, RED)
-        Avril Lavigne - Unwanted (Album, 2002, WEB, 24bit, OPS)
-        Avril Lavigne - Unwanted (Live album, 2003, CD, 16bit, RED)
+        Avril Lavigne - Unwanted (Album, 2002, CD, 16bit, RED) [t1234567]
+        Avril Lavigne - Unwanted (Album, 2002, WEB, 24bit, OPS) [t987654]
+        piri - dog (EP, 2024, WEB, 16bit, Spotify) [4iV5W9uYEdYUVa79Axb7Rh]
+        Roy Orbison - Oh Pretty Woman (YouTube) [ZGdLIwE7RSg]
     """
     import re
 
@@ -98,21 +99,32 @@ def _generate_descriptive_filename(search: SearchCache, release: Any) -> str:
         if bit_depth:
             parts.append(f"{bit_depth}bit")
 
-    # Provider (RED, OPS, YouTube)
+    # Provider (RED, OPS, YouTube, Spotify)
     source = getattr(release, 'source_name', None)
     if source:
         parts.append(source)
 
-    # Build final filename
+    # Build metadata suffix
     if parts:
         suffix = f" ({', '.join(parts)})"
     else:
         suffix = ""
 
-    filename = f"{base}{suffix}"
+    # Add source ID for traceability (torrent ID, Spotify track ID, YouTube video ID)
+    source_id = getattr(release, 'source_id', None)
+    if source_id:
+        # Prefix torrent IDs with 't' to distinguish from other IDs
+        if source and source.upper() in ("RED", "OPS"):
+            source_id_str = f" [t{source_id}]"
+        else:
+            source_id_str = f" [{source_id}]"
+    else:
+        source_id_str = ""
+
+    filename = f"{base}{suffix}{source_id_str}"
 
     # Sanitize filename (remove/replace invalid characters)
-    # Keep alphanumeric, spaces, hyphens, underscores, parentheses, commas
+    # Keep alphanumeric, spaces, hyphens, underscores, parentheses, commas, brackets
     filename = re.sub(r'[<>:"/\\|?*]', '', filename)
     filename = re.sub(r'\s+', ' ', filename).strip()
 

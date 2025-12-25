@@ -230,6 +230,7 @@ class SpotifyProvider(Provider):
                 match_score=match_score,
                 track_pattern=query.title,
                 view_count=popularity * 10000,  # Scale for sorting compatibility
+                source_id=track_id,
             )
 
         except Exception as e:
