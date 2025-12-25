@@ -228,6 +228,7 @@ class HealthResponse(BaseModel):
     """Health check response."""
     status: str
     version: str
+    started_at: Optional[datetime] = None  # Server start time (deployment indicator)
     transmission: TransmissionHealth
     disk: DiskHealth
     providers: ProvidersHealth

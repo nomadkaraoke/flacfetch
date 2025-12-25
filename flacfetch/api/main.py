@@ -20,13 +20,14 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .routes import config_router, download_router, health_router, search_router, torrents_router
-from .services import get_disk_manager, get_download_manager
+from .services import get_disk_manager, get_download_manager, set_server_started_at
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,9 @@ async def lifespan(app: FastAPI):
     """
     # Startup
     logger.info("Starting flacfetch HTTP API...")
+
+    # Track server start time
+    set_server_started_at(datetime.now(timezone.utc))
 
     # Initialize singleton services
     _ = get_download_manager()

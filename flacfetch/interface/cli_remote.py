@@ -487,7 +487,43 @@ Optional:
 
     # Search
     print(f"\n{Colors.BOLD}Searching:{Colors.RESET} {Colors.GREEN}{artist}{Colors.RESET} - {Colors.GREEN}{title}{Colors.RESET}")
-    print(f"{Colors.BOLD}Server:{Colors.RESET}    {Colors.CYAN}{api_url}{Colors.RESET}\n")
+    print(f"{Colors.BOLD}Server:{Colors.RESET}    {Colors.CYAN}{api_url}{Colors.RESET}")
+
+    # Show server version and status info
+    server_version = health.get("version", "?")
+    ytdlp_version = health.get("ytdlp", {}).get("version", "?") if health.get("ytdlp") else "?"
+    started_at = health.get("started_at")
+
+    # Format started_at as relative time
+    started_str = ""
+    if started_at:
+        try:
+            from datetime import datetime, timezone
+            # Parse ISO format datetime
+            if isinstance(started_at, str):
+                # Handle ISO format with timezone
+                started_dt = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+            else:
+                started_dt = started_at
+            now = datetime.now(timezone.utc)
+            delta = now - started_dt
+            if delta.days > 0:
+                started_str = f"{delta.days}d ago"
+            elif delta.seconds >= 3600:
+                started_str = f"{delta.seconds // 3600}h ago"
+            elif delta.seconds >= 60:
+                started_str = f"{delta.seconds // 60}m ago"
+            else:
+                started_str = "just now"
+        except Exception:
+            started_str = ""
+
+    version_line = f"{Colors.BOLD}Version:{Colors.RESET}   {Colors.DIM}flacfetch {server_version}, yt-dlp {ytdlp_version}"
+    if started_str:
+        version_line += f" (started {started_str})"
+    version_line += f"{Colors.RESET}"
+    print(version_line)
+    print()  # Empty line before results
 
     try:
         search_result = client.search(artist, title, exhaustive=args.exhaustive)

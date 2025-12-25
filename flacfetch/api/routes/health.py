@@ -15,7 +15,7 @@ from ..models import (
     TransmissionHealth,
     YtdlpHealth,
 )
-from ..services import get_disk_manager
+from ..services import get_disk_manager, get_server_started_at
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["health"])
@@ -67,6 +67,7 @@ async def health_check() -> HealthResponse:
     return HealthResponse(
         status=status,
         version=get_version(),
+        started_at=get_server_started_at(),
         transmission=transmission,
         disk=disk,
         providers=providers,
