@@ -4,6 +4,7 @@ api_docs
 *.mp4
 *.flac
 libtorrent_build_work
+audio/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
