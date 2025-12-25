@@ -127,6 +127,9 @@ class Release:
     track_pattern: Optional[str] = None # The track title to search for if target_file is not yet resolved
     match_score: float = 0.0 # 0.0 to 1.0, higher is better match for the track title
 
+    # API index for remote CLI matching
+    api_index: Optional[int] = None  # Original index in API response for accurate selection
+
     def to_dict(self) -> dict:
         """
         Serialize Release to a dictionary for API/JSON transmission.
@@ -154,6 +157,7 @@ class Release:
             "target_file_size": self.target_file_size,
             "track_pattern": self.track_pattern,
             "match_score": self.match_score,
+            "api_index": self.api_index,
             # Quality as nested dict
             "quality": {
                 "format": self.quality.format.name,
@@ -213,6 +217,7 @@ class Release:
             target_file_size=data.get("target_file_size"),
             track_pattern=data.get("track_pattern"),
             match_score=data.get("match_score", 0.0),
+            api_index=data.get("api_index") or data.get("index"),  # Support both field names
         )
 
     @property

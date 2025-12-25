@@ -225,6 +225,9 @@ def convert_api_result_to_display(result: Dict[str, Any]) -> Dict[str, Any]:
     # Map provider back to source_name
     result["source_name"] = result.get("provider", "Unknown")
 
+    # Preserve API index for accurate selection (avoids 24-bit vs 16-bit confusion)
+    result["api_index"] = result.get("index")
+
     # Store quality string separately - API has "quality" as the display string
     # and "quality_data" as the structured data
     result["quality_str"] = result.get("quality", "")
@@ -582,21 +585,29 @@ Optional:
                             print(f"\n{Colors.YELLOW}Cancelled.{Colors.RESET}")
                             sys.exit(0)
                         if 1 <= idx <= len(cat_display):
-                            # Find the original API index for the selected release
+                            # Get the selected release from categorized display
                             selected_release = cat_display[idx - 1]
-                            # Match by provider + title + artist to find the correct result
-                            found = False
-                            for r in display_results:
-                                if (r.get('provider') == selected_release.source_name and
-                                    r.get('title') == selected_release.title and
-                                    r.get('artist') == selected_release.artist):
-                                    selected_idx = r.get('index', 0)
-                                    selected = r
-                                    found = True
-                                    break
-                            if not found:
-                                print(f"{Colors.RED}Error: Could not find matching release{Colors.RESET}")
-                                continue
+                            # Use api_index for precise matching (avoids 24-bit vs 16-bit confusion)
+                            if selected_release.api_index is not None:
+                                selected_idx = selected_release.api_index
+                                selected = display_results[selected_idx]
+                            else:
+                                # Fallback: match by provider + title + artist + bit_depth
+                                found = False
+                                sel_bit_depth = selected_release.quality.bit_depth if selected_release.quality else None
+                                for r in display_results:
+                                    r_bit_depth = r.get('quality_data', {}).get('bit_depth') if r.get('quality_data') else None
+                                    if (r.get('provider') == selected_release.source_name and
+                                        r.get('title') == selected_release.title and
+                                        r.get('artist') == selected_release.artist and
+                                        r_bit_depth == sel_bit_depth):
+                                        selected_idx = r.get('index', 0)
+                                        selected = r
+                                        found = True
+                                        break
+                                if not found:
+                                    print(f"{Colors.RED}Error: Could not find matching release{Colors.RESET}")
+                                    continue
                             break
                         print(f"{Colors.RED}Invalid selection. Enter 1-{len(cat_display)}, 'more', or 0.{Colors.RESET}")
                     except ValueError:
