@@ -1,11 +1,29 @@
+from typing import Optional
 
 import yt_dlp  # type: ignore
 
 from ..core.interfaces import Provider
 from ..core.models import AudioFormat, MediaSource, Quality, Release, TrackQuery
+from ..downloaders.youtube import get_ytdlp_base_opts
 
 
 class YoutubeProvider(Provider):
+    """
+    YouTube search provider using yt-dlp.
+
+    Supports authenticated searches via cookies when configured.
+    """
+
+    def __init__(self, cookies_file: Optional[str] = None):
+        """
+        Initialize YouTube provider.
+
+        Args:
+            cookies_file: Optional path to cookies file for authenticated searches.
+                         If not provided, will auto-detect from environment.
+        """
+        self.cookies_file = cookies_file
+
     @property
     def name(self) -> str:
         return "YouTube"
@@ -15,13 +33,16 @@ class YoutubeProvider(Provider):
         # Adding "topic" often helps find the auto-generated "Topic" channel results which are high quality audio
         search_query = f"ytsearch5:{query.artist} {query.title} topic"
 
-        # Disable extract_flat to get formats and duration
-        ydl_opts = {
+        # Get base options (includes cookies if available)
+        ydl_opts = get_ytdlp_base_opts(self.cookies_file)
+
+        # Add search-specific options
+        ydl_opts.update({
             'quiet': True,
             'extract_flat': False,
             'ignoreerrors': True,
             'no_warnings': True,
-        }
+        })
 
         releases = []
         try:

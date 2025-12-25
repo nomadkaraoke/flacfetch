@@ -212,6 +212,17 @@ class ProvidersHealth(BaseModel):
     youtube: bool
 
 
+class YtdlpHealth(BaseModel):
+    """yt-dlp and EJS status for YouTube downloads."""
+    version: Optional[str] = None
+    ejs_installed: bool = False
+    ejs_version: Optional[str] = None
+    deno_available: bool = False
+    deno_version: Optional[str] = None
+    cookies_configured: bool = False
+    error: Optional[str] = None
+
+
 class HealthResponse(BaseModel):
     """Health check response."""
     status: str
@@ -219,4 +230,5 @@ class HealthResponse(BaseModel):
     transmission: TransmissionHealth
     disk: DiskHealth
     providers: ProvidersHealth
+    ytdlp: Optional[YtdlpHealth] = None
 
