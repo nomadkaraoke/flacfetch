@@ -152,6 +152,7 @@ def _write_cookies_file(cookies_content: str, file_path: str) -> bool:
 
     Returns True if successful, False otherwise.
     """
+    temp_path = None
     try:
         # Write to temp file first, then move atomically
         dir_path = os.path.dirname(file_path)
@@ -168,6 +169,12 @@ def _write_cookies_file(cookies_content: str, file_path: str) -> bool:
         return True
     except Exception as e:
         logger.error(f"Failed to write cookies file: {e}")
+        # Clean up temp file if rename failed
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
         return False
 
 
@@ -264,15 +271,6 @@ async def get_youtube_cookies_status(
                 cookies_valid=False,
                 validation_message=f"Error reading cookies file: {e}",
             )
-
-    # Check if secret is configured (even if file doesn't exist yet)
-    if os.environ.get("YOUTUBE_COOKIES_SECRET"):
-        return CookiesStatusResponse(
-            configured=True,
-            source="secret",
-            cookies_valid=False,  # Can't validate without fetching
-            validation_message="Secret configured but not loaded to file yet",
-        )
 
     return CookiesStatusResponse(
         configured=False,

@@ -264,7 +264,7 @@ class TestConfigRoutes:
 
         from flacfetch.api.main import create_app
 
-        with patch.dict(os.environ, {"FLACFETCH_API_KEY": "test-key", "YOUTUBE_COOKIES_SECRET": ""}):
+        with patch.dict(os.environ, {"FLACFETCH_API_KEY": "test-key"}):
             with patch("flacfetch.api.routes.config._get_cookies_file_path", return_value="/nonexistent/path.txt"):
                 with patch("flacfetch.api.routes.config.os.path.exists", return_value=False):
                     app = create_app()

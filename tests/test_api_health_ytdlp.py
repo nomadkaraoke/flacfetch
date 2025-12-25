@@ -9,12 +9,15 @@ from flacfetch.api.routes.health import _check_ytdlp
 class TestCheckYtdlp:
     """Tests for _check_ytdlp function."""
 
-    def test_ytdlp_not_installed(self):
-        """Test when yt-dlp is not installed."""
-        with patch.dict("sys.modules", {"yt_dlp": None}):
-            with patch("builtins.__import__", side_effect=ImportError("No module")):
-                # Need to reload the module or mock differently
-                pass
+    def test_check_ytdlp_returns_health_object(self):
+        """Test that _check_ytdlp returns a valid YtdlpHealth object."""
+        result = _check_ytdlp()
+        assert isinstance(result, YtdlpHealth)
+        # Should have all required fields
+        assert hasattr(result, "version")
+        assert hasattr(result, "ejs_installed")
+        assert hasattr(result, "deno_available")
+        assert hasattr(result, "cookies_configured")
 
     def test_ytdlp_version_detected(self):
         """Test that yt-dlp version is detected."""
@@ -85,21 +88,10 @@ class TestCheckYtdlp:
                 result = _check_ytdlp()
                 assert result.cookies_configured is True
 
-    def test_cookies_configured_via_secret(self):
-        """Test cookies detection when secret is configured."""
-        with patch.dict(os.environ, {"YOUTUBE_COOKIES_SECRET": "some-secret"}, clear=False):
-            with patch("os.path.exists", return_value=False):
-                result = _check_ytdlp()
-                assert result.cookies_configured is True
-
     def test_cookies_not_configured(self):
         """Test cookies detection when not configured."""
-        env_vars = {
-            "YOUTUBE_COOKIES_FILE": "",
-            "YOUTUBE_COOKIES_SECRET": "",
-        }
-        with patch.dict(os.environ, env_vars, clear=False):
-            with patch("os.path.exists", return_value=False):
+        with patch.dict(os.environ, {"YOUTUBE_COOKIES_FILE": ""}, clear=False):
+            with patch("flacfetch.api.routes.health.os.path.exists", return_value=False):
                 result = _check_ytdlp()
                 assert result.cookies_configured is False
 

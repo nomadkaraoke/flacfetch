@@ -211,11 +211,7 @@ def _check_ytdlp() -> YtdlpHealth:
 
     # Check if YouTube cookies are configured
     cookies_file = os.environ.get("YOUTUBE_COOKIES_FILE")
-    if cookies_file and os.path.exists(cookies_file):
-        result.cookies_configured = True
-    else:
-        # Check if cookies secret might be available (file will be created on demand)
-        result.cookies_configured = bool(os.environ.get("YOUTUBE_COOKIES_SECRET"))
+    result.cookies_configured = bool(cookies_file and os.path.exists(cookies_file))
 
     return result
 
