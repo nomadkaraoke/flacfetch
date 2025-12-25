@@ -57,6 +57,25 @@ This is most noticeable on:
 
 Lossy codecs use **psychoacoustic masking** to remove frequencies that would be "masked" (made inaudible) by louder nearby frequencies. This can leave unnatural gaps in the spectrum.
 
+### 5. High-Frequency (HF) Noise-Floor / “Haze” Detection (Spek-style cue)
+
+When you look at a spectrogram in tools like **Spek**, genuine lossless sources (especially CD rips or anything that went through an analog chain) often show a faint, fairly uniform **blue/purple “haze”** near the very top of the spectrum (e.g. ~19–22 kHz at 44.1 kHz sample rate).
+
+That haze is typically **low-level wideband energy**:
+
+- Dither/noise shaping from bit-depth conversion
+- Tape/analog hiss or converter noise
+- Accumulated low-level noise in the mastering chain
+
+High-bitrate perceptual codecs (Vorbis/Opus) often preserve HF energy on transients, but can **suppress or quantize** that very-low-level HF noise in quieter sections, making the HF background look **darker/sparser** even if there’s no obvious hard cutoff.
+
+This detector therefore measures:
+
+- **HF noise floor in quiet frames**: median HF-band power when the mid-band is quiet
+- **HF fill**: how “filled in” the upper HF band is (fraction of bins above a very low dBFS threshold)
+
+This is **not a proof** of lossy vs lossless (some masters are genuinely “clean” in HF), but it’s a useful indicator for cases like Spotify 320 kbps Vorbis captured into FLAC.
+
 ## Output Interpretation
 
 ### Confidence Levels

@@ -156,6 +156,9 @@ class TranscodeAnalysis:
     spectral_holes_detected: bool
     suspected_codec: str | None
     suspected_bitrate: int | None
+    hf_noise_floor_db: float | None
+    hf_noise_sparsity: float | None
+    hf_noise_fill: float | None
     individual_results: list[AnalysisResult] = field(default_factory=list)
     details: dict = field(default_factory=dict)
 
@@ -213,6 +216,23 @@ class TranscodeAnalysis:
             else "\033[92m✓ No\033[0m"
         )
         print(f"  • Spectral Holes: {holes_text}")
+
+        # HF noise floor / gating (useful for high-bitrate Vorbis/Opus cases)
+        if self.hf_noise_floor_db is not None and self.hf_noise_sparsity is not None:
+            # Heuristic: very low HF floor and high sparsity suggests noise suppression / lossy behavior
+            fill_txt = ""
+            if self.hf_noise_fill is not None:
+                fill_txt = f", fill: {self.hf_noise_fill:.2f}"
+            suspicious = (self.hf_noise_floor_db < -105.0) and (
+                (self.hf_noise_sparsity > 0.35) or (self.hf_noise_fill is not None and self.hf_noise_fill < 0.25)
+            )
+            if suspicious:
+                hf_status = "\033[93m⚠️  SUSPICIOUS\033[0m"
+            else:
+                hf_status = "\033[92m✓ Normal\033[0m"
+            print(
+                f"  • HF Noise Floor (quiet frames): {self.hf_noise_floor_db:.1f} dB (sparsity: {self.hf_noise_sparsity:.2f}{fill_txt}) {hf_status}"
+            )
 
         print(f"\n{bold}File Information:{reset}")
         print(f"  • Sample Rate: {self.details.get('sample_rate', 'Unknown')} Hz")
@@ -602,6 +622,187 @@ def detect_spectral_holes(y: NDArray[np.float32], sr: int, verbose: bool = False
     return AnalysisResult(name="Spectral Holes", score=score, confidence=confidence, details=details)
 
 
+def analyze_hf_noise_floor(
+    y: NDArray[np.float32], sr: int, verbose: bool = False
+) -> tuple[AnalysisResult, float | None, float | None, float | None]:
+    """
+    Detect "missing HF haze" / noise-floor suppression.
+
+    Motivation (matches what Spek makes visually obvious):
+    - Many genuine CD rips / analog-sourced masters have a low-level, fairly stationary wideband noise floor
+      (dither, tape hiss, analog chain noise) that remains visible up to Nyquist.
+    - High-bitrate perceptual codecs (Vorbis/Opus) often preserve *some* HF energy on transients, but can
+      suppress/quantize low-level HF noise in quiet passages, producing a darker/sparser HF background.
+
+    This heuristic focuses on HF-band average power during "quiet" frames (based on mid-band power),
+    and a sparsity/gating measure of how often HF power collapses far below its typical quiet-frame level.
+
+    Returns (AnalysisResult, hf_floor_db, hf_sparsity, hf_fill).
+    """
+    nyquist = sr / 2
+    if nyquist < 12000:
+        return (
+            AnalysisResult(
+                name="HF Noise Floor",
+                score=0.0,
+                confidence=0.2,
+                details=f"Sample rate too low for HF noise-floor analysis (Nyquist={nyquist:.0f} Hz)",
+            ),
+            None,
+            None,
+            None,
+        )
+
+    magnitude, frequencies, _times = compute_spectrogram(y, sr, n_fft=8192, hop_length=1024)
+    power = magnitude * magnitude
+
+    # Mid band for "loudness" proxy (avoid bass dominance)
+    mid_mask = (frequencies >= 2000) & (frequencies <= 10000)
+    # HF band near the top of spectrum
+    hf_start = max(16000.0, nyquist * 0.72)
+    hf_end = nyquist * 0.98  # avoid edge artifacts near Nyquist bin
+    hf_mask = (frequencies >= hf_start) & (frequencies <= hf_end)
+
+    if np.count_nonzero(mid_mask) < 5 or np.count_nonzero(hf_mask) < 5:
+        return (
+            AnalysisResult(
+                name="HF Noise Floor",
+                score=0.0,
+                confidence=0.2,
+                details="Not enough frequency resolution for HF noise-floor analysis",
+            ),
+            None,
+            None,
+            None,
+        )
+
+    frame_mid = np.mean(power[mid_mask, :], axis=0)
+
+    # For Spek-like "upper band haze" comparisons, focus very close to Nyquist too
+    hf_high_start = max(19000.0, nyquist * 0.86)
+    hf_high_mask = (frequencies >= hf_high_start) & (frequencies <= hf_end)
+    if np.count_nonzero(hf_high_mask) < 5:
+        hf_high_mask = hf_mask
+
+    frame_hf = np.mean(power[hf_high_mask, :], axis=0)
+
+    # Normalize to peak to get a consistent dBFS-like scale for "fill" thresholding
+    peak_power = float(np.max(power))
+    if peak_power <= 0:
+        return (
+            AnalysisResult(name="HF Noise Floor", score=0.0, confidence=0.1, details="Could not analyze - silent audio"),
+            None,
+            None,
+            None,
+        )
+    power_norm = power / (peak_power + 1e-20)
+
+    # Pick frames using mid-band percentiles.
+    #
+    # Nuance: For heavily limited tracks, the "quiet" percentiles can still be musically dense.
+    # Spek-visible lossy-vs-lossless differences often show up more strongly in *very quiet / near-silence*
+    # regions (intros/outros/gaps), where codecs may suppress the HF noise floor.
+    p1 = float(np.percentile(frame_mid, 1))
+    p5 = float(np.percentile(frame_mid, 5))
+    p25 = float(np.percentile(frame_mid, 25))
+    if p25 <= 0:
+        return (
+            AnalysisResult(name="HF Noise Floor", score=0.0, confidence=0.1, details="Could not analyze - silent/near-silent audio"),
+            None,
+            None,
+            None,
+        )
+
+    # "Quiet" window: exclude extreme silence but keep quieter material.
+    quiet_mask = (frame_mid > p5) & (frame_mid <= p25)
+    # "Very quiet" window: include near-silence (but still above a tiny floor to avoid pure digital zero).
+    tiny_floor = max(p1 * 0.5, 1e-12)
+    very_quiet_mask = (frame_mid > tiny_floor) & (frame_mid <= p5)
+    if np.count_nonzero(quiet_mask) < 25:
+        # Fallback: widen window if track is consistently loud or too short
+        p40 = float(np.percentile(frame_mid, 40))
+        quiet_mask = (frame_mid > p5) & (frame_mid <= p40)
+
+    if np.count_nonzero(quiet_mask) < 10 and np.count_nonzero(very_quiet_mask) < 10:
+        return (
+            AnalysisResult(
+                name="HF Noise Floor",
+                score=0.0,
+                confidence=0.2,
+                details="Not enough quiet frames to analyze HF noise-floor behavior",
+            ),
+            None,
+            None,
+            None,
+        )
+
+    eps = 1e-20
+    hf_db = 10.0 * np.log10(frame_hf + eps)
+    def _robust_median(mask: NDArray[np.bool_]) -> float | None:
+        if np.count_nonzero(mask) < 10:
+            return None
+        return float(np.median(hf_db[mask]))
+
+    hf_floor_quiet = _robust_median(quiet_mask)
+    hf_floor_vquiet = _robust_median(very_quiet_mask)
+    hf_floor_candidates = [v for v in (hf_floor_quiet, hf_floor_vquiet) if v is not None]
+    if not hf_floor_candidates:
+        return (
+            AnalysisResult(
+                name="HF Noise Floor",
+                score=0.0,
+                confidence=0.2,
+                details="Could not compute HF floor (no suitable quiet frames)",
+            ),
+            None,
+            None,
+            None,
+        )
+    # Use the lower (more negative) floor as the "worst-case" HF noise-floor presence.
+    hf_floor_db = float(min(hf_floor_candidates))
+
+    # Sparsity: how often HF drops far below its typical quiet level (codec noise suppression / gating)
+    # 12 dB below the median is a fairly strong drop.
+    sparsity_mask = quiet_mask | very_quiet_mask
+    hf_sparsity = float(np.mean(hf_db[sparsity_mask] < (hf_floor_db - 12.0)))
+
+    # Fill: fraction of HF bins above a very low threshold in quiet frames.
+    # If there is a "blue haze", many bins should still be above ~-110 dBFS.
+    hf_bins_dbfs = 10.0 * np.log10(power_norm[hf_high_mask, :] + 1e-20)
+    hf_fill_per_frame = np.mean(hf_bins_dbfs > -110.0, axis=0)
+    fill_mask = quiet_mask | very_quiet_mask
+    hf_fill = float(np.median(hf_fill_per_frame[fill_mask]))
+
+    # Score heuristics (calibrated conservatively; meant as a "nudge" not a definitive proof):
+    # - Very low HF floor suggests HF energy is being suppressed in quiet sections.
+    # - High sparsity suggests HF is "patchy" rather than stationary haze.
+    if (hf_floor_db < -112 and hf_sparsity > 0.45) or (hf_floor_db < -112 and hf_fill < 0.15):
+        score = 0.75
+        confidence = 0.65
+        details = f"Very low/sparse HF floor in quiet frames (hf_floor={hf_floor_db:.1f} dB, sparsity={hf_sparsity:.2f}, fill={hf_fill:.2f})"
+    elif (hf_floor_db < -108 and hf_sparsity > 0.35) or (hf_floor_db < -108 and hf_fill < 0.22):
+        score = 0.55
+        confidence = 0.55
+        details = f"Low/sparse HF floor in quiet frames (hf_floor={hf_floor_db:.1f} dB, sparsity={hf_sparsity:.2f}, fill={hf_fill:.2f})"
+    elif (hf_floor_db < -105 and hf_sparsity > 0.25) or (hf_floor_db < -105 and hf_fill < 0.30):
+        score = 0.35
+        confidence = 0.45
+        details = f"Somewhat low HF floor in quiet frames (hf_floor={hf_floor_db:.1f} dB, sparsity={hf_sparsity:.2f}, fill={hf_fill:.2f})"
+    else:
+        score = 0.10
+        confidence = 0.45
+        details = f"HF floor looks stationary (hf_floor={hf_floor_db:.1f} dB, sparsity={hf_sparsity:.2f}, fill={hf_fill:.2f})"
+
+    if verbose:
+        details += (
+            f" | HF band: {hf_high_start:.0f}-{hf_end:.0f} Hz"
+            f"; quiet frames: {int(np.count_nonzero(quiet_mask))}"
+            f"; very quiet frames: {int(np.count_nonzero(very_quiet_mask))}"
+        )
+
+    return AnalysisResult(name="HF Noise Floor", score=score, confidence=confidence, details=details), hf_floor_db, hf_sparsity, hf_fill
+
+
 def identify_codec(cutoff_hz: float | None, sr: int) -> tuple[str | None, int | None]:
     """
     Attempt to identify the source codec and bitrate from the frequency cutoff.
@@ -676,6 +877,10 @@ def analyze_file(file_path: str | Path, verbose: bool = False) -> TranscodeAnaly
     holes_result = detect_spectral_holes(y, sr, verbose)
     results.append(holes_result)
 
+    # 5. HF noise floor / gating (helps with high-bitrate Vorbis/Opus where cutoffs aren't obvious)
+    hf_noise_result, hf_floor_db, hf_sparsity, hf_fill = analyze_hf_noise_floor(y, sr, verbose)
+    results.append(hf_noise_result)
+
     # Extract specific findings
     detected_cutoff = None
     # Parse cutoff frequency from various detail message formats
@@ -704,6 +909,7 @@ def analyze_file(file_path: str | Path, verbose: bool = False) -> TranscodeAnaly
         "Spectral Flatness": 1.0,
         "Pre-echo Detection": 1.0,
         "Spectral Holes": 1.0,
+        "HF Noise Floor": 2.0,
     }
 
     total_weight = sum(r.confidence * weights.get(r.name, 1.0) for r in results)
@@ -748,6 +954,9 @@ def analyze_file(file_path: str | Path, verbose: bool = False) -> TranscodeAnaly
         spectral_holes_detected=holes_result.score > 0.5,
         suspected_codec=suspected_codec,
         suspected_bitrate=suspected_bitrate,
+        hf_noise_floor_db=hf_floor_db,
+        hf_noise_sparsity=hf_sparsity,
+        hf_noise_fill=hf_fill,
         individual_results=results,
         details={
             "sample_rate": sr,
@@ -851,6 +1060,9 @@ Examples:
                 "suspected_bitrate": result.suspected_bitrate,
                 "pre_echo_detected": result.pre_echo_detected,
                 "spectral_holes_detected": result.spectral_holes_detected,
+                "hf_noise_floor_db": result.hf_noise_floor_db,
+                "hf_noise_sparsity": result.hf_noise_sparsity,
+                "hf_noise_fill": result.hf_noise_fill,
                 "details": result.details,
             }
             print(json.dumps(output, indent=2))
