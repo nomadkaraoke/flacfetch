@@ -106,13 +106,16 @@ class YoutubeDownloader(Downloader):
         if ydl_opts.get("cookiefile"):
             print(f"Using YouTube cookies from: {ydl_opts['cookiefile']}")
 
-        downloaded_file = None
+        downloaded_file: str | None = None
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(release.download_url, download=True)
                 # Get the actual filename that was used
-                downloaded_file = ydl.prepare_filename(info)
+                if info:
+                    downloaded_file = ydl.prepare_filename(info)
             print("YouTube download complete.")
+            if not downloaded_file:
+                raise RuntimeError("Failed to determine downloaded filename")
             return downloaded_file
         except Exception as e:
             print(f"Error downloading from YouTube: {e}")

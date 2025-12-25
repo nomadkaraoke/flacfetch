@@ -108,7 +108,7 @@ class YoutubeProvider(Provider):
                             if br > best_bitrate:
                                 best_bitrate = br
                                 best_audio = f
-                            elif br == best_bitrate and br > 0:
+                            elif br == best_bitrate and br > 0 and best_audio:
                                 # Tie-breaker: Prefer audio-only container
                                 if f.get('vcodec') == 'none' and best_audio.get('vcodec') != 'none':
                                     best_audio = f

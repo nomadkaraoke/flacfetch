@@ -84,6 +84,8 @@ class TestWriteCookiesFile:
 
     def test_write_cookies_success(self):
         """Test writing cookies to file."""
+        import sys
+
         with tempfile.TemporaryDirectory() as tmpdir:
             file_path = os.path.join(tmpdir, "cookies.txt")
             content = "# test cookies"
@@ -94,8 +96,9 @@ class TestWriteCookiesFile:
             assert os.path.exists(file_path)
             with open(file_path) as f:
                 assert f.read() == content
-            # Check permissions (600 = owner read/write only)
-            assert oct(os.stat(file_path).st_mode)[-3:] == "600"
+            # Check permissions on Unix only (Windows doesn't have the same permission model)
+            if sys.platform != "win32":
+                assert oct(os.stat(file_path).st_mode)[-3:] == "600"
 
     def test_write_creates_directory(self):
         """Test writing cookies creates parent directory."""

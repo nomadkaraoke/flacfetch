@@ -78,29 +78,31 @@ def cookies_command(args):
                 with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
                     temp_cookies = f.name
 
-                # yt-dlp will extract cookies from browser and save to file
-                ydl_opts = {
-                    'quiet': True,
-                    'cookiesfrombrowser': (browser, None, None, None),
-                    'cookiefile': temp_cookies,
-                }
-
-                # We need to make at least one request to trigger cookie extraction
-                # Using a simple YouTube URL
                 try:
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        # Just extract info, don't download
-                        ydl.extract_info("https://www.youtube.com/", download=False)
-                except Exception:
-                    # It's okay if extraction fails, cookies may still be written
-                    pass
+                    # yt-dlp will extract cookies from browser and save to file
+                    ydl_opts = {
+                        'quiet': True,
+                        'cookiesfrombrowser': (browser, None, None, None),
+                        'cookiefile': temp_cookies,
+                    }
 
-                # Read the extracted cookies
-                with open(temp_cookies) as f:
-                    cookies_content = f.read()
+                    # We need to make at least one request to trigger cookie extraction
+                    # Using a simple YouTube URL
+                    try:
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                            # Just extract info, don't download
+                            ydl.extract_info("https://www.youtube.com/", download=False)
+                    except Exception:
+                        # It's okay if extraction fails, cookies may still be written
+                        pass
 
-                # Clean up temp file
-                os.unlink(temp_cookies)
+                    # Read the extracted cookies
+                    with open(temp_cookies) as f:
+                        cookies_content = f.read()
+                finally:
+                    # Always clean up temp file
+                    if os.path.exists(temp_cookies):
+                        os.unlink(temp_cookies)
 
                 if not cookies_content or "youtube" not in cookies_content.lower():
                     print(f"{Colors.YELLOW}Warning: No YouTube cookies found in {browser}.{Colors.RESET}")

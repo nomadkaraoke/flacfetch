@@ -6,7 +6,7 @@ Handles runtime configuration like YouTube cookies upload.
 import logging
 import os
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -222,7 +222,7 @@ async def upload_youtube_cookies(
     return CookiesUploadResponse(
         success=True,
         message=result_message,
-        updated_at=datetime.utcnow(),
+        updated_at=datetime.now(timezone.utc),
     )
 
 
@@ -287,7 +287,8 @@ async def delete_youtube_cookies(
     """
     Delete stored YouTube cookies.
 
-    Removes the local cookies file and optionally the secret.
+    Removes the local cookies file. The GCP secret version will remain
+    but won't be loaded on next service restart.
     """
     file_path = _get_cookies_file_path()
     deleted = False
@@ -309,12 +310,12 @@ async def delete_youtube_cookies(
         return CookiesUploadResponse(
             success=True,
             message="YouTube cookies deleted. Note: GCP secret version still exists but won't be loaded.",
-            updated_at=datetime.utcnow(),
+            updated_at=datetime.now(timezone.utc),
         )
     else:
         return CookiesUploadResponse(
             success=True,
             message="No cookies file found to delete.",
-            updated_at=datetime.utcnow(),
+            updated_at=datetime.now(timezone.utc),
         )
 
