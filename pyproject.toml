@@ -34,17 +34,21 @@ dependencies = [
 
 [project.optional-dependencies]
 remote = [
-    "httpx>=0.25.0",
+    "httpx>=0.28.0",
 ]
 api = [
-    "fastapi>=0.104.0",
+    "fastapi>=0.115.0",
     "uvicorn[standard]>=0.24.0",
     "pydantic>=2.0.0",
-    "httpx>=0.25.0",
+    "httpx>=0.28.0",
     "google-cloud-storage>=2.13.0",
+    "google-cloud-secret-manager>=2.16.0",
 ]
 spotify = [
     "spotipy>=2.25.1",  # CVE-2025-27154 fixed in 2.25.1
+]
+ejs = [
+    "yt-dlp-ejs>=0.3.0",
 ]
 dev = [
     "pytest>=7.0.0",
@@ -57,14 +61,17 @@ dev = [
 ]
 all = [
     # remote
-    "httpx>=0.25.0",
+    "httpx>=0.28.0",
     # api
-    "fastapi>=0.104.0",
+    "fastapi>=0.115.0",
     "uvicorn[standard]>=0.24.0",
     "pydantic>=2.0.0",
     "google-cloud-storage>=2.13.0",
+    "google-cloud-secret-manager>=2.16.0",
     # spotify
     "spotipy>=2.25.1",
+    # ejs
+    "yt-dlp-ejs>=0.3.0",
     # dev
     "pytest>=7.0.0",
     "pytest-mock>=3.10.0",

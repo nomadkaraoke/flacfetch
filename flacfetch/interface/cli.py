@@ -45,6 +45,217 @@ def serve_command(args):
         log_level="debug" if args.verbose else "info",
     )
 
+
+def cookies_command(args):
+    """Handle cookies subcommand for YouTube authentication."""
+    import tempfile
+
+    action = args.action
+
+    if action == "upload":
+        cookies_content = None
+
+        if args.file:
+            # Read from provided file
+            try:
+                with open(args.file) as f:
+                    cookies_content = f.read()
+                print(f"{Colors.CYAN}Read cookies from: {args.file}{Colors.RESET}")
+            except Exception as e:
+                print(f"{Colors.RED}Error reading file: {e}{Colors.RESET}")
+                sys.exit(1)
+        else:
+            # Extract from browser using yt-dlp
+            browser = args.browser or "chrome"
+            print(f"{Colors.CYAN}Extracting cookies from {browser}...{Colors.RESET}")
+            print(f"{Colors.DIM}(You may need to authenticate in the browser if prompted){Colors.RESET}")
+
+            try:
+                # Use yt-dlp to extract cookies
+                import yt_dlp
+
+                # Create a temp file to store cookies
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                    temp_cookies = f.name
+
+                try:
+                    # yt-dlp will extract cookies from browser and save to file
+                    ydl_opts = {
+                        'quiet': True,
+                        'cookiesfrombrowser': (browser, None, None, None),
+                        'cookiefile': temp_cookies,
+                    }
+
+                    # We need to make at least one request to trigger cookie extraction
+                    # Using a simple YouTube URL
+                    try:
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                            # Just extract info, don't download
+                            ydl.extract_info("https://www.youtube.com/", download=False)
+                    except Exception:
+                        # It's okay if extraction fails, cookies may still be written
+                        pass
+
+                    # Read the extracted cookies
+                    with open(temp_cookies) as f:
+                        cookies_content = f.read()
+                finally:
+                    # Always clean up temp file
+                    if os.path.exists(temp_cookies):
+                        os.unlink(temp_cookies)
+
+                if not cookies_content or "youtube" not in cookies_content.lower():
+                    print(f"{Colors.YELLOW}Warning: No YouTube cookies found in {browser}.{Colors.RESET}")
+                    print(f"{Colors.DIM}Make sure you are logged into YouTube in {browser}.{Colors.RESET}")
+                    sys.exit(1)
+
+                print(f"{Colors.GREEN}Successfully extracted cookies from {browser}{Colors.RESET}")
+
+            except Exception as e:
+                print(f"{Colors.RED}Error extracting cookies: {e}{Colors.RESET}")
+                print(f"\n{Colors.BOLD}Tip:{Colors.RESET} You can also export cookies manually:")
+                print("  1. Install a browser extension like 'Get cookies.txt LOCALLY'")
+                print("  2. Export cookies from youtube.com")
+                print("  3. Run: flacfetch cookies upload --file cookies.txt")
+                sys.exit(1)
+
+        # Now upload to remote server
+        if not args.server:
+            # Try to get from environment
+            server = os.environ.get("FLACFETCH_REMOTE_URL")
+            if not server:
+                print(f"{Colors.YELLOW}No server specified.{Colors.RESET}")
+                print("Use --server URL or set FLACFETCH_REMOTE_URL environment variable.")
+
+                # If no server, just save locally
+                local_path = os.path.expanduser("~/.flacfetch/youtube_cookies.txt")
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                with open(local_path, 'w') as f:
+                    f.write(cookies_content)
+                os.chmod(local_path, 0o600)
+                print(f"{Colors.GREEN}Saved cookies locally to: {local_path}{Colors.RESET}")
+                print(f"{Colors.DIM}Set YOUTUBE_COOKIES_FILE={local_path} to use them.{Colors.RESET}")
+                return
+        else:
+            server = args.server
+
+        api_key = args.api_key or os.environ.get("FLACFETCH_API_KEY")
+        if not api_key:
+            print(f"{Colors.RED}Error: API key required for upload.{Colors.RESET}")
+            print("Use --api-key KEY or set FLACFETCH_API_KEY environment variable.")
+            sys.exit(1)
+
+        # Upload to server
+        try:
+            import httpx
+
+            url = f"{server.rstrip('/')}/config/youtube-cookies"
+            headers = {"X-API-Key": api_key, "Content-Type": "application/json"}
+
+            print(f"{Colors.CYAN}Uploading cookies to {server}...{Colors.RESET}")
+
+            response = httpx.post(
+                url,
+                json={"cookies": cookies_content},
+                headers=headers,
+                timeout=30.0,
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                print(f"{Colors.GREEN}✓ {data.get('message', 'Cookies uploaded successfully')}{Colors.RESET}")
+            else:
+                print(f"{Colors.RED}Error: {response.status_code}{Colors.RESET}")
+                try:
+                    print(f"{Colors.RED}{response.json().get('detail', response.text)}{Colors.RESET}")
+                except Exception:
+                    print(f"{Colors.RED}{response.text}{Colors.RESET}")
+                sys.exit(1)
+
+        except ImportError:
+            print(f"{Colors.RED}Error: httpx not installed. Install with: pip install flacfetch[remote]{Colors.RESET}")
+            sys.exit(1)
+        except Exception as e:
+            print(f"{Colors.RED}Error uploading cookies: {e}{Colors.RESET}")
+            sys.exit(1)
+
+    elif action == "status":
+        # Check cookie status
+        server = args.server or os.environ.get("FLACFETCH_REMOTE_URL")
+        api_key = args.api_key or os.environ.get("FLACFETCH_API_KEY")
+
+        if server and api_key:
+            # Check remote status
+            try:
+                import httpx
+
+                url = f"{server.rstrip('/')}/config/youtube-cookies/status"
+                headers = {"X-API-Key": api_key}
+
+                response = httpx.get(url, headers=headers, timeout=10.0)
+
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get("configured"):
+                        print(f"{Colors.GREEN}✓ YouTube cookies configured{Colors.RESET}")
+                        print(f"  Source: {data.get('source', 'unknown')}")
+                        if data.get("file_path"):
+                            print(f"  Path: {data.get('file_path')}")
+                        if data.get("last_updated"):
+                            print(f"  Updated: {data.get('last_updated')}")
+                        if data.get("cookies_valid"):
+                            print(f"  {Colors.GREEN}Valid: {data.get('validation_message')}{Colors.RESET}")
+                        else:
+                            print(f"  {Colors.YELLOW}Validation: {data.get('validation_message')}{Colors.RESET}")
+                    else:
+                        print(f"{Colors.YELLOW}✗ No YouTube cookies configured{Colors.RESET}")
+                        print(f"  {data.get('validation_message', '')}")
+                else:
+                    print(f"{Colors.RED}Error: {response.status_code}{Colors.RESET}")
+
+            except ImportError:
+                print(f"{Colors.RED}Error: httpx not installed{Colors.RESET}")
+            except Exception as e:
+                print(f"{Colors.RED}Error checking status: {e}{Colors.RESET}")
+        else:
+            # Check local status
+            local_path = os.environ.get("YOUTUBE_COOKIES_FILE") or os.path.expanduser("~/.flacfetch/youtube_cookies.txt")
+            if os.path.exists(local_path):
+                print(f"{Colors.GREEN}✓ Local cookies found: {local_path}{Colors.RESET}")
+            else:
+                print(f"{Colors.YELLOW}✗ No local cookies configured{Colors.RESET}")
+                print(f"  Expected at: {local_path}")
+
+    elif action == "delete":
+        server = args.server or os.environ.get("FLACFETCH_REMOTE_URL")
+        api_key = args.api_key or os.environ.get("FLACFETCH_API_KEY")
+
+        if server and api_key:
+            try:
+                import httpx
+
+                url = f"{server.rstrip('/')}/config/youtube-cookies"
+                headers = {"X-API-Key": api_key}
+
+                response = httpx.delete(url, headers=headers, timeout=10.0)
+
+                if response.status_code == 200:
+                    data = response.json()
+                    print(f"{Colors.GREEN}✓ {data.get('message', 'Cookies deleted')}{Colors.RESET}")
+                else:
+                    print(f"{Colors.RED}Error: {response.status_code}{Colors.RESET}")
+
+            except Exception as e:
+                print(f"{Colors.RED}Error: {e}{Colors.RESET}")
+        else:
+            # Delete local
+            local_path = os.environ.get("YOUTUBE_COOKIES_FILE") or os.path.expanduser("~/.flacfetch/youtube_cookies.txt")
+            if os.path.exists(local_path):
+                os.unlink(local_path)
+                print(f"{Colors.GREEN}✓ Deleted local cookies: {local_path}{Colors.RESET}")
+            else:
+                print(f"{Colors.YELLOW}No local cookies to delete{Colors.RESET}")
+
 # ANSI Color Codes
 class Colors:
     RESET = "\033[0m"
@@ -447,6 +658,56 @@ def main():
         serve_command(serve_args)
         return
 
+    # Check for 'cookies' subcommand
+    if len(sys.argv) > 1 and sys.argv[1] == "cookies":
+        cookies_parser = argparse.ArgumentParser(
+            prog="flacfetch cookies",
+            description="Manage YouTube cookies for authenticated downloads",
+            formatter_class=WideHelpFormatter,
+            epilog="""
+Examples:
+  flacfetch cookies upload
+      Extract cookies from Chrome and upload to remote server
+
+  flacfetch cookies upload --browser firefox
+      Extract from Firefox instead
+
+  flacfetch cookies upload --file cookies.txt
+      Upload existing cookies file
+
+  flacfetch cookies status
+      Check if cookies are configured
+
+  flacfetch cookies delete
+      Remove stored cookies
+            """.strip(),
+        )
+        cookies_parser.add_argument(
+            "action",
+            choices=["upload", "status", "delete"],
+            help="Action to perform: upload, status, or delete"
+        )
+        cookies_parser.add_argument(
+            "--browser", "-b",
+            choices=["chrome", "firefox", "edge", "safari", "opera", "brave"],
+            help="Browser to extract cookies from (default: chrome)"
+        )
+        cookies_parser.add_argument(
+            "--file", "-f",
+            help="Path to existing cookies file (Netscape format)"
+        )
+        cookies_parser.add_argument(
+            "--server", "-s",
+            help="Remote flacfetch server URL (or use FLACFETCH_REMOTE_URL env var)"
+        )
+        cookies_parser.add_argument(
+            "--api-key", "-k",
+            help="API key for remote server (or use FLACFETCH_API_KEY env var)"
+        )
+        cookies_args = cookies_parser.parse_args(sys.argv[2:])
+        cookies_command(cookies_args)
+        return
+
     parser = argparse.ArgumentParser(
         prog="flacfetch",
         description="""
@@ -475,6 +736,12 @@ Examples:
 
   flacfetch serve --port 8080
       Run as HTTP API server
+
+  flacfetch cookies upload
+      Upload YouTube cookies for authenticated downloads
+
+  flacfetch cookies status
+      Check YouTube cookies status
 
 Environment Variables:
   RED_API_KEY                  API key for RED (lossless FLAC source)

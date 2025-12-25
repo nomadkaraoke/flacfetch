@@ -149,6 +149,24 @@ spotipy_client_secret_secret = secretmanager.Secret(
     ),
 )
 
+# YouTube cookies secret (for authenticated downloads when required)
+youtube_cookies_secret = secretmanager.Secret(
+    "youtube-cookies",
+    secret_id="youtube-cookies",
+    replication=secretmanager.SecretReplicationArgs(
+        auto=secretmanager.SecretReplicationAutoArgs(),
+    ),
+)
+
+# Grant flacfetch service account permission to update youtube-cookies secret
+# This is needed for the cookie upload API endpoint
+youtube_cookies_iam = secretmanager.SecretIamMember(
+    "youtube-cookies-writer",
+    secret_id=youtube_cookies_secret.id,
+    role="roles/secretmanager.secretVersionAdder",
+    member=flacfetch_sa.email.apply(lambda email: f"serviceAccount:{email}"),
+)
+
 # =============================================================================
 # Persistent Data Disk
 # =============================================================================
@@ -174,7 +192,7 @@ flacfetch_data_disk = compute.Disk(
 # 3. Configures Transmission to use the persistent disk
 # 4. Starts the flacfetch API service
 
-STARTUP_SCRIPT = '''#!/bin/bash
+STARTUP_SCRIPT = r'''#!/bin/bash
 # GCE Startup Script for flacfetch
 # This script runs on every VM boot and handles:
 # 1. Mounting persistent disk for torrent data
@@ -216,6 +234,37 @@ if [ ! -f "$LIBRESPOT_BIN" ] || [ "$INSTALLED_VERSION" != "$LIBRESPOT_VERSION" ]
     gsutil cp gs://karaoke-gen-storage-nomadkaraoke/binaries/librespot-${LIBRESPOT_VERSION}-linux-x86_64 "$LIBRESPOT_BIN"
     chmod +x "$LIBRESPOT_BIN"
     echo "Installed: $($LIBRESPOT_BIN --version 2>&1 | head -1)"
+fi
+
+# =============================================================================
+# Install Deno Runtime (for yt-dlp EJS challenge solving)
+# =============================================================================
+# Deno is required for yt-dlp to solve YouTube's JavaScript challenges
+# See: https://github.com/yt-dlp/yt-dlp/wiki/EJS
+echo "Installing/updating Deno runtime..."
+DENO_INSTALL="/root/.deno"
+DENO_BIN="$DENO_INSTALL/bin/deno"
+
+if [ -f "$DENO_BIN" ]; then
+    DENO_VERSION=$("$DENO_BIN" --version 2>&1 | head -1 | awk '{print $2}')
+    echo "Deno already installed: $DENO_VERSION"
+else
+    echo "Installing Deno..."
+    curl -fsSL https://deno.land/install.sh | sh
+    echo "Installed: $($DENO_BIN --version 2>&1 | head -1)"
+fi
+
+# Add Deno to PATH for current session
+export DENO_INSTALL="/root/.deno"
+export PATH="$DENO_INSTALL/bin:$PATH"
+
+# Ensure Deno is in system PATH for all users
+if ! grep -q "DENO_INSTALL" /etc/profile.d/deno.sh 2>/dev/null; then
+    cat > /etc/profile.d/deno.sh << 'DENO_PROFILE'
+export DENO_INSTALL="/root/.deno"
+export PATH="$DENO_INSTALL/bin:$PATH"
+DENO_PROFILE
+    chmod +x /etc/profile.d/deno.sh
 fi
 
 # =============================================================================
@@ -389,6 +438,9 @@ if [ -d "flacfetch" ]; then
     # Activate venv and update
     source venv/bin/activate
     pip install -e ".[api,spotify]" --quiet
+
+    # Install/update yt-dlp-ejs for YouTube JS challenge solving
+    pip install --upgrade yt-dlp yt-dlp-ejs --quiet
 else
     echo "Fresh flacfetch installation..."
     git clone https://github.com/nomadkaraoke/flacfetch.git
@@ -400,11 +452,25 @@ else
 
     # Install flacfetch with API and Spotify dependencies
     pip install -e ".[api,spotify]"
+
+    # Install yt-dlp-ejs for YouTube JS challenge solving
+    pip install yt-dlp-ejs
 fi
 
 # Get version
 FLACFETCH_VERSION=$(python -c "import flacfetch; print(flacfetch.__version__)" 2>/dev/null || echo "unknown")
 echo "Flacfetch version: $FLACFETCH_VERSION"
+
+# Get yt-dlp version
+YTDLP_VERSION=$(python -c "import yt_dlp; print(yt_dlp.version.__version__)" 2>/dev/null || echo "unknown")
+echo "yt-dlp version: $YTDLP_VERSION"
+
+# Verify EJS is working
+if python -c "import yt_dlp_ejs" 2>/dev/null; then
+    echo "yt-dlp-ejs: installed and available"
+else
+    echo "WARNING: yt-dlp-ejs not available"
+fi
 
 # =============================================================================
 # Get Secrets from Secret Manager
@@ -426,6 +492,24 @@ if [ -z "$GCS_BUCKET" ]; then
     GCS_BUCKET="karaoke-gen-storage-${PROJECT_ID}"
 fi
 echo "Using GCS bucket: $GCS_BUCKET"
+
+# =============================================================================
+# YouTube Cookies (for authenticated downloads)
+# =============================================================================
+# If youtube-cookies secret exists, write it to a file for yt-dlp
+YOUTUBE_COOKIES_FILE="/opt/flacfetch/youtube_cookies.txt"
+YOUTUBE_COOKIES=$(gcloud secrets versions access latest --secret=youtube-cookies 2>/dev/null || echo "")
+
+if [ -n "$YOUTUBE_COOKIES" ]; then
+    echo "$YOUTUBE_COOKIES" > "$YOUTUBE_COOKIES_FILE"
+    chmod 600 "$YOUTUBE_COOKIES_FILE"
+    echo "YouTube cookies configured at $YOUTUBE_COOKIES_FILE"
+else
+    # Remove old cookies file if secret is empty/deleted
+    rm -f "$YOUTUBE_COOKIES_FILE"
+    YOUTUBE_COOKIES_FILE=""
+    echo "No YouTube cookies configured (downloads may require authentication in future)"
+fi
 
 # =============================================================================
 # Create/Update Systemd Service
@@ -457,13 +541,15 @@ Environment="OPS_API_URL=${OPS_API_URL}"
 Environment="SPOTIPY_CLIENT_ID=${SPOTIPY_CLIENT_ID}"
 Environment="SPOTIPY_CLIENT_SECRET=${SPOTIPY_CLIENT_SECRET}"
 Environment="SPOTIPY_REDIRECT_URI=${SPOTIPY_REDIRECT_URI}"
-Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+Environment="PATH=/root/.deno/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="DENO_INSTALL=/root/.deno"
 Environment="GCS_BUCKET=${GCS_BUCKET}"
 Environment="FLACFETCH_KEEP_SEEDING=true"
 Environment="FLACFETCH_MIN_FREE_GB=5"
 Environment="FLACFETCH_DOWNLOAD_DIR=${DOWNLOAD_DIR}"
 Environment="TRANSMISSION_HOST=localhost"
 Environment="TRANSMISSION_PORT=9091"
+Environment="YOUTUBE_COOKIES_FILE=${YOUTUBE_COOKIES_FILE}"
 ExecStart=/opt/flacfetch/venv/bin/flacfetch serve --host 0.0.0.0 --port 8080
 Restart=always
 RestartSec=10
@@ -489,6 +575,94 @@ for i in {1..30}; do
     echo "Waiting for flacfetch ($i/30)..."
     sleep 2
 done
+
+# =============================================================================
+# yt-dlp Auto-Update Timer
+# =============================================================================
+# Create a systemd timer to update yt-dlp and yt-dlp-ejs daily
+# This ensures YouTube downloads continue working as YouTube changes its API
+echo "Creating yt-dlp auto-update timer..."
+
+# Create the update script
+cat > /opt/flacfetch/update-ytdlp.sh << 'UPDATE_SCRIPT'
+#!/bin/bash
+# Update yt-dlp and yt-dlp-ejs to latest versions
+set -e
+exec >> /var/log/ytdlp-update.log 2>&1
+
+echo "========================================"
+echo "yt-dlp update started at $(date)"
+echo "========================================"
+
+cd /opt/flacfetch
+source venv/bin/activate
+
+# Get current versions
+OLD_YTDLP=$(python -c "import yt_dlp; print(yt_dlp.version.__version__)" 2>/dev/null || echo "unknown")
+echo "Current yt-dlp version: $OLD_YTDLP"
+
+# Update packages
+pip install --upgrade yt-dlp yt-dlp-ejs --quiet
+
+# Get new versions
+NEW_YTDLP=$(python -c "import yt_dlp; print(yt_dlp.version.__version__)" 2>/dev/null || echo "unknown")
+echo "New yt-dlp version: $NEW_YTDLP"
+
+if [ "$OLD_YTDLP" != "$NEW_YTDLP" ]; then
+    echo "yt-dlp updated from $OLD_YTDLP to $NEW_YTDLP"
+    # Restart flacfetch to use new version
+    systemctl restart flacfetch
+    echo "Restarted flacfetch service"
+else
+    echo "yt-dlp already at latest version"
+fi
+
+# Update Deno if available
+if command -v /root/.deno/bin/deno &> /dev/null; then
+    echo "Updating Deno..."
+    /root/.deno/bin/deno upgrade --quiet 2>/dev/null || true
+fi
+
+echo "Update complete at $(date)"
+UPDATE_SCRIPT
+
+chmod +x /opt/flacfetch/update-ytdlp.sh
+
+# Create the systemd service for updates
+cat > /etc/systemd/system/ytdlp-update.service << 'YTDLP_SERVICE'
+[Unit]
+Description=Update yt-dlp and yt-dlp-ejs
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/flacfetch/update-ytdlp.sh
+User=root
+WorkingDirectory=/opt/flacfetch
+Environment="PATH=/root/.deno/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="DENO_INSTALL=/root/.deno"
+YTDLP_SERVICE
+
+# Create the systemd timer (runs daily at 4am UTC)
+cat > /etc/systemd/system/ytdlp-update.timer << 'YTDLP_TIMER'
+[Unit]
+Description=Daily yt-dlp update
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+RandomizedDelaySec=1800
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+YTDLP_TIMER
+
+# Enable and start the timer
+systemctl daemon-reload
+systemctl enable ytdlp-update.timer
+systemctl start ytdlp-update.timer
+
+echo "yt-dlp auto-update timer enabled (runs daily at 4am UTC)"
 
 # =============================================================================
 # Summary
@@ -522,6 +696,15 @@ echo ""
 echo "Transmission Status:"
 echo "--------------------"
 transmission-remote localhost:9091 -l 2>/dev/null || echo "Could not connect to transmission"
+
+echo ""
+echo "yt-dlp Status:"
+echo "--------------"
+source /opt/flacfetch/venv/bin/activate
+echo "yt-dlp version: $(python -c 'import yt_dlp; print(yt_dlp.version.__version__)' 2>/dev/null || echo 'unknown')"
+echo "yt-dlp-ejs: $(python -c 'import yt_dlp_ejs; print("installed")' 2>/dev/null || echo 'not installed')"
+echo "Deno: $(/root/.deno/bin/deno --version 2>/dev/null | head -1 || echo 'not installed')"
+echo "Update timer: $(systemctl is-active ytdlp-update.timer 2>/dev/null || echo 'not configured')"
 
 echo ""
 echo "Health Check:"
@@ -629,5 +812,6 @@ pulumi.export("secrets", {
     "ops_api_url": ops_api_url_secret.name,
     "spotipy_client_id": spotipy_client_id_secret.name,
     "spotipy_client_secret": spotipy_client_secret_secret.name,
+    "youtube_cookies": youtube_cookies_secret.name,
 })
 

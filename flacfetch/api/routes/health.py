@@ -13,6 +13,7 @@ from ..models import (
     ProvidersHealth,
     TorrentSummaryItem,
     TransmissionHealth,
+    YtdlpHealth,
 )
 from ..services import get_disk_manager
 
@@ -53,6 +54,9 @@ async def health_check() -> HealthResponse:
     # Check providers
     providers = _check_providers()
 
+    # Check yt-dlp status
+    ytdlp = _check_ytdlp()
+
     # Overall status
     status = "healthy"
     if not transmission.available:
@@ -66,6 +70,7 @@ async def health_check() -> HealthResponse:
         transmission=transmission,
         disk=disk,
         providers=providers,
+        ytdlp=ytdlp,
     )
 
 
@@ -146,6 +151,69 @@ def _check_providers() -> ProvidersHealth:
         spotify=spotify,
         youtube=youtube,
     )
+
+
+def _check_ytdlp() -> YtdlpHealth:
+    """Check yt-dlp and EJS status for YouTube downloads."""
+    import shutil
+    import subprocess
+
+    result = YtdlpHealth()
+
+    try:
+        # Get yt-dlp version
+        import yt_dlp
+        result.version = yt_dlp.version.__version__
+    except ImportError:
+        result.error = "yt-dlp not installed"
+        return result
+    except Exception as e:
+        result.error = f"Failed to get yt-dlp version: {e}"
+
+    # Check for yt-dlp-ejs
+    try:
+        import yt_dlp_ejs
+        result.ejs_installed = True
+        if hasattr(yt_dlp_ejs, "__version__"):
+            result.ejs_version = yt_dlp_ejs.__version__
+        else:
+            result.ejs_version = "installed"
+    except ImportError:
+        result.ejs_installed = False
+
+    # Check for Deno runtime
+    deno_paths = [
+        shutil.which("deno"),
+        "/root/.deno/bin/deno",
+        os.path.expanduser("~/.deno/bin/deno"),
+    ]
+
+    for deno_path in deno_paths:
+        if deno_path and os.path.exists(deno_path):
+            try:
+                deno_result = subprocess.run(
+                    [deno_path, "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if deno_result.returncode == 0:
+                    result.deno_available = True
+                    # Parse version from "deno x.y.z"
+                    version_line = deno_result.stdout.strip().split("\n")[0]
+                    if version_line.startswith("deno "):
+                        result.deno_version = version_line.split()[1]
+                    else:
+                        result.deno_version = version_line
+                    break
+            except Exception:
+                pass
+
+    # Check if YouTube cookies are configured
+    cookies_file = os.environ.get("YOUTUBE_COOKIES_FILE")
+    result.cookies_configured = bool(cookies_file and os.path.exists(cookies_file))
+
+    return result
 
 
 @router.get("/debug/providers")
