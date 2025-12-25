@@ -3,7 +3,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import numpy as np
+import pytest
+
+# CI for this repo doesn't install the optional DSP stack by default.
+# These tests are for the standalone transcode detector and should be skipped
+# when optional deps (numpy/scipy) aren't present.
+np = pytest.importorskip("numpy")
+pytest.importorskip("scipy")
 
 
 def _import_detect_transcode():
