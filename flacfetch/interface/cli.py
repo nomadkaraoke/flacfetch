@@ -256,6 +256,356 @@ def cookies_command(args):
             else:
                 print(f"{Colors.YELLOW}No local cookies to delete{Colors.RESET}")
 
+
+def spotify_auth_command(args):
+    """Handle Spotify OAuth authentication for headless server deployment.
+
+    This command helps generate and manage Spotify OAuth tokens for use
+    on headless servers (like GCE VMs) where browser-based authentication
+    isn't possible.
+    """
+    import json
+
+    action = args.action
+
+    # Lazy import for Colors since it's defined later
+    class C:
+        RESET = "\033[0m"
+        BOLD = "\033[1m"
+        DIM = "\033[2m"
+        CYAN = "\033[36m"
+        GREEN = "\033[32m"
+        YELLOW = "\033[33m"
+        RED = "\033[31m"
+
+    if action == "login":
+        # Perform OAuth login and show the token
+        if not SPOTIFY_AVAILABLE:
+            print(f"{C.RED}Error: Spotify dependencies not installed.{C.RESET}")
+            print("Install with: pip install flacfetch[spotify]")
+            sys.exit(1)
+
+        client_id = os.environ.get("SPOTIPY_CLIENT_ID")
+        client_secret = os.environ.get("SPOTIPY_CLIENT_SECRET")
+
+        if not client_id or not client_secret:
+            print(f"{C.RED}Error: Spotify credentials not configured.{C.RESET}")
+            print("\nSet these environment variables:")
+            print("  export SPOTIPY_CLIENT_ID=your_client_id")
+            print("  export SPOTIPY_CLIENT_SECRET=your_client_secret")
+            print("\nGet credentials from: https://developer.spotify.com/dashboard")
+            sys.exit(1)
+
+        print(f"{C.CYAN}Starting Spotify OAuth flow...{C.RESET}")
+        print(f"{C.DIM}A browser window will open for authentication.{C.RESET}")
+
+        try:
+            import spotipy
+            from spotipy.oauth2 import SpotifyOAuth
+
+            # Use explicit cache path
+            cache_path = os.path.expanduser("~/.cache-spotipy")
+
+            auth_manager = SpotifyOAuth(
+                client_id=client_id,
+                client_secret=client_secret,
+                redirect_uri=os.environ.get("SPOTIPY_REDIRECT_URI", "http://127.0.0.1:8888/callback"),
+                scope="user-read-playback-state user-modify-playback-state streaming",
+                cache_path=cache_path,
+            )
+
+            # This triggers the OAuth flow
+            sp = spotipy.Spotify(auth_manager=auth_manager)
+            user = sp.current_user()
+
+            print(f"\n{C.GREEN}✓ Successfully authenticated as: {user.get('display_name', user.get('id'))}{C.RESET}")
+
+            # Read the cached token
+            if os.path.exists(cache_path):
+                with open(cache_path) as f:
+                    token_data = f.read()
+
+                print(f"\n{C.BOLD}Token saved to: {cache_path}{C.RESET}")
+                print(f"\n{C.CYAN}To deploy to cloud server:{C.RESET}")
+                print(f"  gcloud secrets versions add spotify-oauth-token --data-file={cache_path}")
+                print("\nThen restart the server or run:")
+                print("  gcloud compute instances reset flacfetch-service --zone=us-central1-a")
+            else:
+                print(f"{C.RED}Warning: Token file not found at expected location{C.RESET}")
+
+        except Exception as e:
+            print(f"{C.RED}Error during authentication: {e}{C.RESET}")
+            sys.exit(1)
+
+    elif action == "show":
+        # Show the current cached token
+        cache_path = os.path.expanduser("~/.cache-spotipy")
+        if os.path.exists(cache_path):
+            with open(cache_path) as f:
+                token_data = json.load(f)
+
+            print(f"{C.GREEN}✓ Cached token found at: {cache_path}{C.RESET}")
+            print(f"\n{C.BOLD}Token info:{C.RESET}")
+            if "expires_at" in token_data:
+                import datetime
+                expires = datetime.datetime.fromtimestamp(token_data["expires_at"])
+                print(f"  Expires: {expires}")
+            if "refresh_token" in token_data:
+                print("  Has refresh token: Yes")
+            if "scope" in token_data:
+                print(f"  Scopes: {token_data['scope']}")
+        else:
+            print(f"{C.YELLOW}No cached token found.{C.RESET}")
+            print("Run 'flacfetch spotify-auth login' to authenticate.")
+
+    elif action == "upload":
+        # Upload the token to GCP Secret Manager
+        cache_path = os.path.expanduser("~/.cache-spotipy")
+
+        if not os.path.exists(cache_path):
+            print(f"{C.RED}Error: No cached token found.{C.RESET}")
+            print("Run 'flacfetch spotify-auth login' first.")
+            sys.exit(1)
+
+        print(f"{C.CYAN}Uploading token to GCP Secret Manager...{C.RESET}")
+
+        import subprocess
+        result = subprocess.run(
+            ["gcloud", "secrets", "versions", "add", "spotify-oauth-token",
+             f"--data-file={cache_path}", f"--project={args.project or 'nomadkaraoke'}"],
+            capture_output=True,
+            text=True,
+        )
+
+        if result.returncode == 0:
+            print(f"{C.GREEN}✓ Token uploaded successfully!{C.RESET}")
+            print(f"\n{C.CYAN}To apply the change, restart the server:{C.RESET}")
+            print(f"  gcloud compute instances reset flacfetch-service --zone=us-central1-a --project={args.project or 'nomadkaraoke'}")
+        else:
+            print(f"{C.RED}Error uploading token:{C.RESET}")
+            print(result.stderr)
+            sys.exit(1)
+
+    elif action == "test":
+        # Test the current token by making an API call
+        if not SPOTIFY_AVAILABLE:
+            print(f"{C.RED}Error: Spotify dependencies not installed.{C.RESET}")
+            sys.exit(1)
+
+        cache_path = os.path.expanduser("~/.cache-spotipy")
+
+        if not os.path.exists(cache_path):
+            print(f"{C.RED}No cached token found.{C.RESET}")
+            print("Run 'flacfetch spotify-auth login' first.")
+            sys.exit(1)
+
+        try:
+            import spotipy
+            from spotipy.oauth2 import SpotifyOAuth
+
+            auth_manager = SpotifyOAuth(
+                client_id=os.environ.get("SPOTIPY_CLIENT_ID"),
+                client_secret=os.environ.get("SPOTIPY_CLIENT_SECRET"),
+                redirect_uri=os.environ.get("SPOTIPY_REDIRECT_URI", "http://127.0.0.1:8888/callback"),
+                scope="user-read-playback-state user-modify-playback-state streaming",
+                cache_path=cache_path,
+            )
+
+            sp = spotipy.Spotify(auth_manager=auth_manager)
+            user = sp.current_user()
+
+            print(f"{C.GREEN}✓ Token is valid!{C.RESET}")
+            print(f"  Authenticated as: {user.get('display_name', user.get('id'))}")
+
+            # Try a search to confirm full functionality
+            results = sp.search(q="test", type="track", limit=1)
+            if results.get("tracks", {}).get("items"):
+                print("  Search API: Working")
+
+        except Exception as e:
+            print(f"{C.RED}Token validation failed: {e}{C.RESET}")
+            print("\nThe token may be expired or revoked.")
+            print("Run 'flacfetch spotify-auth login' to re-authenticate.")
+            sys.exit(1)
+
+
+def fix_command(args):
+    """
+    Interactive command to fix credential issues.
+
+    Provides a guided flow for fixing Spotify and YouTube credentials
+    on the cloud server.
+    """
+    import subprocess
+
+    # Colors for output
+    class C:
+        RESET = "\033[0m"
+        BOLD = "\033[1m"
+        DIM = "\033[2m"
+        CYAN = "\033[36m"
+        GREEN = "\033[32m"
+        YELLOW = "\033[33m"
+        RED = "\033[31m"
+
+    target = args.target  # 'all', 'spotify', or 'youtube'
+    project = args.project
+
+    print(f"\n{C.BOLD}🔧 Flacfetch Credential Fix Tool{C.RESET}")
+    print(f"{C.DIM}This tool will help fix credential issues on the cloud server.{C.RESET}\n")
+
+    if target in ("all", "spotify"):
+        print(f"{C.CYAN}━━━ Spotify ━━━{C.RESET}")
+
+        # Check if Spotify credentials are configured locally
+        client_id = os.environ.get("SPOTIPY_CLIENT_ID")
+        client_secret = os.environ.get("SPOTIPY_CLIENT_SECRET")
+
+        if not client_id or not client_secret:
+            print(f"{C.YELLOW}⚠️  Spotify credentials not found in environment.{C.RESET}")
+            print("\nPlease set these environment variables:")
+            print("  export SPOTIPY_CLIENT_ID=your_client_id")
+            print("  export SPOTIPY_CLIENT_SECRET=your_client_secret")
+            print("\nGet credentials from: https://developer.spotify.com/dashboard")
+        else:
+            print(f"{C.GREEN}✓ Spotify credentials found in environment{C.RESET}")
+
+            # Ask to proceed
+            proceed = input(f"\n{C.BOLD}Re-authenticate Spotify? [Y/n]: {C.RESET}").strip().lower()
+            if proceed in ("", "y", "yes"):
+                print(f"\n{C.CYAN}Opening browser for Spotify login...{C.RESET}")
+                print(f"{C.DIM}Complete the login in your browser.{C.RESET}\n")
+
+                try:
+                    import spotipy
+                    from spotipy.oauth2 import SpotifyOAuth
+
+                    cache_path = os.path.expanduser("~/.cache-spotipy")
+
+                    # Remove old cache to force re-auth
+                    if os.path.exists(cache_path):
+                        os.unlink(cache_path)
+
+                    auth_manager = SpotifyOAuth(
+                        client_id=client_id,
+                        client_secret=client_secret,
+                        redirect_uri=os.environ.get("SPOTIPY_REDIRECT_URI", "http://127.0.0.1:8888/callback"),
+                        scope="user-read-playback-state user-modify-playback-state streaming",
+                        cache_path=cache_path,
+                    )
+
+                    sp = spotipy.Spotify(auth_manager=auth_manager)
+                    user = sp.current_user()
+
+                    print(f"\n{C.GREEN}✓ Authenticated as: {user.get('display_name', user.get('id'))}{C.RESET}")
+
+                    # Upload to GCP
+                    print(f"\n{C.CYAN}Uploading token to GCP Secret Manager...{C.RESET}")
+                    result = subprocess.run(
+                        ["gcloud", "secrets", "versions", "add", "spotify-oauth-token",
+                         f"--data-file={cache_path}", f"--project={project}"],
+                        capture_output=True,
+                        text=True,
+                    )
+
+                    if result.returncode == 0:
+                        print(f"{C.GREEN}✓ Spotify token uploaded to GCP!{C.RESET}")
+                    else:
+                        print(f"{C.RED}Failed to upload: {result.stderr}{C.RESET}")
+
+                except Exception as e:
+                    print(f"{C.RED}Error: {e}{C.RESET}")
+            else:
+                print(f"{C.DIM}Skipping Spotify...{C.RESET}")
+
+    if target in ("all", "youtube"):
+        print(f"\n{C.CYAN}━━━ YouTube ━━━{C.RESET}")
+
+        proceed = input(f"\n{C.BOLD}Update YouTube cookies? [Y/n]: {C.RESET}").strip().lower()
+        if proceed in ("", "y", "yes"):
+            browser = input(f"{C.BOLD}Browser to extract from [chrome/firefox/edge/safari] (default: chrome): {C.RESET}").strip().lower()
+            if not browser:
+                browser = "chrome"
+
+            print(f"\n{C.CYAN}Extracting cookies from {browser}...{C.RESET}")
+
+            try:
+                import tempfile
+
+                import yt_dlp
+
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                    temp_cookies = f.name
+
+                try:
+                    ydl_opts = {
+                        'quiet': True,
+                        'cookiesfrombrowser': (browser, None, None, None),
+                        'cookiefile': temp_cookies,
+                    }
+
+                    try:
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                            ydl.extract_info("https://www.youtube.com/", download=False)
+                    except Exception:
+                        pass
+
+                    with open(temp_cookies) as f:
+                        cookies_content = f.read()
+
+                    if cookies_content and "youtube" in cookies_content.lower():
+                        print(f"{C.GREEN}✓ Extracted cookies from {browser}{C.RESET}")
+
+                        # Upload to GCP
+                        print(f"\n{C.CYAN}Uploading cookies to GCP Secret Manager...{C.RESET}")
+                        result = subprocess.run(
+                            ["gcloud", "secrets", "versions", "add", "youtube-cookies",
+                             f"--data-file={temp_cookies}", f"--project={project}"],
+                            capture_output=True,
+                            text=True,
+                        )
+
+                        if result.returncode == 0:
+                            print(f"{C.GREEN}✓ YouTube cookies uploaded to GCP!{C.RESET}")
+                        else:
+                            print(f"{C.RED}Failed to upload: {result.stderr}{C.RESET}")
+                    else:
+                        print(f"{C.YELLOW}No YouTube cookies found in {browser}.{C.RESET}")
+                        print("Make sure you're logged into YouTube in that browser.")
+
+                finally:
+                    if os.path.exists(temp_cookies):
+                        os.unlink(temp_cookies)
+
+            except Exception as e:
+                print(f"{C.RED}Error: {e}{C.RESET}")
+        else:
+            print(f"{C.DIM}Skipping YouTube...{C.RESET}")
+
+    # Offer to restart server
+    print(f"\n{C.CYAN}━━━ Apply Changes ━━━{C.RESET}")
+    restart = input(f"\n{C.BOLD}Restart cloud server to apply changes? [Y/n]: {C.RESET}").strip().lower()
+    if restart in ("", "y", "yes"):
+        print(f"\n{C.CYAN}Restarting flacfetch-service...{C.RESET}")
+        result = subprocess.run(
+            ["gcloud", "compute", "instances", "reset", "flacfetch-service",
+             "--zone=us-central1-a", f"--project={project}"],
+            capture_output=True,
+            text=True,
+        )
+
+        if result.returncode == 0:
+            print(f"{C.GREEN}✓ Server restart initiated!{C.RESET}")
+            print(f"{C.DIM}It may take 1-2 minutes for the server to come back online.{C.RESET}")
+        else:
+            print(f"{C.RED}Failed to restart: {result.stderr}{C.RESET}")
+    else:
+        print(f"\n{C.DIM}Remember to restart the server manually:{C.RESET}")
+        print(f"  gcloud compute instances reset flacfetch-service --zone=us-central1-a --project={project}")
+
+    print(f"\n{C.GREEN}Done!{C.RESET}\n")
+
+
 # ANSI Color Codes
 class Colors:
     RESET = "\033[0m"
@@ -720,6 +1070,84 @@ Examples:
         cookies_command(cookies_args)
         return
 
+    # Check for 'spotify-auth' subcommand
+    if len(sys.argv) > 1 and sys.argv[1] == "spotify-auth":
+        spotify_auth_parser = argparse.ArgumentParser(
+            prog="flacfetch spotify-auth",
+            description="Manage Spotify OAuth authentication for headless servers",
+            formatter_class=WideHelpFormatter,
+            epilog="""
+Examples:
+  flacfetch spotify-auth login
+      Authenticate with Spotify (opens browser)
+
+  flacfetch spotify-auth show
+      Show current token status
+
+  flacfetch spotify-auth test
+      Test if the token is valid
+
+  flacfetch spotify-auth upload
+      Upload token to GCP Secret Manager
+
+Workflow for cloud deployment:
+  1. Set SPOTIPY_CLIENT_ID and SPOTIPY_CLIENT_SECRET env vars
+  2. Run: flacfetch spotify-auth login
+  3. Run: flacfetch spotify-auth upload
+  4. Restart the cloud server to pick up the new token
+            """.strip(),
+        )
+        spotify_auth_parser.add_argument(
+            "action",
+            choices=["login", "show", "test", "upload"],
+            help="Action: login (browser auth), show (token info), test (validate), upload (to GCP)"
+        )
+        spotify_auth_parser.add_argument(
+            "--project", "-p",
+            default="nomadkaraoke",
+            help="GCP project ID for upload (default: nomadkaraoke)"
+        )
+        spotify_auth_args = spotify_auth_parser.parse_args(sys.argv[2:])
+        spotify_auth_command(spotify_auth_args)
+        return
+
+    # Check for 'fix' subcommand - interactive credential repair tool
+    if len(sys.argv) > 1 and sys.argv[1] == "fix":
+        fix_parser = argparse.ArgumentParser(
+            prog="flacfetch fix",
+            description="Interactive tool to fix credential issues on the cloud server",
+            formatter_class=WideHelpFormatter,
+            epilog="""
+Examples:
+  flacfetch fix
+      Fix all credentials (Spotify and YouTube)
+
+  flacfetch fix spotify
+      Fix only Spotify credentials
+
+  flacfetch fix youtube
+      Fix only YouTube cookies
+
+This command is designed to run locally on your Mac when you receive
+a Pushbullet notification saying credentials need attention.
+            """.strip(),
+        )
+        fix_parser.add_argument(
+            "target",
+            nargs="?",
+            choices=["all", "spotify", "youtube"],
+            default="all",
+            help="What to fix: all (default), spotify, or youtube"
+        )
+        fix_parser.add_argument(
+            "--project", "-p",
+            default="nomadkaraoke",
+            help="GCP project ID (default: nomadkaraoke)"
+        )
+        fix_args = fix_parser.parse_args(sys.argv[2:])
+        fix_command(fix_args)
+        return
+
     parser = argparse.ArgumentParser(
         prog="flacfetch",
         description="""
@@ -754,6 +1182,15 @@ Examples:
 
   flacfetch cookies status
       Check YouTube cookies status
+
+  flacfetch spotify-auth login
+      Authenticate with Spotify for cloud deployment
+
+  flacfetch spotify-auth upload
+      Upload Spotify token to GCP Secret Manager
+
+  flacfetch fix
+      Interactive tool to fix credentials (run when you get a notification)
 
 Environment Variables:
   RED_API_KEY                  API key for RED (lossless FLAC source)

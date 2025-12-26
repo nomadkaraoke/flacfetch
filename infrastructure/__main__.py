@@ -158,6 +158,24 @@ youtube_cookies_secret = secretmanager.Secret(
     ),
 )
 
+# Spotify OAuth token secret (cached token for headless server auth)
+spotify_oauth_token_secret = secretmanager.Secret(
+    "spotify-oauth-token",
+    secret_id="spotify-oauth-token",
+    replication=secretmanager.SecretReplicationArgs(
+        auto=secretmanager.SecretReplicationAutoArgs(),
+    ),
+)
+
+# Pushbullet API key (for credential health check notifications)
+pushbullet_api_key_secret = secretmanager.Secret(
+    "pushbullet-api-key",
+    secret_id="pushbullet-api-key",
+    replication=secretmanager.SecretReplicationArgs(
+        auto=secretmanager.SecretReplicationAutoArgs(),
+    ),
+)
+
 # Grant flacfetch service account permission to update youtube-cookies secret
 # This is needed for the cookie upload API endpoint
 youtube_cookies_iam = secretmanager.SecretIamMember(
@@ -205,6 +223,9 @@ STARTUP_SCRIPT = r'''#!/bin/bash
 
 set -e
 
+# Ensure HOME is set for git config commands
+export HOME=/root
+
 # Log to a file for debugging
 exec > >(tee /var/log/flacfetch-startup.log) 2>&1
 echo "========================================"
@@ -214,7 +235,7 @@ echo "========================================"
 # Install dependencies (idempotent)
 echo "Installing/updating system dependencies..."
 apt-get update
-apt-get install -y python3-pip python3-venv transmission-daemon ffmpeg git curl
+apt-get install -y python3-pip python3-venv transmission-daemon ffmpeg git curl unzip
 
 # =============================================================================
 # Install librespot (for Spotify audio capture)
@@ -242,7 +263,7 @@ fi
 # Deno is required for yt-dlp to solve YouTube's JavaScript challenges
 # See: https://github.com/yt-dlp/yt-dlp/wiki/EJS
 echo "Installing/updating Deno runtime..."
-DENO_INSTALL="/root/.deno"
+export DENO_INSTALL="/opt/deno"
 DENO_BIN="$DENO_INSTALL/bin/deno"
 
 if [ -f "$DENO_BIN" ]; then
@@ -250,22 +271,20 @@ if [ -f "$DENO_BIN" ]; then
     echo "Deno already installed: $DENO_VERSION"
 else
     echo "Installing Deno..."
-    curl -fsSL https://deno.land/install.sh | sh
+    mkdir -p "$DENO_INSTALL"
+    curl -fsSL https://deno.land/install.sh | DENO_INSTALL="$DENO_INSTALL" sh
     echo "Installed: $($DENO_BIN --version 2>&1 | head -1)"
 fi
 
 # Add Deno to PATH for current session
-export DENO_INSTALL="/root/.deno"
 export PATH="$DENO_INSTALL/bin:$PATH"
 
 # Ensure Deno is in system PATH for all users
-if ! grep -q "DENO_INSTALL" /etc/profile.d/deno.sh 2>/dev/null; then
-    cat > /etc/profile.d/deno.sh << 'DENO_PROFILE'
-export DENO_INSTALL="/root/.deno"
-export PATH="$DENO_INSTALL/bin:$PATH"
+cat > /etc/profile.d/deno.sh << DENO_PROFILE
+export DENO_INSTALL="/opt/deno"
+export PATH="\$DENO_INSTALL/bin:\$PATH"
 DENO_PROFILE
-    chmod +x /etc/profile.d/deno.sh
-fi
+chmod +x /etc/profile.d/deno.sh
 
 # =============================================================================
 # Persistent Disk Setup
@@ -284,14 +303,19 @@ if [ -b /dev/sdb ]; then
     # Create mount point
     mkdir -p "$PERSISTENT_MOUNT"
 
-    # Check if disk is formatted
-    if ! blkid /dev/sdb | grep -q 'TYPE="ext4"'; then
-        echo "Formatting persistent disk..."
-        mkfs.ext4 -F /dev/sdb
-    fi
+    # Check if already mounted (skip formatting if so)
+    if mountpoint -q "$PERSISTENT_MOUNT"; then
+        echo "Persistent disk already mounted at $PERSISTENT_MOUNT"
+    else
+        # Check if disk is formatted
+        if ! blkid /dev/sdb | grep -q 'TYPE="ext4"'; then
+            echo "Formatting persistent disk..."
+            mkfs.ext4 -F /dev/sdb
+        else
+            echo "Persistent disk already formatted"
+        fi
 
-    # Mount if not already mounted
-    if ! mountpoint -q "$PERSISTENT_MOUNT"; then
+        # Mount the disk
         echo "Mounting persistent disk..."
         mount /dev/sdb "$PERSISTENT_MOUNT"
     fi
@@ -428,6 +452,9 @@ if [ -d "flacfetch" ]; then
     echo "Updating existing flacfetch installation..."
     cd flacfetch
 
+    # Mark directory as safe (ownership may differ between runs)
+    git config --global --add safe.directory /opt/flacfetch
+
     # Stash any local changes (shouldn't be any)
     git stash 2>/dev/null || true
 
@@ -512,6 +539,35 @@ else
 fi
 
 # =============================================================================
+# Spotify OAuth Token (for headless server authentication)
+# =============================================================================
+# Spotipy stores its OAuth token in a .cache file. On a headless server,
+# we need to pre-populate this from Secret Manager since we can't do
+# browser-based OAuth.
+SPOTIFY_CACHE_FILE="/opt/flacfetch/.cache"
+SPOTIFY_OAUTH_TOKEN=$(gcloud secrets versions access latest --secret=spotify-oauth-token 2>/dev/null || echo "")
+
+if [ -n "$SPOTIFY_OAUTH_TOKEN" ]; then
+    echo "$SPOTIFY_OAUTH_TOKEN" > "$SPOTIFY_CACHE_FILE"
+    chmod 600 "$SPOTIFY_CACHE_FILE"
+    echo "Spotify OAuth token configured at $SPOTIFY_CACHE_FILE"
+else
+    echo "WARNING: No Spotify OAuth token configured. Spotify search will not work."
+    echo "To fix: Run 'flacfetch spotify-auth' locally, then upload the token with:"
+    echo "  gcloud secrets versions add spotify-oauth-token --data-file=~/.cache"
+fi
+
+# =============================================================================
+# Pushbullet API Key (for credential health check notifications)
+# =============================================================================
+PUSHBULLET_API_KEY=$(gcloud secrets versions access latest --secret=pushbullet-api-key 2>/dev/null || echo "")
+if [ -n "$PUSHBULLET_API_KEY" ]; then
+    echo "Pushbullet notifications configured"
+else
+    echo "WARNING: No Pushbullet API key configured. Credential health check notifications disabled."
+fi
+
+# =============================================================================
 # Create/Update Systemd Service
 # =============================================================================
 echo "Creating/updating systemd service..."
@@ -541,8 +597,8 @@ Environment="OPS_API_URL=${OPS_API_URL}"
 Environment="SPOTIPY_CLIENT_ID=${SPOTIPY_CLIENT_ID}"
 Environment="SPOTIPY_CLIENT_SECRET=${SPOTIPY_CLIENT_SECRET}"
 Environment="SPOTIPY_REDIRECT_URI=${SPOTIPY_REDIRECT_URI}"
-Environment="PATH=/root/.deno/bin:/usr/local/bin:/usr/bin:/bin"
-Environment="DENO_INSTALL=/root/.deno"
+Environment="PATH=/opt/deno/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="DENO_INSTALL=/opt/deno"
 Environment="GCS_BUCKET=${GCS_BUCKET}"
 Environment="FLACFETCH_KEEP_SEEDING=true"
 Environment="FLACFETCH_MIN_FREE_GB=5"
@@ -550,6 +606,7 @@ Environment="FLACFETCH_DOWNLOAD_DIR=${DOWNLOAD_DIR}"
 Environment="TRANSMISSION_HOST=localhost"
 Environment="TRANSMISSION_PORT=9091"
 Environment="YOUTUBE_COOKIES_FILE=${YOUTUBE_COOKIES_FILE}"
+Environment="PUSHBULLET_API_KEY=${PUSHBULLET_API_KEY}"
 ExecStart=/opt/flacfetch/venv/bin/flacfetch serve --host 0.0.0.0 --port 8080
 Restart=always
 RestartSec=10
@@ -639,8 +696,8 @@ Type=oneshot
 ExecStart=/opt/flacfetch/update-ytdlp.sh
 User=root
 WorkingDirectory=/opt/flacfetch
-Environment="PATH=/root/.deno/bin:/usr/local/bin:/usr/bin:/bin"
-Environment="DENO_INSTALL=/root/.deno"
+Environment="PATH=/opt/deno/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="DENO_INSTALL=/opt/deno"
 YTDLP_SERVICE
 
 # Create the systemd timer (runs daily at 4am UTC)
@@ -663,6 +720,86 @@ systemctl enable ytdlp-update.timer
 systemctl start ytdlp-update.timer
 
 echo "yt-dlp auto-update timer enabled (runs daily at 4am UTC)"
+
+# =============================================================================
+# Credential Health Check Timer
+# =============================================================================
+# Create a systemd timer to check Spotify and YouTube credentials daily
+# and send Pushbullet notifications if action is needed
+echo "Creating credential health check timer..."
+
+# Create the check script
+cat > /opt/flacfetch/check-credentials.sh << 'CRED_CHECK_SCRIPT'
+#!/bin/bash
+# Check Spotify and YouTube credentials and notify via Pushbullet
+set -e
+exec >> /var/log/flacfetch-credential-check.log 2>&1
+
+echo "========================================"
+echo "Credential check started at $(date)"
+echo "========================================"
+
+cd /opt/flacfetch
+source venv/bin/activate
+
+# Run the credential check via the API (calls locally)
+# This uses the flacfetch module directly instead of HTTP to avoid API key requirement
+python -c "
+from flacfetch.api.services.credential_check import run_credential_health_check
+import json
+
+result = run_credential_health_check(notify=True, notify_on_success=False)
+print(json.dumps(result, indent=2))
+"
+
+echo "Credential check complete at $(date)"
+CRED_CHECK_SCRIPT
+
+chmod +x /opt/flacfetch/check-credentials.sh
+
+# Create the systemd service for credential check
+cat > /etc/systemd/system/flacfetch-credential-check.service << CRED_CHECK_SERVICE
+[Unit]
+Description=Check flacfetch credentials (Spotify, YouTube)
+After=network.target flacfetch.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/flacfetch/check-credentials.sh
+User=root
+WorkingDirectory=/opt/flacfetch
+Environment="SPOTIPY_CLIENT_ID=${SPOTIPY_CLIENT_ID}"
+Environment="SPOTIPY_CLIENT_SECRET=${SPOTIPY_CLIENT_SECRET}"
+Environment="SPOTIPY_REDIRECT_URI=${SPOTIPY_REDIRECT_URI}"
+Environment="YOUTUBE_COOKIES_FILE=${YOUTUBE_COOKIES_FILE}"
+Environment="PUSHBULLET_API_KEY=${PUSHBULLET_API_KEY}"
+Environment="PATH=/root/.deno/bin:/usr/local/bin:/usr/bin:/bin"
+CRED_CHECK_SERVICE
+
+# Create the systemd timer (runs daily at 7pm UTC / 2pm EST)
+cat > /etc/systemd/system/flacfetch-credential-check.timer << 'CRED_CHECK_TIMER'
+[Unit]
+Description=Daily flacfetch credential health check
+
+[Timer]
+OnCalendar=*-*-* 19:00:00
+RandomizedDelaySec=1800
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+CRED_CHECK_TIMER
+
+# Enable and start the timer
+systemctl daemon-reload
+systemctl enable flacfetch-credential-check.timer
+systemctl start flacfetch-credential-check.timer
+
+echo "Credential health check timer enabled (runs daily at 7pm UTC / 2pm EST)"
+
+# Run initial credential check
+echo "Running initial credential check..."
+/opt/flacfetch/check-credentials.sh || true
 
 # =============================================================================
 # Summary
@@ -812,6 +949,8 @@ pulumi.export("secrets", {
     "ops_api_url": ops_api_url_secret.name,
     "spotipy_client_id": spotipy_client_id_secret.name,
     "spotipy_client_secret": spotipy_client_secret_secret.name,
+    "spotify_oauth_token": spotify_oauth_token_secret.name,
+    "pushbullet_api_key": pushbullet_api_key_secret.name,
     "youtube_cookies": youtube_cookies_secret.name,
 })
 
