@@ -523,62 +523,130 @@ def fix_command(args):
 
         proceed = input(f"\n{C.BOLD}Update YouTube cookies? [Y/n]: {C.RESET}").strip().lower()
         if proceed in ("", "y", "yes"):
-            browser = input(f"{C.BOLD}Browser to extract from [chrome/firefox/edge/safari] (default: chrome): {C.RESET}").strip().lower()
-            if not browser:
-                browser = "chrome"
+            print(f"\n{C.DIM}Options:{C.RESET}")
+            print("  1. Extract from browser (requires browser to be closed)")
+            print("  2. Provide existing cookies file")
+            print("  3. Use browser extension export (recommended)")
 
-            print(f"\n{C.CYAN}Extracting cookies from {browser}...{C.RESET}")
+            choice = input(f"\n{C.BOLD}Choose method [1/2/3] (default: 1): {C.RESET}").strip()
+            if not choice:
+                choice = "1"
 
-            try:
-                import tempfile
+            cookies_content = None
+            temp_cookies = None
 
-                import yt_dlp
+            if choice == "1":
+                # Extract from browser
+                browser = input(f"{C.BOLD}Browser [chrome/firefox/edge/safari/brave] (default: chrome): {C.RESET}").strip().lower()
+                if not browser:
+                    browser = "chrome"
 
-                with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-                    temp_cookies = f.name
+                print(f"\n{C.YELLOW}⚠️  Make sure {browser} is completely closed!{C.RESET}")
+                input(f"{C.DIM}Press Enter when ready...{C.RESET}")
+
+                print(f"\n{C.CYAN}Extracting cookies from {browser}...{C.RESET}")
 
                 try:
-                    ydl_opts = {
-                        'quiet': True,
-                        'cookiesfrombrowser': (browser, None, None, None),
-                        'cookiefile': temp_cookies,
-                    }
+                    import tempfile
 
-                    try:
-                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                            ydl.extract_info("https://www.youtube.com/", download=False)
-                    except Exception:
-                        pass
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                        temp_cookies = f.name
 
-                    with open(temp_cookies) as f:
+                    # Use yt-dlp CLI directly - more reliable than Python API
+                    result = subprocess.run(
+                        ["yt-dlp", "--cookies-from-browser", browser,
+                         "--cookies", temp_cookies,
+                         "--skip-download", "--flat-playlist",
+                         "https://www.youtube.com/feed/subscriptions"],
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+
+                    if os.path.exists(temp_cookies):
+                        with open(temp_cookies) as f:
+                            cookies_content = f.read()
+
+                    if not cookies_content or "youtube" not in cookies_content.lower():
+                        print(f"{C.YELLOW}Cookie extraction failed.{C.RESET}")
+                        print(f"{C.DIM}Try option 3 (browser extension) instead.{C.RESET}")
+                        cookies_content = None
+
+                except subprocess.TimeoutExpired:
+                    print(f"{C.RED}Timeout - browser might not be closed.{C.RESET}")
+                except Exception as e:
+                    print(f"{C.RED}Error: {e}{C.RESET}")
+
+            elif choice == "2":
+                # Provide existing file
+                file_path = input(f"{C.BOLD}Path to cookies.txt file: {C.RESET}").strip()
+                file_path = os.path.expanduser(file_path)
+
+                if os.path.exists(file_path):
+                    with open(file_path) as f:
                         cookies_content = f.read()
 
-                    if cookies_content and "youtube" in cookies_content.lower():
-                        print(f"{C.GREEN}✓ Extracted cookies from {browser}{C.RESET}")
+                    if "youtube" not in cookies_content.lower():
+                        print(f"{C.YELLOW}Warning: File doesn't appear to contain YouTube cookies.{C.RESET}")
+                        confirm = input(f"{C.BOLD}Upload anyway? [y/N]: {C.RESET}").strip().lower()
+                        if confirm not in ("y", "yes"):
+                            cookies_content = None
+                else:
+                    print(f"{C.RED}File not found: {file_path}{C.RESET}")
 
-                        # Upload to GCP
-                        print(f"\n{C.CYAN}Uploading cookies to GCP Secret Manager...{C.RESET}")
-                        result = subprocess.run(
-                            ["gcloud", "secrets", "versions", "add", "youtube-cookies",
-                             f"--data-file={temp_cookies}", f"--project={project}"],
-                            capture_output=True,
-                            text=True,
-                        )
+            elif choice == "3":
+                # Browser extension instructions
+                print(f"\n{C.CYAN}Browser Extension Method:{C.RESET}")
+                print("\n1. Install a cookie export extension:")
+                print(f"   {C.DIM}• Chrome: 'Get cookies.txt LOCALLY' or 'EditThisCookie'{C.RESET}")
+                print(f"   {C.DIM}• Firefox: 'cookies.txt' by Lennon Hill{C.RESET}")
+                print("\n2. Go to youtube.com and make sure you're logged in")
+                print("\n3. Click the extension and export cookies in Netscape format")
+                print("\n4. Save the file (e.g., ~/Downloads/youtube_cookies.txt)")
 
-                        if result.returncode == 0:
-                            print(f"{C.GREEN}✓ YouTube cookies uploaded to GCP!{C.RESET}")
-                        else:
-                            print(f"{C.RED}Failed to upload: {result.stderr}{C.RESET}")
+                file_path = input(f"\n{C.BOLD}Path to exported cookies file: {C.RESET}").strip()
+                file_path = os.path.expanduser(file_path)
+
+                if file_path and os.path.exists(file_path):
+                    with open(file_path) as f:
+                        cookies_content = f.read()
+
+                    if "youtube" not in cookies_content.lower():
+                        print(f"{C.YELLOW}Warning: File doesn't appear to contain YouTube cookies.{C.RESET}")
+                elif file_path:
+                    print(f"{C.RED}File not found: {file_path}{C.RESET}")
+
+            # Upload if we got cookies
+            if cookies_content and "youtube" in cookies_content.lower():
+                print(f"\n{C.GREEN}✓ Found YouTube cookies ({len(cookies_content)} bytes){C.RESET}")
+
+                # Write to temp file for upload
+                import tempfile
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                    f.write(cookies_content)
+                    upload_file = f.name
+
+                try:
+                    print(f"{C.CYAN}Uploading cookies to GCP Secret Manager...{C.RESET}")
+                    result = subprocess.run(
+                        ["gcloud", "secrets", "versions", "add", "youtube-cookies",
+                         f"--data-file={upload_file}", f"--project={project}"],
+                        capture_output=True,
+                        text=True,
+                    )
+
+                    if result.returncode == 0:
+                        print(f"{C.GREEN}✓ YouTube cookies uploaded to GCP!{C.RESET}")
                     else:
-                        print(f"{C.YELLOW}No YouTube cookies found in {browser}.{C.RESET}")
-                        print("Make sure you're logged into YouTube in that browser.")
-
+                        print(f"{C.RED}Failed to upload: {result.stderr}{C.RESET}")
                 finally:
-                    if os.path.exists(temp_cookies):
-                        os.unlink(temp_cookies)
+                    if os.path.exists(upload_file):
+                        os.unlink(upload_file)
 
-            except Exception as e:
-                print(f"{C.RED}Error: {e}{C.RESET}")
+            # Cleanup temp file
+            if temp_cookies and os.path.exists(temp_cookies):
+                os.unlink(temp_cookies)
+
         else:
             print(f"{C.DIM}Skipping YouTube...{C.RESET}")
 
