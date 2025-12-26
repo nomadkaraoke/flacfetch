@@ -144,9 +144,9 @@ def check_youtube_credentials() -> CredentialCheckResult:
     try:
         import yt_dlp
 
-        # Try to extract info from a known video
-        # Using a popular, stable video that shouldn't be removed
-        test_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"  # Rick Astley
+        # Try to extract info from a private video that requires authentication
+        # This video is only accessible with valid cookies
+        test_url = "https://www.youtube.com/watch?v=nFMXRiXnOXI"  # Private test video
 
         ydl_opts = {
             'quiet': True,

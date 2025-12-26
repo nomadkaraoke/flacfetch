@@ -675,9 +675,9 @@ else
 fi
 
 # Update Deno if available
-if command -v /root/.deno/bin/deno &> /dev/null; then
+if command -v /opt/deno/bin/deno &> /dev/null; then
     echo "Updating Deno..."
-    /root/.deno/bin/deno upgrade --quiet 2>/dev/null || true
+    /opt/deno/bin/deno upgrade --quiet 2>/dev/null || true
 fi
 
 echo "Update complete at $(date)"
@@ -773,7 +773,7 @@ Environment="SPOTIPY_CLIENT_SECRET=${SPOTIPY_CLIENT_SECRET}"
 Environment="SPOTIPY_REDIRECT_URI=${SPOTIPY_REDIRECT_URI}"
 Environment="YOUTUBE_COOKIES_FILE=${YOUTUBE_COOKIES_FILE}"
 Environment="PUSHBULLET_API_KEY=${PUSHBULLET_API_KEY}"
-Environment="PATH=/root/.deno/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PATH=/opt/deno/bin:/usr/local/bin:/usr/bin:/bin"
 CRED_CHECK_SERVICE
 
 # Create the systemd timer (runs daily at 7pm UTC / 2pm EST)
@@ -840,7 +840,7 @@ echo "--------------"
 source /opt/flacfetch/venv/bin/activate
 echo "yt-dlp version: $(python -c 'import yt_dlp; print(yt_dlp.version.__version__)' 2>/dev/null || echo 'unknown')"
 echo "yt-dlp-ejs: $(python -c 'import yt_dlp_ejs; print("installed")' 2>/dev/null || echo 'not installed')"
-echo "Deno: $(/root/.deno/bin/deno --version 2>/dev/null | head -1 || echo 'not installed')"
+echo "Deno: $(/opt/deno/bin/deno --version 2>/dev/null | head -1 || echo 'not installed')"
 echo "Update timer: $(systemctl is-active ytdlp-update.timer 2>/dev/null || echo 'not configured')"
 
 echo ""

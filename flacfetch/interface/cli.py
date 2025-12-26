@@ -606,6 +606,125 @@ def fix_command(args):
     print(f"\n{C.GREEN}Done!{C.RESET}\n")
 
 
+def check_command(args):
+    """
+    Check credential status for Spotify and YouTube.
+
+    Can check local credentials or query a remote flacfetch server.
+    """
+    # Colors for output
+    class C:
+        RESET = "\033[0m"
+        BOLD = "\033[1m"
+        DIM = "\033[2m"
+        CYAN = "\033[36m"
+        GREEN = "\033[32m"
+        YELLOW = "\033[33m"
+        RED = "\033[31m"
+
+    print(f"\n{C.BOLD}🔍 Flacfetch Credential Check{C.RESET}\n")
+
+    if args.remote:
+        # Query remote server
+        import json
+        import urllib.request
+
+        url = args.remote.rstrip('/') + '/credentials/check'
+        print(f"{C.DIM}Checking remote server: {args.remote}{C.RESET}\n")
+
+        try:
+            req = urllib.request.Request(url)
+            if args.api_key:
+                req.add_header('X-API-Key', args.api_key)
+
+            with urllib.request.urlopen(req, timeout=30) as response:
+                data = json.loads(response.read().decode())
+
+            for service, info in data.get('services', {}).items():
+                status = info.get('status', 'unknown')
+                message = info.get('message', '')
+                needs_action = info.get('needs_human_action', False)
+
+                if status == 'ok':
+                    icon = f"{C.GREEN}✓{C.RESET}"
+                    color = C.GREEN
+                elif status == 'missing':
+                    icon = f"{C.YELLOW}○{C.RESET}"
+                    color = C.YELLOW
+                else:
+                    icon = f"{C.RED}✗{C.RESET}"
+                    color = C.RED
+
+                print(f"{icon} {C.BOLD}{service.capitalize()}{C.RESET}: {color}{status}{C.RESET}")
+                print(f"  {C.DIM}{message}{C.RESET}")
+
+                if needs_action and info.get('fix_command'):
+                    print(f"  {C.CYAN}Fix: {info['fix_command']}{C.RESET}")
+                print()
+
+            if data.get('needs_action'):
+                print(f"{C.YELLOW}⚠️  Some credentials need attention.{C.RESET}")
+                print(f"{C.DIM}Run 'flacfetch fix' to repair them.{C.RESET}\n")
+            else:
+                print(f"{C.GREEN}✓ All credentials OK!{C.RESET}\n")
+
+        except urllib.error.HTTPError as e:
+            print(f"{C.RED}HTTP Error {e.code}: {e.reason}{C.RESET}")
+            if e.code == 401 or e.code == 403:
+                print(f"{C.DIM}Try providing --api-key{C.RESET}")
+        except Exception as e:
+            print(f"{C.RED}Error: {e}{C.RESET}")
+
+    else:
+        # Check local credentials
+        try:
+            from flacfetch.api.services.credential_check import (
+                check_spotify_credentials,
+                check_youtube_credentials,
+            )
+
+            checks = [
+                ("Spotify", check_spotify_credentials),
+                ("YouTube", check_youtube_credentials),
+            ]
+
+            all_ok = True
+            for name, check_fn in checks:
+                print(f"{C.CYAN}Checking {name}...{C.RESET}")
+                result = check_fn()
+
+                if result.status.value == 'ok':
+                    icon = f"{C.GREEN}✓{C.RESET}"
+                    color = C.GREEN
+                elif result.status.value == 'missing':
+                    icon = f"{C.YELLOW}○{C.RESET}"
+                    color = C.YELLOW
+                    all_ok = False
+                else:
+                    icon = f"{C.RED}✗{C.RESET}"
+                    color = C.RED
+                    all_ok = False
+
+                print(f"{icon} {C.BOLD}{result.service}{C.RESET}: {color}{result.status.value}{C.RESET}")
+                print(f"  {C.DIM}{result.message}{C.RESET}")
+
+                if result.needs_human_action and result.fix_command:
+                    print(f"  {C.CYAN}Fix: {result.fix_command}{C.RESET}")
+                print()
+
+            if all_ok:
+                print(f"{C.GREEN}✓ All credentials OK!{C.RESET}\n")
+            else:
+                print(f"{C.YELLOW}⚠️  Some credentials need attention.{C.RESET}")
+                print(f"{C.DIM}Run 'flacfetch fix' to repair them.{C.RESET}\n")
+
+        except ImportError as e:
+            print(f"{C.RED}Error: Could not import credential check module: {e}{C.RESET}")
+            print(f"{C.DIM}Make sure flacfetch is installed with API dependencies.{C.RESET}")
+        except Exception as e:
+            print(f"{C.RED}Error: {e}{C.RESET}")
+
+
 # ANSI Color Codes
 class Colors:
     RESET = "\033[0m"
@@ -1148,6 +1267,36 @@ a Pushbullet notification saying credentials need attention.
         fix_command(fix_args)
         return
 
+    # Check for 'check' subcommand - credential status check
+    if len(sys.argv) > 1 and sys.argv[1] == "check":
+        check_parser = argparse.ArgumentParser(
+            prog="flacfetch check",
+            description="Check credential status for Spotify and YouTube",
+            formatter_class=WideHelpFormatter,
+            epilog="""
+Examples:
+  flacfetch check
+      Check local credentials
+
+  flacfetch check --remote http://104.198.214.26:8080
+      Check credentials on remote server
+
+  flacfetch check --remote http://104.198.214.26:8080 --api-key YOUR_KEY
+      Check remote server with API key authentication
+            """.strip(),
+        )
+        check_parser.add_argument(
+            "--remote", "-r",
+            help="Remote flacfetch server URL to check (default: check local)"
+        )
+        check_parser.add_argument(
+            "--api-key", "-k",
+            help="API key for remote server"
+        )
+        check_args = check_parser.parse_args(sys.argv[2:])
+        check_command(check_args)
+        return
+
     parser = argparse.ArgumentParser(
         prog="flacfetch",
         description="""
@@ -1191,6 +1340,12 @@ Examples:
 
   flacfetch fix
       Interactive tool to fix credentials (run when you get a notification)
+
+  flacfetch check
+      Check credential status (Spotify and YouTube)
+
+  flacfetch check --remote http://server:8080
+      Check credentials on a remote flacfetch server
 
 Environment Variables:
   RED_API_KEY                  API key for RED (lossless FLAC source)
