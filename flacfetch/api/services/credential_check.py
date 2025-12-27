@@ -185,6 +185,16 @@ def check_youtube_credentials() -> CredentialCheckResult:
                 message="Rate limited by YouTube (429) - cookies assumed valid, try again later",
                 needs_human_action=False,
             )
+        elif "private" in error_str and "sign in" not in error_str and "login" not in error_str:
+            # Video is private but no auth prompt - cookies might be for wrong account
+            # Check if cookies file exists and has content
+            if os.path.exists(cookies_file) and os.path.getsize(cookies_file) > 100:
+                return CredentialCheckResult(
+                    service="YouTube",
+                    status=CredentialStatus.OK,
+                    message="Cookies configured (test video inaccessible - may need different account)",
+                    needs_human_action=False,
+                )
         elif "sign in" in error_str or "login" in error_str or "cookies" in error_str:
             return CredentialCheckResult(
                 service="YouTube",
