@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flacfetch"
-version = "0.13.0"
+version = "0.14.0"
 description = "Search and download high-quality audio from multiple sources"
 readme = "README.md"
 requires-python = ">=3.10,<4.0"
@@ -35,6 +35,7 @@ dependencies = [
 [project.optional-dependencies]
 remote = [
     "httpx>=0.28.0",
+    "playwright>=1.40.0",  # For automated YouTube cookie extraction
 ]
 api = [
     "fastapi>=0.115.0",
@@ -62,6 +63,7 @@ dev = [
 all = [
     # remote
     "httpx>=0.28.0",
+    "playwright>=1.40.0",
     # api
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.24.0",

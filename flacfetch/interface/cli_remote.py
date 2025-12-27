@@ -164,6 +164,26 @@ class RemoteClient:
 
         raise RuntimeError(f"Download timed out after {timeout}s")
 
+    def upload_cookies(self, cookies_content: str) -> Dict[str, Any]:
+        """
+        Upload YouTube cookies to the remote server (immediate effect).
+
+        Args:
+            cookies_content: Cookies in Netscape format
+
+        Returns:
+            Response dict with success status and message
+        """
+        with httpx.Client() as client:
+            resp = client.post(
+                f"{self.base_url}/config/youtube-cookies",
+                headers=self._headers(),
+                json={"cookies": cookies_content},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
     def fetch_file(
         self,
         download_id: str,
@@ -461,23 +481,258 @@ def restart_command(args):
         print(f"{Colors.RED}✗ Failed to restart server: {result.stderr}{Colors.RESET}")
 
 
+def _input_with_completion(prompt: str, default: str = "") -> str:
+    """Input with tab completion for file paths."""
+    import glob
+    import readline
+
+    def complete_path(text, state):
+        """Tab completion for file paths."""
+        # Expand ~ to home directory for matching
+        if text.startswith("~"):
+            expanded = os.path.expanduser(text)
+            matches = glob.glob(expanded + "*")
+            # Convert back to ~ notation for display
+            home = os.path.expanduser("~")
+            matches = [m.replace(home, "~") for m in matches]
+        else:
+            matches = glob.glob(text + "*")
+
+        # Add trailing slash for directories
+        matches = [m + "/" if os.path.isdir(os.path.expanduser(m)) else m for m in matches]
+
+        try:
+            return matches[state]
+        except IndexError:
+            return None
+
+    # Set up readline with path completion
+    old_completer = readline.get_completer()
+    old_delims = readline.get_completer_delims()
+
+    readline.set_completer(complete_path)
+    readline.set_completer_delims(" \t\n;")
+    readline.parse_and_bind("tab: complete")
+
+    try:
+        # Show default in prompt if provided
+        if default:
+            display_prompt = f"{prompt} [{default}]: "
+        else:
+            display_prompt = f"{prompt}: "
+
+        result = input(display_prompt).strip()
+        return result if result else default
+    finally:
+        # Restore old completer
+        readline.set_completer(old_completer)
+        readline.set_completer_delims(old_delims)
+
+
+def _extract_cookies_playwright(headless: bool = False) -> tuple[bool, str, str]:
+    """
+    Extract YouTube cookies using Playwright.
+
+    Returns:
+        Tuple of (success, cookies_content, message)
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return False, "", "Playwright not installed. Install with: pip install playwright && playwright install chromium"
+
+    print(f"{Colors.CYAN}Launching your Chrome browser for YouTube login...{Colors.RESET}")
+    print(f"{Colors.DIM}Please log in to YouTube if prompted.{Colors.RESET}\n")
+
+    try:
+        with sync_playwright() as p:
+            # Use persistent context to remember login
+            # Use a separate profile dir to avoid conflicts with your main Chrome profile
+            user_data_dir = os.path.expanduser("~/.flacfetch/chrome-profile")
+            os.makedirs(user_data_dir, exist_ok=True)
+
+            # Use the real Chrome browser (not Chromium) to avoid Google's bot detection
+            # channel="chrome" uses the system-installed Chrome
+            try:
+                browser = p.chromium.launch_persistent_context(
+                    user_data_dir,
+                    headless=headless,
+                    channel="chrome",  # Use real Chrome, not Chromium
+                )
+            except Exception as e:
+                # Fall back to chromium if Chrome isn't installed
+                print(f"{Colors.YELLOW}Could not launch Chrome ({e}), trying Chromium...{Colors.RESET}")
+                browser = p.chromium.launch_persistent_context(
+                    user_data_dir,
+                    headless=headless,
+                )
+
+            page = browser.new_page()
+
+            # Navigate to YouTube Studio first - this ensures the user selects the correct channel
+            # YouTube Studio requires channel selection, so cookies will be for the right profile
+            studio_url = "https://studio.youtube.com"
+            print(f"{Colors.CYAN}Navigating to YouTube Studio...{Colors.RESET}")
+            print(f"{Colors.DIM}This ensures you're logged in with the correct channel profile.{Colors.RESET}\n")
+
+            page.goto(studio_url)
+
+            # Wait for user to be logged in to the correct channel
+            print(f"{Colors.YELLOW}Please complete the following in the browser:{Colors.RESET}")
+            print("  1. Sign in to Google if prompted")
+            print("  2. Select the correct YouTube channel if prompted")
+            print("  3. Wait until you see the YouTube Studio dashboard")
+            print()
+
+            # Wait for Studio dashboard to load (indicates successful channel login)
+            try:
+                # YouTube Studio dashboard has specific elements when loaded
+                # Wait up to 120 seconds for user to complete login and channel selection
+                print(f"{Colors.DIM}Waiting for YouTube Studio dashboard to load...{Colors.RESET}")
+
+                for _ in range(60):
+                    # Check if we're on the Studio dashboard
+                    current_url = page.url
+                    if "studio.youtube.com/channel/" in current_url:
+                        print(f"{Colors.GREEN}✓ Detected YouTube Studio dashboard{Colors.RESET}")
+                        break
+                    # Also check for the dashboard content area
+                    dashboard = page.query_selector('ytcp-dashboard, #dashboard, [page-id="dashboard"]')
+                    if dashboard:
+                        print(f"{Colors.GREEN}✓ Detected YouTube Studio dashboard{Colors.RESET}")
+                        break
+                    time.sleep(2)
+                else:
+                    # After timeout, ask user to confirm
+                    print(f"\n{Colors.YELLOW}Could not auto-detect dashboard.{Colors.RESET}")
+
+            except Exception:
+                pass
+
+            # Let user confirm they're ready
+            print()
+            print(f"{Colors.YELLOW}⚠ DO NOT close the browser window!{Colors.RESET}")
+            input(f"{Colors.CYAN}Press Enter here (keep browser open) to extract cookies...{Colors.RESET}")
+
+            # Navigate to YouTube main site to collect all YouTube cookies
+            print(f"\n{Colors.DIM}Collecting cookies from YouTube...{Colors.RESET}")
+            try:
+                page.goto("https://www.youtube.com", timeout=10000)
+                time.sleep(2)  # Let cookies settle
+            except Exception:
+                # Browser might have been closed
+                return False, "", "Browser was closed before cookies could be extracted. Please keep the browser open until extraction completes."
+
+            # Get all cookies
+            cookies = browser.cookies()
+
+            # Filter for YouTube/Google cookies and convert to Netscape format
+            netscape_lines = ["# Netscape HTTP Cookie File", "# https://curl.haxx.se/rfc/cookie_spec.html", "# This is a generated file! Do not edit.", ""]
+
+            youtube_cookies = 0
+            login_info = None
+            for cookie in cookies:
+                # Try to identify the logged-in account from cookies
+                if cookie.get("name") == "LOGIN_INFO" and "youtube" in cookie.get("domain", ""):
+                    login_info = cookie.get("value", "")[:50] + "..."
+                domain = cookie.get("domain", "")
+                if "youtube" in domain.lower() or "google" in domain.lower():
+                    youtube_cookies += 1
+
+                # Convert to Netscape format
+                # domain, flag, path, secure, expiry, name, value
+                flag = "TRUE" if domain.startswith(".") else "FALSE"
+                secure = "TRUE" if cookie.get("secure", False) else "FALSE"
+                expiry = str(int(cookie.get("expires", 0)))
+                if expiry == "-1" or expiry == "0":
+                    expiry = "0"
+
+                line = "\t".join([
+                    domain,
+                    flag,
+                    cookie.get("path", "/"),
+                    secure,
+                    expiry,
+                    cookie.get("name", ""),
+                    cookie.get("value", ""),
+                ])
+                netscape_lines.append(line)
+
+            browser.close()
+
+            if youtube_cookies == 0:
+                return False, "", "No YouTube/Google cookies found. Make sure you're logged in to YouTube."
+
+            cookies_content = "\n".join(netscape_lines)
+            msg = f"Extracted {youtube_cookies} YouTube/Google cookies"
+            if login_info:
+                msg += " (LOGIN_INFO present)"
+            return True, cookies_content, msg
+
+    except Exception as e:
+        return False, "", f"Error extracting cookies: {e}"
+
+
 def fix_command(args):
     """
     Interactive credential fix for remote server.
 
-    Authenticates locally, then uploads to GCP Secret Manager, then restarts server.
+    Checks credentials first, then only fixes what needs fixing.
+    Uses API for live cookie updates (no restart needed for cookies).
     """
     import subprocess
 
-    from ..api.services.credential_check import (
-        get_local_spotify_cache_path,
-        get_local_youtube_cookies_path,
-    )
 
     project = args.project or "nomadkaraoke"
 
     print(f"\n{Colors.BOLD}Flacfetch Remote Credential Fix Tool{Colors.RESET}")
-    print(f"{Colors.DIM}This tool will help fix credentials on the cloud server.{Colors.RESET}\n")
+    print(f"{Colors.DIM}This tool will check and fix credentials on the cloud server.{Colors.RESET}\n")
+
+    # Track what was actually fixed
+    spotify_fixed = False
+    youtube_fixed = False
+    any_errors = False
+
+    # -------------------------------------------------------------------------
+    # Check remote credentials first
+    # -------------------------------------------------------------------------
+    print(f"{Colors.BOLD}━━━ Checking Remote Credentials ━━━{Colors.RESET}\n")
+
+    api_url, api_key = get_api_credentials()
+    client = None
+    remote_spotify_ok = False
+    remote_youtube_ok = False
+
+    try:
+        client = RemoteClient(api_url, api_key)
+        result = client.check_credentials()
+        services = result.get("services", {})
+
+        for name, data in services.items():
+            status = data.get("status", "unknown")
+            message = data.get("message", "")
+            needs_action = data.get("needs_human_action", False)
+
+            if status == "ok":
+                icon = f"{Colors.GREEN}✓{Colors.RESET}"
+                if name == "spotify":
+                    remote_spotify_ok = True
+                elif name == "youtube":
+                    remote_youtube_ok = True
+            elif status == "missing" and not needs_action:
+                icon = f"{Colors.YELLOW}○{Colors.RESET}"
+                if name == "youtube":
+                    remote_youtube_ok = True  # YouTube without cookies is OK for most videos
+            else:
+                icon = f"{Colors.RED}✗{Colors.RESET}"
+
+            print(f"{icon} {name.title()}: {message}")
+
+        print()
+
+    except Exception as e:
+        print(f"{Colors.YELLOW}○ Could not check remote credentials: {e}{Colors.RESET}")
+        print(f"{Colors.DIM}Will proceed with credential setup anyway.{Colors.RESET}\n")
 
     # -------------------------------------------------------------------------
     # Spotify
@@ -490,174 +745,286 @@ def fix_command(args):
     if not client_id or not client_secret:
         print(f"{Colors.YELLOW}○ Spotify credentials not found in environment{Colors.RESET}")
         print(f"  {Colors.DIM}Set SPOTIPY_CLIENT_ID and SPOTIPY_CLIENT_SECRET{Colors.RESET}\n")
+    elif remote_spotify_ok:
+        print(f"{Colors.GREEN}✓ Spotify credentials are working{Colors.RESET}")
+        reauth = input("\nRe-authenticate anyway? [y/N]: ").strip().lower()
+        if reauth != 'y':
+            print(f"{Colors.DIM}Skipping Spotify (already working){Colors.RESET}\n")
+        else:
+            # User wants to re-auth anyway
+            spotify_fixed = _fix_spotify(client_id, client_secret, project)
+            if not spotify_fixed:
+                any_errors = True
     else:
-        print(f"{Colors.GREEN}✓ Spotify credentials found in environment{Colors.RESET}\n")
-
-        reauth = input("Re-authenticate Spotify? [Y/n]: ").strip().lower()
-        if not reauth or reauth == 'y':
-            cache_path = get_local_spotify_cache_path()
-
-            # Remove old cache to force re-auth
-            if os.path.exists(cache_path):
-                os.remove(cache_path)
-
-            print(f"\n{Colors.CYAN}Opening browser for Spotify login...{Colors.RESET}")
-            print(f"{Colors.DIM}Complete the login in your browser.{Colors.RESET}\n")
-
-            try:
-                import spotipy
-                from spotipy.oauth2 import SpotifyOAuth
-
-                auth_manager = SpotifyOAuth(
-                    client_id=client_id,
-                    client_secret=client_secret,
-                    redirect_uri=os.environ.get("SPOTIPY_REDIRECT_URI", "http://127.0.0.1:8888/callback"),
-                    scope="user-read-playback-state user-modify-playback-state streaming",
-                    cache_path=cache_path,
-                    open_browser=True,
-                )
-
-                sp = spotipy.Spotify(auth_manager=auth_manager)
-                user = sp.current_user()
-                print(f"\n{Colors.GREEN}✓ Authenticated as: {user.get('display_name', user.get('id'))}{Colors.RESET}\n")
-
-                # Upload to GCP
-                print(f"{Colors.CYAN}Uploading token to GCP Secret Manager...{Colors.RESET}")
-                result = subprocess.run(
-                    ["gcloud", "secrets", "versions", "add", "spotify-oauth-token",
-                     f"--data-file={cache_path}", f"--project={project}"],
-                    capture_output=True,
-                    text=True,
-                )
-                if result.returncode == 0:
-                    print(f"{Colors.GREEN}✓ Spotify token uploaded to GCP!{Colors.RESET}\n")
-                else:
-                    print(f"{Colors.RED}✗ Failed to upload: {result.stderr}{Colors.RESET}\n")
-
-            except ImportError:
-                print(f"{Colors.RED}✗ spotipy not installed. Install with: pip install spotipy{Colors.RESET}\n")
-            except Exception as e:
-                print(f"{Colors.RED}✗ Error: {e}{Colors.RESET}\n")
+        print(f"{Colors.YELLOW}○ Spotify needs authentication{Colors.RESET}\n")
+        spotify_fixed = _fix_spotify(client_id, client_secret, project)
+        if not spotify_fixed:
+            any_errors = True
 
     # -------------------------------------------------------------------------
     # YouTube
     # -------------------------------------------------------------------------
-    print(f"{Colors.BOLD}━━━ YouTube ━━━{Colors.RESET}\n")
+    print(f"{Colors.BOLD}━━━ YouTube ━━━{Colors.RESET}")
 
-    update_yt = input("Update YouTube cookies? [Y/n]: ").strip().lower()
-    if not update_yt or update_yt == 'y':
-        print(f"\n{Colors.CYAN}Options:{Colors.RESET}")
-        print("  1. Extract from browser (requires browser to be closed)")
-        print("  2. Provide existing cookies file")
-        print("  3. Use browser extension export (recommended)")
-        print()
+    if remote_youtube_ok:
+        print(f"{Colors.GREEN}✓ YouTube cookies are working{Colors.RESET}")
+        update_yt = input("\nUpdate cookies anyway? [y/N]: ").strip().lower()
+        if update_yt != 'y':
+            print(f"{Colors.DIM}Skipping YouTube (already working){Colors.RESET}\n")
+        else:
+            youtube_fixed, yt_error = _fix_youtube(client, project)
+            if yt_error:
+                any_errors = True
+    else:
+        print(f"{Colors.YELLOW}○ YouTube cookies need updating{Colors.RESET}\n")
+        youtube_fixed, yt_error = _fix_youtube(client, project)
+        if yt_error:
+            any_errors = True
 
-        choice = input("Choose method [1/2/3] (default: 1): ").strip() or "1"
+    # -------------------------------------------------------------------------
+    # Summary and restart
+    # -------------------------------------------------------------------------
+    print(f"{Colors.BOLD}━━━ Summary ━━━{Colors.RESET}\n")
 
-        upload_file = None
+    if not spotify_fixed and not youtube_fixed:
+        if any_errors:
+            print(f"{Colors.YELLOW}No credentials were updated due to errors.{Colors.RESET}")
+            print(f"{Colors.DIM}Please resolve the errors above and try again.{Colors.RESET}\n")
+        else:
+            print(f"{Colors.GREEN}All credentials are working! Nothing to fix.{Colors.RESET}\n")
+        return
 
-        if choice == "1":
-            # Extract from browser
-            print(f"\n{Colors.CYAN}Extracting cookies from browser...{Colors.RESET}")
-            print(f"{Colors.DIM}Make sure your browser is closed.{Colors.RESET}\n")
+    # Report what was fixed
+    if spotify_fixed:
+        print(f"{Colors.GREEN}✓ Spotify credentials updated{Colors.RESET}")
+    if youtube_fixed:
+        print(f"{Colors.GREEN}✓ YouTube cookies updated{Colors.RESET}")
+    print()
 
-            browsers = ["chrome", "firefox", "safari", "edge", "chromium", "brave"]
-            print("Available browsers: " + ", ".join(browsers))
-            browser = input("Browser [chrome]: ").strip().lower() or "chrome"
+    # YouTube cookies are uploaded via API and take effect immediately
+    # Spotify token is uploaded to GCP Secret Manager and needs a restart
+    if spotify_fixed:
+        print(f"{Colors.BOLD}━━━ Apply Changes ━━━{Colors.RESET}\n")
+        print(f"{Colors.DIM}Spotify token was uploaded to GCP Secret Manager.{Colors.RESET}")
+        print(f"{Colors.DIM}A server restart is needed for Spotify changes to take effect.{Colors.RESET}\n")
 
-            import tempfile
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-                upload_file = f.name
-
+        restart = input("Restart cloud server? [Y/n]: ").strip().lower()
+        if not restart or restart == 'y':
+            print(f"\n{Colors.CYAN}Restarting flacfetch-service...{Colors.RESET}")
             result = subprocess.run(
-                ["yt-dlp", "--cookies-from-browser", browser,
-                 "--cookies", upload_file,
-                 "--skip-download", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
-                capture_output=True,
-                text=True,
-            )
-
-            if result.returncode == 0 and os.path.exists(upload_file) and os.path.getsize(upload_file) > 100:
-                print(f"{Colors.GREEN}✓ Extracted cookies from {browser}{Colors.RESET}")
-            else:
-                print(f"{Colors.RED}✗ Failed to extract cookies: {result.stderr}{Colors.RESET}")
-                upload_file = None
-
-        elif choice == "2":
-            # Provide existing file
-            file_path = input("\nPath to cookies file: ").strip()
-            file_path = os.path.expanduser(file_path)
-            if os.path.exists(file_path):
-                upload_file = file_path
-                print(f"{Colors.GREEN}✓ Found cookies file{Colors.RESET}")
-            else:
-                print(f"{Colors.RED}✗ File not found: {file_path}{Colors.RESET}")
-
-        elif choice == "3":
-            # Browser extension export
-            print(f"\n{Colors.CYAN}Browser Extension Method:{Colors.RESET}")
-            print("""
-1. Install a cookie export extension:
-   • Chrome: 'Get cookies.txt LOCALLY' or 'EditThisCookie'
-   • Firefox: 'cookies.txt' by Lennon Hill
-
-2. Go to youtube.com and make sure you're logged in
-
-3. Click the extension and export cookies in Netscape format
-
-4. Save the file (e.g., ~/Downloads/youtube_cookies.txt)
-""")
-            file_path = input("Path to exported cookies file: ").strip()
-            file_path = os.path.expanduser(file_path)
-            if os.path.exists(file_path):
-                upload_file = file_path
-                print(f"{Colors.GREEN}✓ Found YouTube cookies ({os.path.getsize(file_path)} bytes){Colors.RESET}")
-            else:
-                print(f"{Colors.RED}✗ File not found: {file_path}{Colors.RESET}")
-
-        # Upload cookies if we have them
-        if upload_file and os.path.exists(upload_file):
-            # Save locally
-            local_cookies = get_local_youtube_cookies_path()
-            os.makedirs(os.path.dirname(local_cookies), exist_ok=True)
-            import shutil
-            shutil.copy(upload_file, local_cookies)
-            print(f"{Colors.GREEN}✓ Saved locally to {local_cookies}{Colors.RESET}")
-
-            # Upload to GCP
-            print(f"{Colors.CYAN}Uploading cookies to GCP Secret Manager...{Colors.RESET}")
-            result = subprocess.run(
-                ["gcloud", "secrets", "versions", "add", "youtube-cookies",
-                 f"--data-file={upload_file}", f"--project={project}"],
+                ["gcloud", "compute", "instances", "reset", "flacfetch-service",
+                 "--zone=us-central1-a", f"--project={project}"],
                 capture_output=True,
                 text=True,
             )
             if result.returncode == 0:
-                print(f"{Colors.GREEN}✓ YouTube cookies uploaded to GCP!{Colors.RESET}\n")
+                print(f"{Colors.GREEN}✓ Server restart initiated!{Colors.RESET}")
+                print(f"{Colors.DIM}It may take 1-2 minutes for the server to come back online.{Colors.RESET}\n")
             else:
-                print(f"{Colors.RED}✗ Failed to upload: {result.stderr}{Colors.RESET}\n")
+                print(f"{Colors.RED}✗ Failed to restart: {result.stderr}{Colors.RESET}\n")
+    elif youtube_fixed:
+        print(f"{Colors.GREEN}YouTube cookies were uploaded via API and are active immediately.{Colors.RESET}")
+        print(f"{Colors.DIM}No server restart needed.{Colors.RESET}\n")
 
-    # -------------------------------------------------------------------------
-    # Restart server
-    # -------------------------------------------------------------------------
-    print(f"{Colors.BOLD}━━━ Apply Changes ━━━{Colors.RESET}\n")
+    print(f"{Colors.GREEN}Done!{Colors.RESET}\n")
 
-    restart = input("Restart cloud server to apply changes? [Y/n]: ").strip().lower()
-    if not restart or restart == 'y':
-        print(f"\n{Colors.CYAN}Restarting flacfetch-service...{Colors.RESET}")
+
+def _fix_spotify(client_id: str, client_secret: str, project: str) -> bool:
+    """
+    Fix Spotify credentials.
+
+    Returns True if successfully fixed, False otherwise.
+    """
+    import subprocess
+
+    from ..api.services.credential_check import get_local_spotify_cache_path
+
+    cache_path = get_local_spotify_cache_path()
+
+    # Remove old cache to force re-auth
+    if os.path.exists(cache_path):
+        os.remove(cache_path)
+
+    print(f"\n{Colors.CYAN}Opening browser for Spotify login...{Colors.RESET}")
+    print(f"{Colors.DIM}Complete the login in your browser.{Colors.RESET}\n")
+
+    try:
+        import spotipy
+        from spotipy.oauth2 import SpotifyOAuth
+
+        auth_manager = SpotifyOAuth(
+            client_id=client_id,
+            client_secret=client_secret,
+            redirect_uri=os.environ.get("SPOTIPY_REDIRECT_URI", "http://127.0.0.1:8888/callback"),
+            scope="user-read-playback-state user-modify-playback-state streaming",
+            cache_path=cache_path,
+            open_browser=True,
+        )
+
+        sp = spotipy.Spotify(auth_manager=auth_manager)
+        user = sp.current_user()
+        print(f"\n{Colors.GREEN}✓ Authenticated as: {user.get('display_name', user.get('id'))}{Colors.RESET}\n")
+
+        # Upload to GCP
+        print(f"{Colors.CYAN}Uploading token to GCP Secret Manager...{Colors.RESET}")
         result = subprocess.run(
-            ["gcloud", "compute", "instances", "reset", "flacfetch-service",
-             "--zone=us-central1-a", f"--project={project}"],
+            ["gcloud", "secrets", "versions", "add", "spotify-oauth-token",
+             f"--data-file={cache_path}", f"--project={project}"],
             capture_output=True,
             text=True,
         )
         if result.returncode == 0:
-            print(f"{Colors.GREEN}✓ Server restart initiated!{Colors.RESET}")
-            print(f"{Colors.DIM}It may take 1-2 minutes for the server to come back online.{Colors.RESET}\n")
+            print(f"{Colors.GREEN}✓ Spotify token uploaded to GCP!{Colors.RESET}\n")
+            return True
         else:
-            print(f"{Colors.RED}✗ Failed to restart: {result.stderr}{Colors.RESET}\n")
+            print(f"{Colors.RED}✗ Failed to upload: {result.stderr}{Colors.RESET}\n")
+            return False
 
-    print(f"{Colors.GREEN}Done!{Colors.RESET}\n")
+    except ImportError:
+        print(f"{Colors.RED}✗ spotipy not installed. Install with: pip install spotipy{Colors.RESET}\n")
+        return False
+    except Exception as e:
+        print(f"{Colors.RED}✗ Error: {e}{Colors.RESET}\n")
+        return False
+
+
+def _fix_youtube(client: Optional["RemoteClient"], project: str) -> tuple[bool, bool]:
+    """
+    Fix YouTube cookies.
+
+    Returns tuple of (fixed, had_error).
+    """
+    import subprocess
+
+    from ..api.services.credential_check import get_local_youtube_cookies_path
+
+    print(f"\n{Colors.CYAN}Options:{Colors.RESET}")
+    print("  1. Automated browser login (Playwright)")
+    print("  2. Provide cookies file (from browser extension export)")
+    print()
+
+    choice = input("Choose method [1/2] (default: 1): ").strip() or "1"
+
+    cookies_content = None
+    upload_file = None
+
+    if choice == "1":
+        # Playwright extraction
+        success, cookies_content, message = _extract_cookies_playwright(headless=False)
+        if success:
+            print(f"{Colors.GREEN}✓ {message}{Colors.RESET}")
+        else:
+            print(f"{Colors.RED}✗ {message}{Colors.RESET}")
+            print(f"\n{Colors.DIM}Falling back to file input...{Colors.RESET}\n")
+            choice = "2"  # Fall back to file input
+
+    if choice == "2":
+        # File input with tab completion
+        print(f"\n{Colors.CYAN}Provide a cookies file exported from your browser.{Colors.RESET}")
+        print(f"{Colors.DIM}Use a browser extension like 'Get cookies.txt LOCALLY' (Chrome){Colors.RESET}")
+        print(f"{Colors.DIM}or 'cookies.txt' by Lennon Hill (Firefox).{Colors.RESET}\n")
+
+        default_path = "~/Downloads/youtube_cookies.txt"
+        file_path = _input_with_completion("Path to cookies file", default_path)
+        file_path = os.path.expanduser(file_path)
+
+        if os.path.exists(file_path):
+            try:
+                with open(file_path) as f:
+                    cookies_content = f.read()
+                print(f"{Colors.GREEN}✓ Found cookies file ({os.path.getsize(file_path)} bytes){Colors.RESET}")
+            except Exception as e:
+                print(f"{Colors.RED}✗ Error reading file: {e}{Colors.RESET}")
+                return False, True
+        else:
+            print(f"{Colors.RED}✗ File not found: {file_path}{Colors.RESET}")
+            return False, True
+
+    if not cookies_content:
+        return False, True
+
+    # Validate cookies format
+    lines = cookies_content.strip().split("\n")
+    youtube_cookies = 0
+    for line in lines:
+        if line.strip() and not line.startswith("#"):
+            parts = line.split("\t")
+            if len(parts) == 7:
+                domain = parts[0].lower()
+                if "youtube" in domain or "google" in domain:
+                    youtube_cookies += 1
+
+    if youtube_cookies == 0:
+        print(f"{Colors.RED}✗ No YouTube/Google cookies found in the file{Colors.RESET}")
+        return False, True
+
+    print(f"{Colors.GREEN}✓ Validated {youtube_cookies} YouTube/Google cookies{Colors.RESET}")
+
+    # Save locally
+    local_cookies = get_local_youtube_cookies_path()
+    os.makedirs(os.path.dirname(local_cookies), exist_ok=True)
+    with open(local_cookies, "w") as f:
+        f.write(cookies_content)
+    print(f"{Colors.GREEN}✓ Saved locally to {local_cookies}{Colors.RESET}")
+
+    # Try to upload via API first (immediate effect, no restart needed)
+    if client:
+        print(f"{Colors.CYAN}Uploading cookies via API (immediate effect)...{Colors.RESET}")
+        try:
+            result = client.upload_cookies(cookies_content)
+            if result.get("success"):
+                print(f"{Colors.GREEN}✓ Cookies uploaded to server{Colors.RESET}")
+
+                # Verify the cookies actually work by re-checking credentials
+                print(f"{Colors.CYAN}Verifying cookies work on server...{Colors.RESET}")
+                try:
+                    check_result = client.check_credentials()
+                    yt_status = check_result.get("services", {}).get("youtube", {})
+                    if yt_status.get("status") == "ok":
+                        print(f"{Colors.GREEN}✓ Verified: {yt_status.get('message')}{Colors.RESET}\n")
+                        return True, False
+                    else:
+                        print(f"{Colors.RED}✗ Cookies uploaded but verification failed: {yt_status.get('message')}{Colors.RESET}")
+                        print(f"{Colors.YELLOW}The cookies may not have the correct channel permissions.{Colors.RESET}")
+                        print(f"{Colors.DIM}Make sure you're logged in as the YouTube channel that owns the test video.{Colors.RESET}\n")
+                        return False, True
+                except Exception as verify_err:
+                    print(f"{Colors.YELLOW}○ Could not verify: {verify_err}{Colors.RESET}")
+                    print(f"{Colors.GREEN}✓ Cookies uploaded (verification skipped){Colors.RESET}\n")
+                    return True, False
+            else:
+                print(f"{Colors.YELLOW}○ API upload failed: {result.get('message', 'Unknown error')}{Colors.RESET}")
+                print(f"{Colors.DIM}Falling back to GCP Secret Manager...{Colors.RESET}")
+        except Exception as e:
+            print(f"{Colors.YELLOW}○ API upload failed: {e}{Colors.RESET}")
+            print(f"{Colors.DIM}Falling back to GCP Secret Manager...{Colors.RESET}")
+
+    # Fall back to GCP Secret Manager (requires restart)
+    print(f"{Colors.CYAN}Uploading cookies to GCP Secret Manager...{Colors.RESET}")
+
+    # Write to temp file for gcloud
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+        f.write(cookies_content)
+        upload_file = f.name
+
+    try:
+        result = subprocess.run(
+            ["gcloud", "secrets", "versions", "add", "youtube-cookies",
+             f"--data-file={upload_file}", f"--project={project}"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            print(f"{Colors.GREEN}✓ YouTube cookies uploaded to GCP!{Colors.RESET}")
+            print(f"{Colors.YELLOW}Note: Server restart required for GCP secret to take effect.{Colors.RESET}\n")
+            return True, False
+        else:
+            print(f"{Colors.RED}✗ Failed to upload: {result.stderr}{Colors.RESET}\n")
+            return False, True
+    finally:
+        if upload_file and os.path.exists(upload_file):
+            os.remove(upload_file)
 
 
 def main():

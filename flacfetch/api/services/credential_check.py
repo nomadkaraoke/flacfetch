@@ -177,7 +177,15 @@ def check_youtube_credentials() -> CredentialCheckResult:
     except Exception as e:
         error_str = str(e).lower()
 
-        if "sign in" in error_str or "login" in error_str or "cookies" in error_str:
+        if "429" in error_str or "too many requests" in error_str or "rate" in error_str:
+            # Rate limited by YouTube - cookies might still be valid
+            return CredentialCheckResult(
+                service="YouTube",
+                status=CredentialStatus.OK,
+                message="Rate limited by YouTube (429) - cookies assumed valid, try again later",
+                needs_human_action=False,
+            )
+        elif "sign in" in error_str or "login" in error_str or "cookies" in error_str:
             return CredentialCheckResult(
                 service="YouTube",
                 status=CredentialStatus.EXPIRED,
