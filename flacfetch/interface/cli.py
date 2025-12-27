@@ -431,12 +431,17 @@ def spotify_auth_command(args):
 
 def fix_command(args):
     """
-    Interactive command to fix credential issues.
+    Interactive command to fix LOCAL credential issues.
 
-    Provides a guided flow for fixing Spotify and YouTube credentials
-    on the cloud server.
+    Sets up Spotify and YouTube credentials on your local machine.
+    To deploy to cloud server, use 'flacfetch-remote push' afterward.
     """
     import subprocess
+
+    from flacfetch.api.services.credential_check import (
+        get_local_spotify_cache_path,
+        get_local_youtube_cookies_path,
+    )
 
     # Colors for output
     class C:
@@ -449,10 +454,9 @@ def fix_command(args):
         RED = "\033[31m"
 
     target = args.target  # 'all', 'spotify', or 'youtube'
-    project = args.project
 
-    print(f"\n{C.BOLD}🔧 Flacfetch Credential Fix Tool{C.RESET}")
-    print(f"{C.DIM}This tool will help fix credential issues on the cloud server.{C.RESET}\n")
+    print(f"\n{C.BOLD}🔧 Flacfetch LOCAL Credential Fix Tool{C.RESET}")
+    print(f"{C.DIM}This tool sets up credentials on your local machine.{C.RESET}\n")
 
     if target in ("all", "spotify"):
         print(f"{C.CYAN}━━━ Spotify ━━━{C.RESET}")
@@ -480,7 +484,7 @@ def fix_command(args):
                     import spotipy
                     from spotipy.oauth2 import SpotifyOAuth
 
-                    cache_path = os.path.expanduser("~/.cache-spotipy")
+                    cache_path = get_local_spotify_cache_path()
 
                     # Remove old cache to force re-auth
                     if os.path.exists(cache_path):
@@ -498,20 +502,7 @@ def fix_command(args):
                     user = sp.current_user()
 
                     print(f"\n{C.GREEN}✓ Authenticated as: {user.get('display_name', user.get('id'))}{C.RESET}")
-
-                    # Upload to GCP
-                    print(f"\n{C.CYAN}Uploading token to GCP Secret Manager...{C.RESET}")
-                    result = subprocess.run(
-                        ["gcloud", "secrets", "versions", "add", "spotify-oauth-token",
-                         f"--data-file={cache_path}", f"--project={project}"],
-                        capture_output=True,
-                        text=True,
-                    )
-
-                    if result.returncode == 0:
-                        print(f"{C.GREEN}✓ Spotify token uploaded to GCP!{C.RESET}")
-                    else:
-                        print(f"{C.RED}Failed to upload: {result.stderr}{C.RESET}")
+                    print(f"{C.DIM}Token saved to: {cache_path}{C.RESET}")
 
                 except Exception as e:
                     print(f"{C.RED}Error: {e}{C.RESET}")
@@ -553,7 +544,7 @@ def fix_command(args):
                         temp_cookies = f.name
 
                     # Use yt-dlp CLI directly - more reliable than Python API
-                    result = subprocess.run(
+                    subprocess.run(
                         ["yt-dlp", "--cookies-from-browser", browser,
                          "--cookies", temp_cookies,
                          "--skip-download", "--flat-playlist",
@@ -588,7 +579,7 @@ def fix_command(args):
 
                     if "youtube" not in cookies_content.lower():
                         print(f"{C.YELLOW}Warning: File doesn't appear to contain YouTube cookies.{C.RESET}")
-                        confirm = input(f"{C.BOLD}Upload anyway? [y/N]: {C.RESET}").strip().lower()
+                        confirm = input(f"{C.BOLD}Use anyway? [y/N]: {C.RESET}").strip().lower()
                         if confirm not in ("y", "yes"):
                             cookies_content = None
                 else:
@@ -616,32 +607,18 @@ def fix_command(args):
                 elif file_path:
                     print(f"{C.RED}File not found: {file_path}{C.RESET}")
 
-            # Upload if we got cookies
+            # Save cookies locally if we got them
             if cookies_content and "youtube" in cookies_content.lower():
-                print(f"\n{C.GREEN}✓ Found YouTube cookies ({len(cookies_content)} bytes){C.RESET}")
+                local_cookies_path = get_local_youtube_cookies_path()
 
-                # Write to temp file for upload
-                import tempfile
-                with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                # Ensure directory exists
+                os.makedirs(os.path.dirname(local_cookies_path), exist_ok=True)
+
+                with open(local_cookies_path, 'w') as f:
                     f.write(cookies_content)
-                    upload_file = f.name
 
-                try:
-                    print(f"{C.CYAN}Uploading cookies to GCP Secret Manager...{C.RESET}")
-                    result = subprocess.run(
-                        ["gcloud", "secrets", "versions", "add", "youtube-cookies",
-                         f"--data-file={upload_file}", f"--project={project}"],
-                        capture_output=True,
-                        text=True,
-                    )
-
-                    if result.returncode == 0:
-                        print(f"{C.GREEN}✓ YouTube cookies uploaded to GCP!{C.RESET}")
-                    else:
-                        print(f"{C.RED}Failed to upload: {result.stderr}{C.RESET}")
-                finally:
-                    if os.path.exists(upload_file):
-                        os.unlink(upload_file)
+                print(f"\n{C.GREEN}✓ YouTube cookies saved ({len(cookies_content)} bytes){C.RESET}")
+                print(f"{C.DIM}Saved to: {local_cookies_path}{C.RESET}")
 
             # Cleanup temp file
             if temp_cookies and os.path.exists(temp_cookies):
@@ -650,35 +627,24 @@ def fix_command(args):
         else:
             print(f"{C.DIM}Skipping YouTube...{C.RESET}")
 
-    # Offer to restart server
-    print(f"\n{C.CYAN}━━━ Apply Changes ━━━{C.RESET}")
-    restart = input(f"\n{C.BOLD}Restart cloud server to apply changes? [Y/n]: {C.RESET}").strip().lower()
-    if restart in ("", "y", "yes"):
-        print(f"\n{C.CYAN}Restarting flacfetch-service...{C.RESET}")
-        result = subprocess.run(
-            ["gcloud", "compute", "instances", "reset", "flacfetch-service",
-             "--zone=us-central1-a", f"--project={project}"],
-            capture_output=True,
-            text=True,
-        )
-
-        if result.returncode == 0:
-            print(f"{C.GREEN}✓ Server restart initiated!{C.RESET}")
-            print(f"{C.DIM}It may take 1-2 minutes for the server to come back online.{C.RESET}")
-        else:
-            print(f"{C.RED}Failed to restart: {result.stderr}{C.RESET}")
-    else:
-        print(f"\n{C.DIM}Remember to restart the server manually:{C.RESET}")
-        print(f"  gcloud compute instances reset flacfetch-service --zone=us-central1-a --project={project}")
+    # Show next steps
+    print(f"\n{C.CYAN}━━━ Next Steps ━━━{C.RESET}")
+    print(f"\n{C.BOLD}Local credentials are now set up.{C.RESET}")
+    print("\nTo deploy to the cloud server:")
+    print(f"  {C.CYAN}flacfetch-remote push{C.RESET}     - Upload credentials to GCP Secret Manager")
+    print(f"  {C.CYAN}flacfetch-remote restart{C.RESET}  - Restart server to apply changes")
+    print("\nOr use the all-in-one command:")
+    print(f"  {C.CYAN}flacfetch-remote fix{C.RESET}      - Authenticate, upload, and restart")
 
     print(f"\n{C.GREEN}Done!{C.RESET}\n")
 
 
 def check_command(args):
     """
-    Check credential status for Spotify and YouTube.
+    Check LOCAL credential status for Spotify and YouTube.
 
-    Can check local credentials or query a remote flacfetch server.
+    Checks credentials on your local machine (not the remote server).
+    To check the remote server, use 'flacfetch-remote check'.
     """
     # Colors for output
     class C:
@@ -690,107 +656,57 @@ def check_command(args):
         YELLOW = "\033[33m"
         RED = "\033[31m"
 
-    print(f"\n{C.BOLD}🔍 Flacfetch Credential Check{C.RESET}\n")
+    print(f"\n{C.BOLD}🔍 Flacfetch LOCAL Credential Check{C.RESET}\n")
 
-    if args.remote:
-        # Query remote server
-        import json
-        import urllib.request
+    # Check local credentials using local-specific functions
+    try:
+        from flacfetch.api.services.credential_check import (
+            check_local_spotify_credentials,
+            check_local_youtube_credentials,
+        )
 
-        url = args.remote.rstrip('/') + '/credentials/check'
-        print(f"{C.DIM}Checking remote server: {args.remote}{C.RESET}\n")
+        checks = [
+            ("Spotify", check_local_spotify_credentials),
+            ("YouTube", check_local_youtube_credentials),
+        ]
 
-        try:
-            req = urllib.request.Request(url)
-            if args.api_key:
-                req.add_header('X-API-Key', args.api_key)
+        all_ok = True
+        for name, check_fn in checks:
+            print(f"{C.CYAN}Checking {name}...{C.RESET}")
+            result = check_fn()
 
-            with urllib.request.urlopen(req, timeout=30) as response:
-                data = json.loads(response.read().decode())
-
-            for service, info in data.get('services', {}).items():
-                status = info.get('status', 'unknown')
-                message = info.get('message', '')
-                needs_action = info.get('needs_human_action', False)
-
-                if status == 'ok':
-                    icon = f"{C.GREEN}✓{C.RESET}"
-                    color = C.GREEN
-                elif status == 'missing':
-                    icon = f"{C.YELLOW}○{C.RESET}"
-                    color = C.YELLOW
-                else:
-                    icon = f"{C.RED}✗{C.RESET}"
-                    color = C.RED
-
-                print(f"{icon} {C.BOLD}{service.capitalize()}{C.RESET}: {color}{status}{C.RESET}")
-                print(f"  {C.DIM}{message}{C.RESET}")
-
-                if needs_action and info.get('fix_command'):
-                    print(f"  {C.CYAN}Fix: {info['fix_command']}{C.RESET}")
-                print()
-
-            if data.get('needs_action'):
-                print(f"{C.YELLOW}⚠️  Some credentials need attention.{C.RESET}")
-                print(f"{C.DIM}Run 'flacfetch fix' to repair them.{C.RESET}\n")
-            else:
-                print(f"{C.GREEN}✓ All credentials OK!{C.RESET}\n")
-
-        except urllib.error.HTTPError as e:
-            print(f"{C.RED}HTTP Error {e.code}: {e.reason}{C.RESET}")
-            if e.code == 401 or e.code == 403:
-                print(f"{C.DIM}Try providing --api-key{C.RESET}")
-        except Exception as e:
-            print(f"{C.RED}Error: {e}{C.RESET}")
-
-    else:
-        # Check local credentials
-        try:
-            from flacfetch.api.services.credential_check import (
-                check_spotify_credentials,
-                check_youtube_credentials,
-            )
-
-            checks = [
-                ("Spotify", check_spotify_credentials),
-                ("YouTube", check_youtube_credentials),
-            ]
-
-            all_ok = True
-            for name, check_fn in checks:
-                print(f"{C.CYAN}Checking {name}...{C.RESET}")
-                result = check_fn()
-
-                if result.status.value == 'ok':
-                    icon = f"{C.GREEN}✓{C.RESET}"
-                    color = C.GREEN
-                elif result.status.value == 'missing':
-                    icon = f"{C.YELLOW}○{C.RESET}"
-                    color = C.YELLOW
+            if result.status.value == 'ok':
+                icon = f"{C.GREEN}✓{C.RESET}"
+                color = C.GREEN
+            elif result.status.value == 'missing':
+                icon = f"{C.YELLOW}○{C.RESET}"
+                color = C.YELLOW
+                if result.needs_human_action:
                     all_ok = False
-                else:
-                    icon = f"{C.RED}✗{C.RESET}"
-                    color = C.RED
-                    all_ok = False
-
-                print(f"{icon} {C.BOLD}{result.service}{C.RESET}: {color}{result.status.value}{C.RESET}")
-                print(f"  {C.DIM}{result.message}{C.RESET}")
-
-                if result.needs_human_action and result.fix_command:
-                    print(f"  {C.CYAN}Fix: {result.fix_command}{C.RESET}")
-                print()
-
-            if all_ok:
-                print(f"{C.GREEN}✓ All credentials OK!{C.RESET}\n")
             else:
-                print(f"{C.YELLOW}⚠️  Some credentials need attention.{C.RESET}")
-                print(f"{C.DIM}Run 'flacfetch fix' to repair them.{C.RESET}\n")
+                icon = f"{C.RED}✗{C.RESET}"
+                color = C.RED
+                all_ok = False
 
-        except ImportError as e:
-            print(f"{C.RED}Error: Could not import credential check module: {e}{C.RESET}")
-            print(f"{C.DIM}Make sure flacfetch is installed with API dependencies.{C.RESET}")
-        except Exception as e:
-            print(f"{C.RED}Error: {e}{C.RESET}")
+            print(f"{icon} {C.BOLD}{result.service}{C.RESET}: {color}{result.status.value}{C.RESET}")
+            print(f"  {C.DIM}{result.message}{C.RESET}")
+
+            if result.needs_human_action and result.fix_command:
+                print(f"  {C.CYAN}Fix: {result.fix_command}{C.RESET}")
+            print()
+
+        if all_ok:
+            print(f"{C.GREEN}✓ All local credentials OK!{C.RESET}")
+            print(f"{C.DIM}To deploy to cloud: flacfetch-remote push{C.RESET}\n")
+        else:
+            print(f"{C.YELLOW}⚠️  Some local credentials need attention.{C.RESET}")
+            print(f"{C.DIM}Run 'flacfetch fix' to repair them.{C.RESET}\n")
+
+    except ImportError as e:
+        print(f"{C.RED}Error: Could not import credential check module: {e}{C.RESET}")
+        print(f"{C.DIM}Make sure flacfetch is installed with API dependencies.{C.RESET}")
+    except Exception as e:
+        print(f"{C.RED}Error: {e}{C.RESET}")
 
 
 # ANSI Color Codes
@@ -1298,25 +1214,27 @@ Workflow for cloud deployment:
         spotify_auth_command(spotify_auth_args)
         return
 
-    # Check for 'fix' subcommand - interactive credential repair tool
+    # Check for 'fix' subcommand - interactive LOCAL credential setup
     if len(sys.argv) > 1 and sys.argv[1] == "fix":
         fix_parser = argparse.ArgumentParser(
             prog="flacfetch fix",
-            description="Interactive tool to fix credential issues on the cloud server",
+            description="Interactive tool to set up LOCAL credentials (Spotify and YouTube)",
             formatter_class=WideHelpFormatter,
             epilog="""
 Examples:
   flacfetch fix
-      Fix all credentials (Spotify and YouTube)
+      Set up all local credentials (Spotify and YouTube)
 
   flacfetch fix spotify
-      Fix only Spotify credentials
+      Set up only Spotify credentials locally
 
   flacfetch fix youtube
-      Fix only YouTube cookies
+      Set up only YouTube cookies locally
 
-This command is designed to run locally on your Mac when you receive
-a Pushbullet notification saying credentials need attention.
+To deploy credentials to the cloud server:
+  flacfetch-remote push      - Upload local credentials to GCP
+  flacfetch-remote restart   - Restart server to apply changes
+  flacfetch-remote fix       - All-in-one: authenticate, upload, and restart
             """.strip(),
         )
         fix_parser.add_argument(
@@ -1326,40 +1244,24 @@ a Pushbullet notification saying credentials need attention.
             default="all",
             help="What to fix: all (default), spotify, or youtube"
         )
-        fix_parser.add_argument(
-            "--project", "-p",
-            default="nomadkaraoke",
-            help="GCP project ID (default: nomadkaraoke)"
-        )
         fix_args = fix_parser.parse_args(sys.argv[2:])
         fix_command(fix_args)
         return
 
-    # Check for 'check' subcommand - credential status check
+    # Check for 'check' subcommand - credential status check (LOCAL only)
     if len(sys.argv) > 1 and sys.argv[1] == "check":
         check_parser = argparse.ArgumentParser(
             prog="flacfetch check",
-            description="Check credential status for Spotify and YouTube",
+            description="Check LOCAL credential status for Spotify and YouTube",
             formatter_class=WideHelpFormatter,
             epilog="""
 Examples:
   flacfetch check
-      Check local credentials
+      Check local credentials (Spotify token, YouTube cookies)
 
-  flacfetch check --remote http://104.198.214.26:8080
-      Check credentials on remote server
-
-  flacfetch check --remote http://104.198.214.26:8080 --api-key YOUR_KEY
-      Check remote server with API key authentication
+To check the REMOTE server's credentials:
+  flacfetch-remote check
             """.strip(),
-        )
-        check_parser.add_argument(
-            "--remote", "-r",
-            help="Remote flacfetch server URL to check (default: check local)"
-        )
-        check_parser.add_argument(
-            "--api-key", "-k",
-            help="API key for remote server"
         )
         check_args = check_parser.parse_args(sys.argv[2:])
         check_command(check_args)

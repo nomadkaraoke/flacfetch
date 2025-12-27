@@ -203,6 +203,155 @@ def check_youtube_credentials() -> CredentialCheckResult:
             )
 
 
+# =============================================================================
+# Local credential check functions (for CLI use on user's machine)
+# =============================================================================
+
+def get_local_spotify_cache_path() -> str:
+    """Return the local Spotify cache path (for user's machine)."""
+    return os.path.expanduser("~/.cache-spotipy")
+
+
+def get_local_youtube_cookies_path() -> str:
+    """Return the local YouTube cookies path (for user's machine)."""
+    return os.path.expanduser("~/.flacfetch/youtube_cookies.txt")
+
+
+def check_local_spotify_credentials() -> CredentialCheckResult:
+    """
+    Test if LOCAL Spotify OAuth credentials are working.
+
+    Uses ~/.cache-spotipy for the token cache (local machine path).
+    This is for CLI use on the user's machine, not the server.
+    """
+    client_id = os.environ.get("SPOTIPY_CLIENT_ID")
+    client_secret = os.environ.get("SPOTIPY_CLIENT_SECRET")
+
+    if not client_id or not client_secret:
+        return CredentialCheckResult(
+            service="Spotify",
+            status=CredentialStatus.MISSING,
+            message="SPOTIPY_CLIENT_ID or SPOTIPY_CLIENT_SECRET not configured",
+            needs_human_action=True,
+            fix_command="Set SPOTIPY_CLIENT_ID and SPOTIPY_CLIENT_SECRET environment variables",
+        )
+
+    # Check if local cache file exists
+    cache_path = get_local_spotify_cache_path()
+    if not os.path.exists(cache_path):
+        return CredentialCheckResult(
+            service="Spotify",
+            status=CredentialStatus.MISSING,
+            message="No OAuth token cached - needs browser authentication",
+            needs_human_action=True,
+            fix_command="flacfetch fix",
+        )
+
+    try:
+        import spotipy
+        from spotipy.oauth2 import SpotifyOAuth
+
+        auth_manager = SpotifyOAuth(
+            client_id=client_id,
+            client_secret=client_secret,
+            redirect_uri=os.environ.get("SPOTIPY_REDIRECT_URI", "http://127.0.0.1:8888/callback"),
+            scope="user-read-playback-state user-modify-playback-state streaming",
+            cache_path=cache_path,
+        )
+
+        sp = spotipy.Spotify(auth_manager=auth_manager)
+
+        # Try to get current user - this validates the token
+        user = sp.current_user()
+
+        # Also try a search to make sure the API is fully working
+        sp.search(q="test", type="track", limit=1)
+
+        return CredentialCheckResult(
+            service="Spotify",
+            status=CredentialStatus.OK,
+            message=f"Authenticated as {user.get('display_name', user.get('id'))}",
+            needs_human_action=False,
+        )
+
+    except Exception as e:
+        error_str = str(e).lower()
+
+        if "invalid_grant" in error_str or "revoked" in error_str:
+            return CredentialCheckResult(
+                service="Spotify",
+                status=CredentialStatus.REVOKED,
+                message=f"OAuth token revoked: {e}",
+                needs_human_action=True,
+                fix_command="flacfetch fix",
+            )
+        elif "expired" in error_str:
+            return CredentialCheckResult(
+                service="Spotify",
+                status=CredentialStatus.EXPIRED,
+                message=f"OAuth token expired and refresh failed: {e}",
+                needs_human_action=True,
+                fix_command="flacfetch fix",
+            )
+        else:
+            return CredentialCheckResult(
+                service="Spotify",
+                status=CredentialStatus.ERROR,
+                message=f"Error checking credentials: {e}",
+                needs_human_action=True,
+                fix_command="flacfetch fix",
+            )
+
+
+def check_local_youtube_credentials() -> CredentialCheckResult:
+    """
+    Test if LOCAL YouTube cookies are configured.
+
+    Uses ~/.flacfetch/youtube_cookies.txt for the cookies file (local machine path).
+    This is for CLI use on the user's machine, not the server.
+
+    Note: We don't test the cookies with a private video here because
+    that requires network access and can be slow. We just check if the file exists.
+    """
+    cookies_file = get_local_youtube_cookies_path()
+
+    if not os.path.exists(cookies_file):
+        return CredentialCheckResult(
+            service="YouTube",
+            status=CredentialStatus.MISSING,
+            message="No cookies configured (may still work for non-restricted videos)",
+            needs_human_action=False,  # Not critical
+        )
+
+    # Check file size to ensure it's not empty
+    try:
+        file_size = os.path.getsize(cookies_file)
+        if file_size < 100:  # Too small to be valid cookies
+            return CredentialCheckResult(
+                service="YouTube",
+                status=CredentialStatus.ERROR,
+                message=f"Cookies file too small ({file_size} bytes) - may be invalid",
+                needs_human_action=True,
+                fix_command="flacfetch fix",
+            )
+
+        return CredentialCheckResult(
+            service="YouTube",
+            status=CredentialStatus.OK,
+            message=f"Cookies file present ({file_size} bytes)",
+            needs_human_action=False,
+        )
+
+    except Exception as e:
+        return CredentialCheckResult(
+            service="YouTube",
+            status=CredentialStatus.ERROR,
+            message=f"Error checking cookies: {e}",
+            needs_human_action=True,
+            fix_command="flacfetch fix",
+        )
+
+
 def send_pushbullet_notification(
     title: str,
     body: str,

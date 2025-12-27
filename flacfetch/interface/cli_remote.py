@@ -2,9 +2,16 @@
 Remote CLI for flacfetch - download via remote flacfetch HTTP API.
 
 Usage:
+    # Search and download
     flacfetch-remote "Artist" "Title"
     flacfetch-remote -a "Artist" -t "Title" --auto
     flacfetch-remote "Artist" "Title" -o ~/Music
+
+    # Credential management
+    flacfetch-remote check                     # Check remote server credentials
+    flacfetch-remote fix                       # Interactive credential fix (local auth → upload → restart)
+    flacfetch-remote push                      # Push local credentials to GCP Secret Manager
+    flacfetch-remote restart                   # Restart cloud server to pick up new secrets
 
 Requires environment variables:
     FLACFETCH_API_URL   - URL of the flacfetch API (e.g., http://104.198.214.26:8080)
@@ -42,6 +49,17 @@ class RemoteClient:
                 f"{self.base_url}/health",
                 headers=self._headers(),
                 timeout=10,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    def check_credentials(self) -> Dict[str, Any]:
+        """Check credentials on the remote server."""
+        with httpx.Client() as client:
+            resp = client.get(
+                f"{self.base_url}/credentials/check",
+                headers=self._headers(),
+                timeout=30,
             )
             resp.raise_for_status()
             return resp.json()
@@ -282,8 +300,418 @@ def print_progress(status: Dict[str, Any]) -> None:
     print(f"\r{Colors.BOLD}Progress:{Colors.RESET} [{bar}] {progress:5.1f}% | {status_str}{extra}   ", end="", flush=True)
 
 
+# =============================================================================
+# Credential Management Commands
+# =============================================================================
+
+def get_api_credentials():
+    """Get API URL and key from environment or fail with helpful message."""
+    api_url = os.environ.get("FLACFETCH_API_URL")
+    api_key = os.environ.get("FLACFETCH_API_KEY")
+
+    if not api_url:
+        print(f"\n{Colors.RED}Error: FLACFETCH_API_URL not set{Colors.RESET}")
+        print("\nSet the environment variable:")
+        print("  export FLACFETCH_API_URL=http://your-server:8080")
+        sys.exit(1)
+
+    if not api_key:
+        print(f"\n{Colors.RED}Error: FLACFETCH_API_KEY not set{Colors.RESET}")
+        print("\nSet the environment variable:")
+        print("  export FLACFETCH_API_KEY=your-api-key")
+        sys.exit(1)
+
+    return api_url, api_key
+
+
+def check_command(args):
+    """Check credentials on the remote server."""
+    if httpx is None:
+        print(f"{Colors.RED}Error: httpx not installed. Install with: pip install httpx{Colors.RESET}")
+        sys.exit(1)
+
+    api_url, api_key = get_api_credentials()
+    client = RemoteClient(api_url, api_key)
+
+    print(f"\n{Colors.BOLD}Checking REMOTE server credentials...{Colors.RESET}")
+    print(f"{Colors.DIM}Server: {api_url}{Colors.RESET}\n")
+
+    try:
+        result = client.check_credentials()
+    except Exception as e:
+        print(f"{Colors.RED}Error connecting to server: {e}{Colors.RESET}")
+        sys.exit(1)
+
+    services = result.get("services", {})
+    all_ok = True
+
+    for name, data in services.items():
+        status = data.get("status", "unknown")
+        message = data.get("message", "")
+        needs_action = data.get("needs_human_action", False)
+
+        if status == "ok":
+            icon = f"{Colors.GREEN}✓{Colors.RESET}"
+            color = Colors.GREEN
+        elif status == "missing":
+            icon = f"{Colors.YELLOW}○{Colors.RESET}"
+            color = Colors.YELLOW
+            if needs_action:
+                all_ok = False
+        else:
+            icon = f"{Colors.RED}✗{Colors.RESET}"
+            color = Colors.RED
+            all_ok = False
+
+        print(f"{icon} {name.title()}: {color}{status}{Colors.RESET}")
+        print(f"  {Colors.DIM}{message}{Colors.RESET}")
+        if data.get("fix_command"):
+            print(f"  {Colors.DIM}Fix: {data['fix_command']}{Colors.RESET}")
+        print()
+
+    if all_ok:
+        print(f"{Colors.GREEN}All remote credentials are OK!{Colors.RESET}\n")
+    else:
+        print(f"{Colors.YELLOW}Some credentials need attention.{Colors.RESET}")
+        print(f"{Colors.DIM}Run 'flacfetch-remote fix' to repair them.{Colors.RESET}\n")
+
+
+def push_command(args):
+    """Push local credentials to GCP Secret Manager."""
+    import subprocess
+
+    from ..api.services.credential_check import (
+        get_local_spotify_cache_path,
+        get_local_youtube_cookies_path,
+    )
+
+    project = args.project or "nomadkaraoke"
+
+    print(f"\n{Colors.BOLD}Pushing local credentials to GCP Secret Manager...{Colors.RESET}")
+    print(f"{Colors.DIM}Project: {project}{Colors.RESET}\n")
+
+    # Push Spotify token
+    spotify_cache = get_local_spotify_cache_path()
+    if os.path.exists(spotify_cache):
+        print(f"{Colors.CYAN}Uploading Spotify token...{Colors.RESET}")
+        result = subprocess.run(
+            ["gcloud", "secrets", "versions", "add", "spotify-oauth-token",
+             f"--data-file={spotify_cache}", f"--project={project}"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            print(f"{Colors.GREEN}✓ Spotify token uploaded{Colors.RESET}")
+        else:
+            print(f"{Colors.RED}✗ Failed to upload Spotify token: {result.stderr}{Colors.RESET}")
+    else:
+        print(f"{Colors.YELLOW}○ No local Spotify token found at {spotify_cache}{Colors.RESET}")
+        print(f"  {Colors.DIM}Run 'flacfetch fix' first to authenticate locally{Colors.RESET}")
+
+    # Push YouTube cookies
+    cookies_path = get_local_youtube_cookies_path()
+    if os.path.exists(cookies_path):
+        print(f"{Colors.CYAN}Uploading YouTube cookies...{Colors.RESET}")
+        result = subprocess.run(
+            ["gcloud", "secrets", "versions", "add", "youtube-cookies",
+             f"--data-file={cookies_path}", f"--project={project}"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            print(f"{Colors.GREEN}✓ YouTube cookies uploaded{Colors.RESET}")
+        else:
+            print(f"{Colors.RED}✗ Failed to upload YouTube cookies: {result.stderr}{Colors.RESET}")
+    else:
+        print(f"{Colors.YELLOW}○ No local YouTube cookies found at {cookies_path}{Colors.RESET}")
+        print(f"  {Colors.DIM}Run 'flacfetch fix' first to set up cookies locally{Colors.RESET}")
+
+    print(f"\n{Colors.GREEN}Done!{Colors.RESET}")
+    print(f"{Colors.DIM}Run 'flacfetch-remote restart' to apply changes on the server.{Colors.RESET}\n")
+
+
+def restart_command(args):
+    """Restart the cloud server to pick up new secrets."""
+    import subprocess
+
+    project = args.project or "nomadkaraoke"
+    zone = args.zone or "us-central1-a"
+    instance = args.instance or "flacfetch-service"
+
+    print(f"\n{Colors.BOLD}Restarting cloud server...{Colors.RESET}")
+    print(f"{Colors.DIM}Instance: {instance} (zone: {zone}, project: {project}){Colors.RESET}\n")
+
+    if not args.yes:
+        confirm = input(f"{Colors.YELLOW}Restart server? [Y/n]: {Colors.RESET}").strip().lower()
+        if confirm and confirm != 'y':
+            print(f"{Colors.YELLOW}Cancelled.{Colors.RESET}")
+            return
+
+    result = subprocess.run(
+        ["gcloud", "compute", "instances", "reset", instance,
+         f"--zone={zone}", f"--project={project}"],
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode == 0:
+        print(f"{Colors.GREEN}✓ Server restart initiated!{Colors.RESET}")
+        print(f"{Colors.DIM}It may take 1-2 minutes for the server to come back online.{Colors.RESET}\n")
+    else:
+        print(f"{Colors.RED}✗ Failed to restart server: {result.stderr}{Colors.RESET}")
+
+
+def fix_command(args):
+    """
+    Interactive credential fix for remote server.
+
+    Authenticates locally, then uploads to GCP Secret Manager, then restarts server.
+    """
+    import subprocess
+
+    from ..api.services.credential_check import (
+        get_local_spotify_cache_path,
+        get_local_youtube_cookies_path,
+    )
+
+    project = args.project or "nomadkaraoke"
+
+    print(f"\n{Colors.BOLD}Flacfetch Remote Credential Fix Tool{Colors.RESET}")
+    print(f"{Colors.DIM}This tool will help fix credentials on the cloud server.{Colors.RESET}\n")
+
+    # -------------------------------------------------------------------------
+    # Spotify
+    # -------------------------------------------------------------------------
+    print(f"{Colors.BOLD}━━━ Spotify ━━━{Colors.RESET}")
+
+    client_id = os.environ.get("SPOTIPY_CLIENT_ID")
+    client_secret = os.environ.get("SPOTIPY_CLIENT_SECRET")
+
+    if not client_id or not client_secret:
+        print(f"{Colors.YELLOW}○ Spotify credentials not found in environment{Colors.RESET}")
+        print(f"  {Colors.DIM}Set SPOTIPY_CLIENT_ID and SPOTIPY_CLIENT_SECRET{Colors.RESET}\n")
+    else:
+        print(f"{Colors.GREEN}✓ Spotify credentials found in environment{Colors.RESET}\n")
+
+        reauth = input("Re-authenticate Spotify? [Y/n]: ").strip().lower()
+        if not reauth or reauth == 'y':
+            cache_path = get_local_spotify_cache_path()
+
+            # Remove old cache to force re-auth
+            if os.path.exists(cache_path):
+                os.remove(cache_path)
+
+            print(f"\n{Colors.CYAN}Opening browser for Spotify login...{Colors.RESET}")
+            print(f"{Colors.DIM}Complete the login in your browser.{Colors.RESET}\n")
+
+            try:
+                import spotipy
+                from spotipy.oauth2 import SpotifyOAuth
+
+                auth_manager = SpotifyOAuth(
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    redirect_uri=os.environ.get("SPOTIPY_REDIRECT_URI", "http://127.0.0.1:8888/callback"),
+                    scope="user-read-playback-state user-modify-playback-state streaming",
+                    cache_path=cache_path,
+                    open_browser=True,
+                )
+
+                sp = spotipy.Spotify(auth_manager=auth_manager)
+                user = sp.current_user()
+                print(f"\n{Colors.GREEN}✓ Authenticated as: {user.get('display_name', user.get('id'))}{Colors.RESET}\n")
+
+                # Upload to GCP
+                print(f"{Colors.CYAN}Uploading token to GCP Secret Manager...{Colors.RESET}")
+                result = subprocess.run(
+                    ["gcloud", "secrets", "versions", "add", "spotify-oauth-token",
+                     f"--data-file={cache_path}", f"--project={project}"],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode == 0:
+                    print(f"{Colors.GREEN}✓ Spotify token uploaded to GCP!{Colors.RESET}\n")
+                else:
+                    print(f"{Colors.RED}✗ Failed to upload: {result.stderr}{Colors.RESET}\n")
+
+            except ImportError:
+                print(f"{Colors.RED}✗ spotipy not installed. Install with: pip install spotipy{Colors.RESET}\n")
+            except Exception as e:
+                print(f"{Colors.RED}✗ Error: {e}{Colors.RESET}\n")
+
+    # -------------------------------------------------------------------------
+    # YouTube
+    # -------------------------------------------------------------------------
+    print(f"{Colors.BOLD}━━━ YouTube ━━━{Colors.RESET}\n")
+
+    update_yt = input("Update YouTube cookies? [Y/n]: ").strip().lower()
+    if not update_yt or update_yt == 'y':
+        print(f"\n{Colors.CYAN}Options:{Colors.RESET}")
+        print("  1. Extract from browser (requires browser to be closed)")
+        print("  2. Provide existing cookies file")
+        print("  3. Use browser extension export (recommended)")
+        print()
+
+        choice = input("Choose method [1/2/3] (default: 1): ").strip() or "1"
+
+        upload_file = None
+
+        if choice == "1":
+            # Extract from browser
+            print(f"\n{Colors.CYAN}Extracting cookies from browser...{Colors.RESET}")
+            print(f"{Colors.DIM}Make sure your browser is closed.{Colors.RESET}\n")
+
+            browsers = ["chrome", "firefox", "safari", "edge", "chromium", "brave"]
+            print("Available browsers: " + ", ".join(browsers))
+            browser = input("Browser [chrome]: ").strip().lower() or "chrome"
+
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                upload_file = f.name
+
+            result = subprocess.run(
+                ["yt-dlp", "--cookies-from-browser", browser,
+                 "--cookies", upload_file,
+                 "--skip-download", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
+                capture_output=True,
+                text=True,
+            )
+
+            if result.returncode == 0 and os.path.exists(upload_file) and os.path.getsize(upload_file) > 100:
+                print(f"{Colors.GREEN}✓ Extracted cookies from {browser}{Colors.RESET}")
+            else:
+                print(f"{Colors.RED}✗ Failed to extract cookies: {result.stderr}{Colors.RESET}")
+                upload_file = None
+
+        elif choice == "2":
+            # Provide existing file
+            file_path = input("\nPath to cookies file: ").strip()
+            file_path = os.path.expanduser(file_path)
+            if os.path.exists(file_path):
+                upload_file = file_path
+                print(f"{Colors.GREEN}✓ Found cookies file{Colors.RESET}")
+            else:
+                print(f"{Colors.RED}✗ File not found: {file_path}{Colors.RESET}")
+
+        elif choice == "3":
+            # Browser extension export
+            print(f"\n{Colors.CYAN}Browser Extension Method:{Colors.RESET}")
+            print("""
+1. Install a cookie export extension:
+   • Chrome: 'Get cookies.txt LOCALLY' or 'EditThisCookie'
+   • Firefox: 'cookies.txt' by Lennon Hill
+
+2. Go to youtube.com and make sure you're logged in
+
+3. Click the extension and export cookies in Netscape format
+
+4. Save the file (e.g., ~/Downloads/youtube_cookies.txt)
+""")
+            file_path = input("Path to exported cookies file: ").strip()
+            file_path = os.path.expanduser(file_path)
+            if os.path.exists(file_path):
+                upload_file = file_path
+                print(f"{Colors.GREEN}✓ Found YouTube cookies ({os.path.getsize(file_path)} bytes){Colors.RESET}")
+            else:
+                print(f"{Colors.RED}✗ File not found: {file_path}{Colors.RESET}")
+
+        # Upload cookies if we have them
+        if upload_file and os.path.exists(upload_file):
+            # Save locally
+            local_cookies = get_local_youtube_cookies_path()
+            os.makedirs(os.path.dirname(local_cookies), exist_ok=True)
+            import shutil
+            shutil.copy(upload_file, local_cookies)
+            print(f"{Colors.GREEN}✓ Saved locally to {local_cookies}{Colors.RESET}")
+
+            # Upload to GCP
+            print(f"{Colors.CYAN}Uploading cookies to GCP Secret Manager...{Colors.RESET}")
+            result = subprocess.run(
+                ["gcloud", "secrets", "versions", "add", "youtube-cookies",
+                 f"--data-file={upload_file}", f"--project={project}"],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                print(f"{Colors.GREEN}✓ YouTube cookies uploaded to GCP!{Colors.RESET}\n")
+            else:
+                print(f"{Colors.RED}✗ Failed to upload: {result.stderr}{Colors.RESET}\n")
+
+    # -------------------------------------------------------------------------
+    # Restart server
+    # -------------------------------------------------------------------------
+    print(f"{Colors.BOLD}━━━ Apply Changes ━━━{Colors.RESET}\n")
+
+    restart = input("Restart cloud server to apply changes? [Y/n]: ").strip().lower()
+    if not restart or restart == 'y':
+        print(f"\n{Colors.CYAN}Restarting flacfetch-service...{Colors.RESET}")
+        result = subprocess.run(
+            ["gcloud", "compute", "instances", "reset", "flacfetch-service",
+             "--zone=us-central1-a", f"--project={project}"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            print(f"{Colors.GREEN}✓ Server restart initiated!{Colors.RESET}")
+            print(f"{Colors.DIM}It may take 1-2 minutes for the server to come back online.{Colors.RESET}\n")
+        else:
+            print(f"{Colors.RED}✗ Failed to restart: {result.stderr}{Colors.RESET}\n")
+
+    print(f"{Colors.GREEN}Done!{Colors.RESET}\n")
+
+
 def main():
     """Main entry point for flacfetch-remote CLI."""
+    # Handle credential subcommands before main parser
+    if len(sys.argv) > 1:
+        subcommand = sys.argv[1]
+
+        if subcommand == "check":
+            # Check remote server credentials
+            parser = argparse.ArgumentParser(
+                prog="flacfetch-remote check",
+                description="Check credentials on the remote server",
+            )
+            args = parser.parse_args(sys.argv[2:])
+            check_command(args)
+            return
+
+        elif subcommand == "push":
+            # Push local credentials to GCP
+            parser = argparse.ArgumentParser(
+                prog="flacfetch-remote push",
+                description="Push local credentials to GCP Secret Manager",
+            )
+            parser.add_argument("--project", default="nomadkaraoke", help="GCP project ID")
+            args = parser.parse_args(sys.argv[2:])
+            push_command(args)
+            return
+
+        elif subcommand == "restart":
+            # Restart cloud server
+            parser = argparse.ArgumentParser(
+                prog="flacfetch-remote restart",
+                description="Restart the cloud server to pick up new secrets",
+            )
+            parser.add_argument("--project", default="nomadkaraoke", help="GCP project ID")
+            parser.add_argument("--zone", default="us-central1-a", help="GCE zone")
+            parser.add_argument("--instance", default="flacfetch-service", help="Instance name")
+            parser.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
+            args = parser.parse_args(sys.argv[2:])
+            restart_command(args)
+            return
+
+        elif subcommand == "fix":
+            # Interactive credential fix
+            parser = argparse.ArgumentParser(
+                prog="flacfetch-remote fix",
+                description="Interactive credential fix (authenticate locally → upload to cloud → restart)",
+            )
+            parser.add_argument("--project", default="nomadkaraoke", help="GCP project ID")
+            args = parser.parse_args(sys.argv[2:])
+            fix_command(args)
+            return
+
     # Check for httpx
     if httpx is None:
         print(f"{Colors.RED}Error: httpx not installed. Install with: pip install httpx{Colors.RESET}")
