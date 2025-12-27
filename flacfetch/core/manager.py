@@ -358,3 +358,118 @@ class FetchManager:
         logger.info(f"Starting download for {release.title}...")
         downloaded_file = downloader.download(release, output_path, output_filename=output_filename)
         return downloaded_file
+
+    def download_by_id(
+        self,
+        source_name: str,
+        source_id: str,
+        output_path: str,
+        output_filename: Optional[str] = None,
+        target_file: Optional[str] = None,
+        download_url: Optional[str] = None,
+    ) -> str:
+        """
+        Download by source ID without needing a cached Release object.
+
+        This is useful when the original Release was serialized to storage and
+        you need to download later without re-searching. For torrent sources,
+        this fetches the .torrent file by ID. For YouTube, this uses the URL directly.
+
+        Args:
+            source_name: Provider name (e.g., 'RED', 'OPS', 'YouTube')
+            source_id: Source-specific ID (torrent ID for RED/OPS, video ID for YouTube)
+            output_path: Directory to save the downloaded file
+            output_filename: Optional filename for the output
+            target_file: For torrents, the specific file to extract from the torrent
+            download_url: For YouTube/Spotify, the direct URL to download from
+
+        Returns:
+            Path to the downloaded file
+
+        Raises:
+            ValueError: If provider not found or download fails
+        """
+        import os
+        import tempfile
+
+        # Get downloader for this source
+        downloader = self._downloader_map.get(source_name, self._default_downloader)
+        if not downloader:
+            msg = f"No downloader registered for source: {source_name}"
+            logger.error(msg)
+            raise ValueError(msg)
+
+        # Get provider
+        provider = next((p for p in self.providers if p.name == source_name), None)
+
+        # For YouTube/Spotify, we can download directly with URL
+        if source_name == "YouTube":
+            if not download_url:
+                # Construct URL from video ID
+                download_url = f"https://www.youtube.com/watch?v={source_id}"
+
+            # Create minimal release for YouTube
+            release = Release(
+                title=output_filename or source_id,
+                artist="",
+                source_name=source_name,
+                download_url=download_url,
+                source_id=source_id,
+            )
+            logger.info(f"Starting YouTube download for {download_url}...")
+            return downloader.download(release, output_path, output_filename=output_filename)
+
+        if source_name == "Spotify":
+            if not download_url:
+                download_url = f"spotify:track:{source_id}"
+
+            release = Release(
+                title=output_filename or source_id,
+                artist="",
+                source_name=source_name,
+                download_url=download_url,
+                source_id=source_id,
+                target_file=target_file,
+            )
+            logger.info(f"Starting Spotify download for {download_url}...")
+            return downloader.download(release, output_path, output_filename=output_filename)
+
+        # For torrent sources (RED/OPS), we need to fetch the .torrent file
+        if source_name in ("RED", "OPS"):
+            if not provider:
+                msg = f"Provider {source_name} not registered"
+                logger.error(msg)
+                raise ValueError(msg)
+
+            logger.info(f"Fetching torrent artifact for {source_name} ID: {source_id}")
+            artifact = provider.fetch_artifact_by_id(source_id)
+
+            if not artifact:
+                msg = f"Failed to fetch torrent file for {source_name} ID: {source_id}"
+                logger.error(msg)
+                raise ValueError(msg)
+
+            # Save torrent to temp file
+            fd, torrent_path = tempfile.mkstemp(suffix=".torrent")
+            with os.fdopen(fd, 'wb') as tmp:
+                tmp.write(artifact)
+            os.chmod(torrent_path, 0o644)
+            logger.debug(f"Saved temporary torrent file to {torrent_path}")
+
+            # Create minimal release for torrent download
+            release = Release(
+                title=output_filename or source_id,
+                artist="",
+                source_name=source_name,
+                download_url=torrent_path,  # Local path to .torrent file
+                source_id=source_id,
+                target_file=target_file,
+            )
+
+            logger.info(f"Starting torrent download for {source_name} ID: {source_id}...")
+            return downloader.download(release, output_path, output_filename=output_filename)
+
+        # Unknown source
+        msg = f"download_by_id not implemented for source: {source_name}"
+        logger.error(msg)
+        raise ValueError(msg)

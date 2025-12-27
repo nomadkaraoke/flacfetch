@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 class DownloadTask:
     """Represents an active or completed download task."""
     download_id: str
-    search_id: str
-    result_index: int
+    search_id: Optional[str] = None  # Optional for download_by_id
+    result_index: int = -1  # -1 for download_by_id
     status: DownloadStatus = DownloadStatus.QUEUED
     progress: float = 0.0
     peers: int = 0
@@ -42,6 +42,10 @@ class DownloadTask:
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     torrent_id: Optional[int] = None  # Transmission torrent ID
+    # Fields for download_by_id (direct download without search)
+    source_id: Optional[str] = None
+    target_file: Optional[str] = None
+    download_url: Optional[str] = None
 
 
 @dataclass
@@ -406,6 +410,103 @@ class DownloadManager:
 
         except Exception as e:
             logger.error(f"Download failed: {e}", exc_info=True)
+            self.update_download(
+                download_id,
+                status=DownloadStatus.FAILED,
+                error=str(e),
+            )
+
+    def create_download_by_id(
+        self,
+        source_name: str,
+        source_id: str,
+        output_filename: Optional[str] = None,
+        target_file: Optional[str] = None,
+        download_url: Optional[str] = None,
+        upload_to_gcs: bool = False,
+        gcs_destination: Optional[str] = None,
+    ) -> DownloadTask:
+        """
+        Create a download task for direct download by source ID (no search required).
+
+        This is useful when you have stored the source_id from a previous search
+        and want to download later without re-searching.
+        """
+        download_id = f"dl_{uuid.uuid4().hex[:12]}"
+
+        task = DownloadTask(
+            download_id=download_id,
+            provider=source_name,
+            source_id=source_id,
+            output_filename=output_filename,
+            target_file=target_file,
+            download_url=download_url,
+            upload_to_gcs=upload_to_gcs,
+            gcs_destination=gcs_destination,
+            started_at=datetime.now(timezone.utc),
+        )
+
+        with self._lock:
+            self._downloads[download_id] = task
+
+        return task
+
+    async def execute_download_by_id(self, download_id: str) -> None:
+        """
+        Execute a download-by-id task (runs in background).
+
+        Uses FetchManager.download_by_id() to download directly by source ID
+        without needing a cached search/Release object.
+        """
+        task = self.get_download(download_id)
+        if not task:
+            logger.error(f"Download task not found: {download_id}")
+            return
+
+        try:
+            self.update_download(download_id, status=DownloadStatus.DOWNLOADING)
+
+            if not task.source_id or not task.provider:
+                raise ValueError("source_id and provider are required for download_by_id")
+
+            logger.info(f"Starting direct download: {task.provider} ID={task.source_id}")
+
+            # Execute download using FetchManager.download_by_id
+            manager = self._get_fetch_manager()
+            output_path = manager.download_by_id(
+                source_name=task.provider,
+                source_id=task.source_id,
+                output_path=self.download_dir,
+                output_filename=task.output_filename,
+                target_file=task.target_file,
+                download_url=task.download_url,
+            )
+
+            self.update_download(
+                download_id,
+                output_path=output_path,
+                progress=100.0,
+            )
+
+            logger.info(f"Download complete: {output_path}")
+
+            # Upload to GCS if requested
+            if task.upload_to_gcs and task.gcs_destination:
+                self.update_download(download_id, status=DownloadStatus.UPLOADING)
+                gcs_path = await self._upload_to_gcs(output_path, task.gcs_destination)
+                self.update_download(download_id, gcs_path=gcs_path)
+                logger.info(f"Uploaded to GCS: {gcs_path}")
+
+            # Final status depends on whether it's a torrent (seeding) or not
+            if task.provider in ["RED", "OPS"] and self.keep_seeding:
+                self.update_download(download_id, status=DownloadStatus.SEEDING)
+            else:
+                self.update_download(download_id, status=DownloadStatus.COMPLETE)
+
+            self.update_download(download_id, completed_at=datetime.now(timezone.utc))
+
+        except Exception as e:
+            logger.error(f"Download by ID failed: {e}", exc_info=True)
             self.update_download(
                 download_id,
                 status=DownloadStatus.FAILED,

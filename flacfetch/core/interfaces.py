@@ -21,6 +21,20 @@ class Provider(ABC):
         """
         return None
 
+    def fetch_artifact_by_id(self, source_id: str) -> Optional[bytes]:
+        """
+        Fetch the .torrent file or other artifact by source ID directly.
+        This allows downloading without needing a full Release object,
+        which is useful when the Release was serialized and stored.
+
+        Args:
+            source_id: The source-specific ID (e.g., torrent ID for RED/OPS)
+
+        Returns:
+            The artifact bytes (e.g., .torrent file contents), or None if not applicable
+        """
+        return None
+
     def populate_details(self, release: Release) -> None:
         """
         Populate additional details for the release (e.g. file list) that were not available during search.

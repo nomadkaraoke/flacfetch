@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 
 from ..auth import verify_api_key
 from ..models import (
+    DownloadByIdRequest,
     DownloadRequest,
     DownloadStartResponse,
     DownloadStatus,
@@ -79,6 +80,71 @@ async def start_download(
 
     # Start download in background
     background_tasks.add_task(manager.execute_download, task.download_id)
+
+    return DownloadStartResponse(
+        download_id=task.download_id,
+        status=DownloadStatus.QUEUED,
+    )
+
+
+@router.post("/download-by-id", response_model=DownloadStartResponse)
+async def start_download_by_id(
+    request: DownloadByIdRequest,
+    background_tasks: BackgroundTasks,
+    api_key: str = Depends(verify_api_key),
+) -> DownloadStartResponse:
+    """
+    Start downloading directly by source ID (no prior search required).
+
+    This is useful when you have stored the source_id from a previous search
+    and want to download later without re-searching. For torrent sources (RED/OPS),
+    this fetches the .torrent file by ID. For YouTube/Spotify, it downloads directly.
+
+    Parameters:
+    - source_name: Provider name (RED, OPS, YouTube, Spotify)
+    - source_id: Source-specific ID (torrent ID, video ID, track ID)
+    - target_file: For torrents, specific file to extract from the torrent
+    - download_url: For YouTube/Spotify, the direct URL (optional, constructed from source_id if missing)
+
+    The download runs in the background. Use GET /download/{download_id}/status to check progress.
+    """
+    manager = get_download_manager()
+
+    # Validate source_name
+    valid_sources = ["RED", "OPS", "YouTube", "Spotify"]
+    if request.source_name not in valid_sources:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid source_name '{request.source_name}'. Valid options: {valid_sources}"
+        )
+
+    # Validate GCS params
+    if request.upload_to_gcs and not request.gcs_path:
+        raise HTTPException(
+            status_code=400,
+            detail="gcs_path is required when upload_to_gcs is true"
+        )
+
+    logger.info(
+        f"Download by ID requested: source={request.source_name}, "
+        f"id={request.source_id}, target_file={request.target_file}"
+    )
+
+    # Create download task
+    task = manager.create_download_by_id(
+        source_name=request.source_name,
+        source_id=request.source_id,
+        output_filename=request.output_filename,
+        target_file=request.target_file,
+        download_url=request.download_url,
+        upload_to_gcs=request.upload_to_gcs,
+        gcs_destination=request.gcs_path,
+    )
+
+    logger.info(f"Created download-by-id task: {task.download_id} for {task.provider} ID={task.source_id}")
+
+    # Start download in background
+    background_tasks.add_task(manager.execute_download_by_id, task.download_id)
 
     return DownloadStartResponse(
         download_id=task.download_id,

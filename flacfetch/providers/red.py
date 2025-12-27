@@ -279,21 +279,14 @@ class REDProvider(Provider):
             logger.error(f"Error fetching group details for {group_id}: {e}")
             return []
 
-    def fetch_artifact(self, release: Release) -> Optional[bytes]:
-        if not release.download_url:
+    def fetch_artifact_by_id(self, source_id: str) -> Optional[bytes]:
+        """Fetch .torrent file by torrent ID directly, without needing a Release object."""
+        if not source_id:
             return None
 
-        # Extract Torrent ID for caching
-        torrent_id = None
-        try:
-            if "id=" in release.download_url:
-                torrent_id = release.download_url.split("id=")[1].split("&")[0]
-        except IndexError:
-            pass
-
-        # Check Cache
-        if torrent_id and self.cache_dir:
-            cache_path = self.cache_dir / f"{torrent_id}.torrent"
+        # Check Cache first
+        if self.cache_dir:
+            cache_path = self.cache_dir / f"{source_id}.torrent"
             if cache_path.exists():
                 try:
                     logger.info(f"Found torrent in cache: {cache_path}")
@@ -304,71 +297,54 @@ class REDProvider(Provider):
                 except Exception as e:
                     logger.warning(f"Error reading from cache: {e}")
 
+        # Construct download URL from torrent ID
+        url = f"{self.base_url}/ajax.php?action=download&id={source_id}"
+        return self._fetch_torrent_from_url(url, source_id)
+
+    def _fetch_torrent_from_url(self, url: str, torrent_id: Optional[str] = None) -> Optional[bytes]:
+        """Internal method to fetch a torrent file from a URL and cache it."""
         try:
             # Ensure we don't re-download local files
-            if release.download_url.startswith("/") or release.download_url.startswith("file://"):
+            if url.startswith("/") or url.startswith("file://"):
                 return None
 
-            logger.info(f"Fetching artifact from {release.download_url}")
+            logger.info(f"Fetching artifact from {url}")
 
-            # Ensure session has the API key (it should from __init__)
-            # Some users report needing to append &usetoken=1 for download actions if using API key
-            url = release.download_url
-            # Remove usetoken=1 unless explicitly requested (it consumes FL tokens)
-            # if "usetoken=1" not in url:
-            #    url += "&usetoken=1"
-
-            # RED sometimes requires 'authkey' or 'passkey' for download actions if not using API key correctly,
-            # but API key should supersede.
-            # Let's ensure we are not getting a redirect that drops headers.
-
-            # Log Request Details
+            # Log Request Details (masked)
             req_headers = self.session.headers.copy()
-            # Mask API Key for logs
             if "Authorization" in req_headers:
                 req_headers["Authorization"] = req_headers["Authorization"][:4] + "..." + req_headers["Authorization"][-4:]
-
             logger.debug(f"Downloading artifact from: {url}")
             logger.debug(f"Request Headers: {req_headers}")
 
             resp = self.session.get(url, timeout=10, allow_redirects=False)
-
             logger.debug(f"Response Status: {resp.status_code}")
             logger.debug(f"Response Headers: {dict(resp.headers)}")
 
             if resp.status_code != 200:
                 try:
-                    # Try to decode as JSON first if it's an API error
                     content = resp.json()
                     logger.debug(f"Response Body (JSON): {content}")
-
                     if content.get("status") == "failure" and "already downloaded" in content.get("error", ""):
                         logger.error(f"RED Limit Reached: {content.get('error')}")
                         logger.info("Tip: You can download the .torrent file manually from the website and place it in the cache directory:")
-                        if self.cache_dir:
+                        if self.cache_dir and torrent_id:
                             logger.info(f"  {self.cache_dir}/{torrent_id}.torrent")
                 except:
-                    # Fallback to text/raw
                     logger.debug(f"Response Body (Text/Raw): {resp.text[:500]}")
 
             if resp.status_code in (301, 302, 303, 307, 308):
                 redirect_url = resp.headers.get("Location")
                 logger.debug(f"RED download redirected to: {redirect_url}")
                 if redirect_url:
-                    # If redirect is relative, make absolute
                     if redirect_url.startswith("/"):
                         redirect_url = self.base_url + redirect_url
-                    # Follow redirect manually to ensure headers are kept if same domain,
-                    # or just let requests handle it if we didn't set allow_redirects=False.
-                    # Actually, requests keeps headers for same-domain redirects.
-                    # But if it redirects to a CDN, it might drop auth.
                     resp = self.session.get(redirect_url, timeout=10)
 
             if resp.status_code == 200:
                 logger.debug(f"Artifact fetched successfully ({len(resp.content)} bytes)")
                 if len(resp.content) < 1000:
-                     # Suspiciously small, might be an error page?
-                     logger.warning(f"Artifact seems too small ({len(resp.content)} bytes). Content sample: {resp.content[:100]}")
+                    logger.warning(f"Artifact seems too small ({len(resp.content)} bytes). Content sample: {resp.content[:100]}")
 
                 # Save to Cache
                 if torrent_id and self.cache_dir and len(resp.content) > 0:
@@ -384,15 +360,31 @@ class REDProvider(Provider):
             elif resp.status_code == 429:
                 logger.warning("Rate limited while fetching artifact. Retrying in 2s...")
                 time.sleep(2)
-                return self.fetch_artifact(release)
+                return self._fetch_torrent_from_url(url, torrent_id)
             else:
                 logger.error(f"Failed to fetch artifact: Status {resp.status_code}")
-                # 403 usually means "Account is disabled" or "Not logged in" or "Can't download this torrent"
-                # Check if we need to refresh session or something?
-                # But usually API key is static.
         except Exception as e:
             logger.error(f"Error fetching artifact: {e}")
         return None
+
+    def fetch_artifact(self, release: Release) -> Optional[bytes]:
+        if not release.download_url:
+            return None
+
+        # Extract Torrent ID for caching
+        torrent_id = None
+        try:
+            if "id=" in release.download_url:
+                torrent_id = release.download_url.split("id=")[1].split("&")[0]
+        except IndexError:
+            pass
+
+        # Check Cache first (reuse fetch_artifact_by_id if we have a torrent_id)
+        if torrent_id:
+            return self.fetch_artifact_by_id(torrent_id)
+
+        # Fallback: fetch directly from URL without caching
+        return self._fetch_torrent_from_url(release.download_url)
 
     def _find_best_target_file(self, file_list_str: str, track_title: str) -> tuple[Optional[str], Optional[int], float]:
         if not file_list_str:

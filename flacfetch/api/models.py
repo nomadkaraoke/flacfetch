@@ -80,6 +80,17 @@ class DownloadRequest(BaseModel):
     gcs_path: Optional[str] = Field(None, description="GCS path (required if upload_to_gcs)")
 
 
+class DownloadByIdRequest(BaseModel):
+    """Request to download directly by source ID (without requiring a cached search)."""
+    source_name: str = Field(..., description="Provider name (RED, OPS, YouTube, Spotify)")
+    source_id: str = Field(..., description="Source-specific ID (torrent ID, video ID, track ID)")
+    output_filename: Optional[str] = Field(None, description="Custom output filename (without extension)")
+    target_file: Optional[str] = Field(None, description="For torrents, specific file to extract")
+    download_url: Optional[str] = Field(None, description="For YouTube/Spotify, direct URL")
+    upload_to_gcs: bool = Field(False, description="Upload to GCS when complete")
+    gcs_path: Optional[str] = Field(None, description="GCS path (required if upload_to_gcs)")
+
+
 class DownloadStatus(str, Enum):
     """Status of a download."""
     QUEUED = "queued"
