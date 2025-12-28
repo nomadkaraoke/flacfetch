@@ -27,7 +27,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .routes import config_router, credentials_router, download_router, health_router, search_router, torrents_router
-from .services import get_disk_manager, get_download_manager, set_server_started_at
+from .services import get_disk_manager, get_download_manager, get_search_cache_service, set_server_started_at
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +50,11 @@ async def lifespan(app: FastAPI):
     # Initialize singleton services
     _ = get_download_manager()
     _ = get_disk_manager()
+    _ = get_search_cache_service()
 
-    # Start background cleanup task
+    # Start background cleanup tasks
     cleanup_task = asyncio.create_task(_background_cleanup_loop())
+    cache_cleanup_task = asyncio.create_task(_cache_cleanup_loop())
 
     logger.info("Flacfetch HTTP API started")
 
@@ -61,8 +63,13 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down flacfetch HTTP API...")
     cleanup_task.cancel()
+    cache_cleanup_task.cancel()
     try:
         await cleanup_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await cache_cleanup_task
     except asyncio.CancelledError:
         pass
     logger.info("Flacfetch HTTP API stopped")
@@ -96,6 +103,29 @@ async def _background_cleanup_loop():
             break
         except Exception as e:
             logger.error(f"Error in cleanup loop: {e}")
+
+
+async def _cache_cleanup_loop():
+    """
+    Background task that periodically cleans up expired search cache entries.
+    Runs once per day by default.
+    """
+    cleanup_interval = int(os.environ.get("FLACFETCH_CACHE_CLEANUP_INTERVAL", "86400"))  # 24 hours
+
+    while True:
+        try:
+            await asyncio.sleep(cleanup_interval)
+
+            cache_service = get_search_cache_service()
+            removed = await cache_service.cleanup_expired()
+
+            if removed > 0:
+                logger.info(f"Cache cleanup: removed {removed} expired entries")
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Error in cache cleanup loop: {e}")
 
 
 def create_app() -> FastAPI:

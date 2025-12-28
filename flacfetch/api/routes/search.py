@@ -1,6 +1,7 @@
 """
 Search endpoint for flacfetch HTTP API.
 """
+import asyncio
 import logging
 import uuid
 from collections import Counter
@@ -10,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from ..auth import verify_api_key
 from ..models import ProviderSearchStats, SearchRequest, SearchResponse, SearchResultItem
-from ..services import get_download_manager
+from ..services import get_download_manager, get_search_cache_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["search"])
@@ -33,27 +34,49 @@ async def search_audio(
     and searches more groups (slower but returns more results).
     """
     manager = get_download_manager()
-    fetch_manager = manager._get_fetch_manager()
+    cache_service = get_search_cache_service()
 
     logger.info(f"Searching for: {request.artist} - {request.title} (exhaustive={request.exhaustive})")
 
-    # Configure providers based on exhaustive flag
-    for provider in fetch_manager.providers:
-        # Check if provider has early termination settings (RED/OPS)
-        if hasattr(provider, 'early_termination'):
-            provider.early_termination = not request.exhaustive
-            if request.exhaustive:
-                # Also increase search limit for exhaustive mode
-                if hasattr(provider, 'search_limit'):
-                    provider.search_limit = 20
+    # Check cache first (only for non-exhaustive searches)
+    releases = None
+    from_cache = False
+    if not request.exhaustive:
+        cached_results = await cache_service.get_cached_search(request.artist, request.title)
+        if cached_results is not None:
+            logger.info(f"Cache HIT for: {request.artist} - {request.title}")
+            releases = cached_results
+            from_cache = True
 
-    try:
-        from flacfetch.core.models import TrackQuery
-        query = TrackQuery(artist=request.artist, title=request.title)
-        releases = fetch_manager.search(query)
-    except Exception as e:
-        logger.error(f"Search failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Search failed: {e}")
+    if releases is None:
+        if not from_cache:
+            logger.info(f"Cache MISS for: {request.artist} - {request.title}")
+
+        fetch_manager = manager._get_fetch_manager()
+
+        # Configure providers based on exhaustive flag
+        for provider in fetch_manager.providers:
+            # Check if provider has early termination settings (RED/OPS)
+            if hasattr(provider, 'early_termination'):
+                provider.early_termination = not request.exhaustive
+                if request.exhaustive:
+                    # Also increase search limit for exhaustive mode
+                    if hasattr(provider, 'search_limit'):
+                        provider.search_limit = 20
+
+        try:
+            from flacfetch.core.models import TrackQuery
+            query = TrackQuery(artist=request.artist, title=request.title)
+            releases = fetch_manager.search(query)
+        except Exception as e:
+            logger.error(f"Search failed: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Search failed: {e}")
+
+        # Cache results (fire-and-forget, best-effort)
+        if releases and not request.exhaustive:
+            asyncio.create_task(
+                cache_service.cache_search_results(request.artist, request.title, releases)
+            )
 
     if not releases:
         raise HTTPException(status_code=404, detail=f"No results found for: {request.artist} - {request.title}")
