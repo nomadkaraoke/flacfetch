@@ -2,7 +2,7 @@ from typing import Optional
 
 from .interfaces import Downloader, InteractionHandler, Provider
 from .log import get_logger
-from .models import Release, TrackQuery
+from .models import AudioFormat, MediaSource, Quality, Release, TrackQuery
 
 logger = get_logger("FetchManager")
 
@@ -408,10 +408,11 @@ class FetchManager:
                 # Construct URL from video ID
                 download_url = f"https://www.youtube.com/watch?v={source_id}"
 
-            # Create minimal release for YouTube
+            # Create minimal release for YouTube (lossy AAC from YouTube)
             release = Release(
                 title=output_filename or source_id,
                 artist="",
+                quality=Quality(format=AudioFormat.AAC, media=MediaSource.WEB),
                 source_name=source_name,
                 download_url=download_url,
                 source_id=source_id,
@@ -423,9 +424,11 @@ class FetchManager:
             if not download_url:
                 download_url = f"spotify:track:{source_id}"
 
+            # Spotify outputs FLAC but source is 320kbps Vorbis (not true lossless)
             release = Release(
                 title=output_filename or source_id,
                 artist="",
+                quality=Quality(format=AudioFormat.FLAC, media=MediaSource.WEB),
                 source_name=source_name,
                 download_url=download_url,
                 source_id=source_id,
@@ -456,10 +459,11 @@ class FetchManager:
             os.chmod(torrent_path, 0o644)
             logger.debug(f"Saved temporary torrent file to {torrent_path}")
 
-            # Create minimal release for torrent download
+            # Create minimal release for torrent download (assume FLAC from CD for trackers)
             release = Release(
                 title=output_filename or source_id,
                 artist="",
+                quality=Quality(format=AudioFormat.FLAC, media=MediaSource.CD),
                 source_name=source_name,
                 download_url=torrent_path,  # Local path to .torrent file
                 source_id=source_id,

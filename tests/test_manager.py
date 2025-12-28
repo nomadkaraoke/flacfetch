@@ -1,8 +1,10 @@
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, patch
+
+import pytest
 
 from flacfetch.core.interfaces import Downloader, Provider
 from flacfetch.core.manager import FetchManager
-from flacfetch.core.models import AudioFormat, Quality, Release, TrackQuery
+from flacfetch.core.models import AudioFormat, MediaSource, Quality, Release, TrackQuery
 
 
 def test_manager_search():
@@ -373,7 +375,6 @@ class TestDownloaders:
         mock_dl.download.assert_called_once()
 
     def test_download_no_downloader_raises(self):
-        import pytest
         mgr = FetchManager()
 
         release = Release(title="T", artist="A", quality=Quality(AudioFormat.FLAC),
@@ -381,4 +382,281 @@ class TestDownloaders:
 
         with pytest.raises(ValueError, match="No downloader registered"):
             mgr.download(release, "/output")
+
+
+class TestDownloadById:
+    """Test the download_by_id method for direct downloads without cached Release objects"""
+
+    def test_download_by_id_youtube(self):
+        """Test download_by_id for YouTube creates Release with correct quality"""
+        mgr = FetchManager()
+        mock_dl = Mock(spec=Downloader)
+        mock_dl.download.return_value = "/path/to/file.m4a"
+
+        mgr.register_downloader("YouTube", mock_dl)
+
+        result = mgr.download_by_id(
+            source_name="YouTube",
+            source_id="dQw4w9WgXcQ",
+            output_path="/output",
+            output_filename="Rick Astley - Never Gonna Give You Up",
+        )
+
+        assert result == "/path/to/file.m4a"
+        mock_dl.download.assert_called_once()
+
+        # Check the Release was created with quality parameter
+        call_args = mock_dl.download.call_args
+        release = call_args[0][0]
+        assert isinstance(release, Release)
+        assert release.quality is not None
+        assert release.quality.format == AudioFormat.AAC
+        assert release.quality.media == MediaSource.WEB
+        assert release.source_name == "YouTube"
+        assert release.download_url == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+    def test_download_by_id_youtube_constructs_url_from_id(self):
+        """Test download_by_id for YouTube constructs URL when not provided"""
+        mgr = FetchManager()
+        mock_dl = Mock(spec=Downloader)
+        mock_dl.download.return_value = "/path/to/file.m4a"
+
+        mgr.register_downloader("YouTube", mock_dl)
+
+        mgr.download_by_id(
+            source_name="YouTube",
+            source_id="abc123xyz99",
+            output_path="/output",
+        )
+
+        call_args = mock_dl.download.call_args
+        release = call_args[0][0]
+        assert release.download_url == "https://www.youtube.com/watch?v=abc123xyz99"
+
+    def test_download_by_id_youtube_uses_provided_url(self):
+        """Test download_by_id for YouTube uses provided URL if given"""
+        mgr = FetchManager()
+        mock_dl = Mock(spec=Downloader)
+        mock_dl.download.return_value = "/path/to/file.m4a"
+
+        mgr.register_downloader("YouTube", mock_dl)
+
+        custom_url = "https://youtu.be/customID"
+        mgr.download_by_id(
+            source_name="YouTube",
+            source_id="ignored",
+            output_path="/output",
+            download_url=custom_url,
+        )
+
+        call_args = mock_dl.download.call_args
+        release = call_args[0][0]
+        assert release.download_url == custom_url
+
+    def test_download_by_id_spotify(self):
+        """Test download_by_id for Spotify creates Release with correct quality"""
+        mgr = FetchManager()
+        mock_dl = Mock(spec=Downloader)
+        mock_dl.download.return_value = "/path/to/file.flac"
+
+        mgr.register_downloader("Spotify", mock_dl)
+
+        result = mgr.download_by_id(
+            source_name="Spotify",
+            source_id="4cOdK2wGLETKBW3PvgPWqT",
+            output_path="/output",
+            output_filename="Rick Astley - Never Gonna Give You Up",
+        )
+
+        assert result == "/path/to/file.flac"
+        mock_dl.download.assert_called_once()
+
+        # Check the Release was created with quality parameter
+        call_args = mock_dl.download.call_args
+        release = call_args[0][0]
+        assert isinstance(release, Release)
+        assert release.quality is not None
+        assert release.quality.format == AudioFormat.FLAC
+        assert release.quality.media == MediaSource.WEB
+        assert release.source_name == "Spotify"
+
+    def test_download_by_id_spotify_constructs_uri_from_id(self):
+        """Test download_by_id for Spotify constructs URI when not provided"""
+        mgr = FetchManager()
+        mock_dl = Mock(spec=Downloader)
+        mock_dl.download.return_value = "/path/to/file.flac"
+
+        mgr.register_downloader("Spotify", mock_dl)
+
+        mgr.download_by_id(
+            source_name="Spotify",
+            source_id="trackid123",
+            output_path="/output",
+        )
+
+        call_args = mock_dl.download.call_args
+        release = call_args[0][0]
+        assert release.download_url == "spotify:track:trackid123"
+
+    def test_download_by_id_red_torrent(self):
+        """Test download_by_id for RED creates Release with correct quality"""
+        mgr = FetchManager()
+        mock_dl = Mock(spec=Downloader)
+        mock_dl.download.return_value = "/path/to/file.flac"
+
+        # Mock provider for fetching torrent artifact
+        class MockREDProvider(Provider):
+            @property
+            def name(self):
+                return "RED"
+
+            def search(self, q):
+                return []
+
+            def fetch_artifact_by_id(self, torrent_id):
+                return b"torrent file content"
+
+        mock_provider = MockREDProvider()
+        mgr.add_provider(mock_provider)
+        mgr.register_downloader("RED", mock_dl)
+
+        with patch("tempfile.mkstemp") as mock_mkstemp, \
+             patch("os.fdopen") as mock_fdopen, \
+             patch("os.chmod"):
+            mock_mkstemp.return_value = (999, "/tmp/test.torrent")
+            mock_file = Mock()
+            mock_fdopen.return_value.__enter__ = Mock(return_value=mock_file)
+            mock_fdopen.return_value.__exit__ = Mock(return_value=False)
+
+            result = mgr.download_by_id(
+                source_name="RED",
+                source_id="12345",
+                output_path="/output",
+                output_filename="Artist - Album",
+                target_file="01 - Track.flac",
+            )
+
+        assert result == "/path/to/file.flac"
+        mock_dl.download.assert_called_once()
+
+        # Check the Release was created with quality parameter
+        call_args = mock_dl.download.call_args
+        release = call_args[0][0]
+        assert isinstance(release, Release)
+        assert release.quality is not None
+        assert release.quality.format == AudioFormat.FLAC
+        assert release.quality.media == MediaSource.CD
+        assert release.source_name == "RED"
+        assert release.target_file == "01 - Track.flac"
+
+    def test_download_by_id_ops_torrent(self):
+        """Test download_by_id for OPS creates Release with correct quality"""
+        mgr = FetchManager()
+        mock_dl = Mock(spec=Downloader)
+        mock_dl.download.return_value = "/path/to/file.flac"
+
+        # Mock provider for fetching torrent artifact
+        class MockOPSProvider(Provider):
+            @property
+            def name(self):
+                return "OPS"
+
+            def search(self, q):
+                return []
+
+            def fetch_artifact_by_id(self, torrent_id):
+                return b"torrent file content"
+
+        mock_provider = MockOPSProvider()
+        mgr.add_provider(mock_provider)
+        mgr.register_downloader("OPS", mock_dl)
+
+        with patch("tempfile.mkstemp") as mock_mkstemp, \
+             patch("os.fdopen") as mock_fdopen, \
+             patch("os.chmod"):
+            mock_mkstemp.return_value = (999, "/tmp/test.torrent")
+            mock_file = Mock()
+            mock_fdopen.return_value.__enter__ = Mock(return_value=mock_file)
+            mock_fdopen.return_value.__exit__ = Mock(return_value=False)
+
+            result = mgr.download_by_id(
+                source_name="OPS",
+                source_id="67890",
+                output_path="/output",
+            )
+
+        assert result == "/path/to/file.flac"
+
+        # Check the Release was created with quality parameter
+        call_args = mock_dl.download.call_args
+        release = call_args[0][0]
+        assert isinstance(release, Release)
+        assert release.quality is not None
+        assert release.quality.format == AudioFormat.FLAC
+        assert release.quality.media == MediaSource.CD
+        assert release.source_name == "OPS"
+
+    def test_download_by_id_no_downloader_raises(self):
+        """Test download_by_id raises when no downloader registered"""
+        mgr = FetchManager()
+
+        with pytest.raises(ValueError, match="No downloader registered"):
+            mgr.download_by_id(
+                source_name="YouTube",
+                source_id="test",
+                output_path="/output",
+            )
+
+    def test_download_by_id_unknown_source_raises(self):
+        """Test download_by_id raises for unknown source types"""
+        mgr = FetchManager()
+        mock_dl = Mock(spec=Downloader)
+        mgr.register_downloader("Unknown", mock_dl)
+
+        with pytest.raises(ValueError, match="download_by_id not implemented"):
+            mgr.download_by_id(
+                source_name="Unknown",
+                source_id="test",
+                output_path="/output",
+            )
+
+    def test_download_by_id_red_no_provider_raises(self):
+        """Test download_by_id for RED raises when provider not registered"""
+        mgr = FetchManager()
+        mock_dl = Mock(spec=Downloader)
+        mgr.register_downloader("RED", mock_dl)
+
+        with pytest.raises(ValueError, match="Provider RED not registered"):
+            mgr.download_by_id(
+                source_name="RED",
+                source_id="12345",
+                output_path="/output",
+            )
+
+    def test_download_by_id_red_artifact_fetch_fails(self):
+        """Test download_by_id for RED raises when artifact fetch fails"""
+        mgr = FetchManager()
+        mock_dl = Mock(spec=Downloader)
+
+        class MockREDProvider(Provider):
+            @property
+            def name(self):
+                return "RED"
+
+            def search(self, q):
+                return []
+
+            def fetch_artifact_by_id(self, torrent_id):
+                return None  # Simulates failed fetch
+
+        mock_provider = MockREDProvider()
+        mgr.add_provider(mock_provider)
+        mgr.register_downloader("RED", mock_dl)
+
+        with pytest.raises(ValueError, match="Failed to fetch torrent file"):
+            mgr.download_by_id(
+                source_name="RED",
+                source_id="12345",
+                output_path="/output",
+            )
 
