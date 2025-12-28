@@ -35,6 +35,7 @@ async def search_audio(
     """
     manager = get_download_manager()
     cache_service = get_search_cache_service()
+    fetch_manager = manager._get_fetch_manager()
 
     logger.info(f"Searching for: {request.artist} - {request.title} (exhaustive={request.exhaustive})")
 
@@ -51,8 +52,6 @@ async def search_audio(
     if releases is None:
         if not from_cache:
             logger.info(f"Cache MISS for: {request.artist} - {request.title}")
-
-        fetch_manager = manager._get_fetch_manager()
 
         # Configure providers based on exhaustive flag
         for provider in fetch_manager.providers:
