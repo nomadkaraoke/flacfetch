@@ -67,11 +67,13 @@ class REDProvider(Provider):
         - , (comma) - separator
         - . (period) - wildcard
         - ; (semicolon) - separator
+        - ' (apostrophe) - breaks search (e.g., "I'm With You")
 
         We remove these characters to allow the search to work properly.
         """
         # Characters that break Sphinx filelist search
-        special_chars = r':/()\[\]!,.;'
+        # Note: apostrophe (') breaks searches like "I'm With You"
+        special_chars = r":/()\[\]!,.;'"
 
         # Remove special characters
         sanitized = query

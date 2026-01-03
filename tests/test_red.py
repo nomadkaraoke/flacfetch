@@ -195,6 +195,10 @@ def test_red_filelist_sanitization():
         # Hyphens and ampersands should be preserved (they work in Sphinx)
         ("Track - Artist", "Track - Artist"),
         ("Artist & Artist", "Artist & Artist"),
+        # Apostrophes should be removed (they break Sphinx search)
+        ("I'm With You", "I m With You"),
+        ("Don't Stop", "Don t Stop"),
+        ("Rock 'n' Roll", "Rock n Roll"),
     ]
 
     for input_query, expected in test_cases:
