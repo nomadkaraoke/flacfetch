@@ -265,6 +265,114 @@ class SearchCacheService:
 
         return deleted
 
+    async def delete_cache_entry(self, artist: str, title: str) -> bool:
+        """
+        Delete a specific cache entry by artist/title.
+
+        Returns True if entry was deleted, False if not found.
+        """
+        if not self.bucket_name:
+            logger.debug("GCS bucket not configured, skipping cache delete")
+            return False
+
+        cache_key = self.normalize_cache_key(artist, title)
+        blob_path = self._blob_path(cache_key)
+
+        try:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(self._executor, self._delete_entry_sync, blob_path)
+        except Exception as e:
+            logger.warning(f"Cache delete error: {e}")
+            return False
+
+    def _delete_entry_sync(self, blob_path: str) -> bool:
+        """Synchronous cache entry deletion."""
+        try:
+            bucket = self._get_bucket()
+            blob = bucket.blob(blob_path)
+            if blob.exists():
+                blob.delete()
+                logger.info(f"Deleted cache entry: {blob_path}")
+                return True
+            return False
+        except Exception as e:
+            logger.debug(f"Failed to delete cache entry: {e}")
+            return False
+
+    async def clear_all(self) -> int:
+        """
+        Delete all cache entries.
+
+        Returns count of deleted entries.
+        """
+        if not self.bucket_name:
+            logger.debug("GCS bucket not configured, skipping cache clear")
+            return 0
+
+        try:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(self._executor, self._clear_all_sync)
+        except Exception as e:
+            logger.error(f"Cache clear failed: {e}")
+            return 0
+
+    def _clear_all_sync(self) -> int:
+        """Synchronous clear all (runs in executor)."""
+        bucket = self._get_bucket()
+        deleted = 0
+
+        blobs = list(bucket.list_blobs(prefix=self.prefix))
+        for blob in blobs:
+            try:
+                blob.delete()
+                deleted += 1
+            except Exception as e:
+                logger.debug(f"Error deleting blob {blob.name}: {e}")
+
+        logger.info(f"Cleared {deleted} cache entries")
+        return deleted
+
+    async def get_stats(self) -> dict:
+        """
+        Get cache statistics.
+
+        Returns dict with count, total_size_bytes, oldest_entry, newest_entry.
+        """
+        if not self.bucket_name:
+            return {"count": 0, "total_size_bytes": 0, "configured": False}
+
+        try:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(self._executor, self._get_stats_sync)
+        except Exception as e:
+            logger.error(f"Failed to get cache stats: {e}")
+            return {"count": 0, "total_size_bytes": 0, "error": str(e)}
+
+    def _get_stats_sync(self) -> dict:
+        """Synchronous stats collection."""
+        bucket = self._get_bucket()
+        blobs = list(bucket.list_blobs(prefix=self.prefix))
+
+        count = len(blobs)
+        total_size = sum(b.size or 0 for b in blobs)
+        oldest = None
+        newest = None
+
+        for blob in blobs:
+            if blob.time_created:
+                if oldest is None or blob.time_created < oldest:
+                    oldest = blob.time_created
+                if newest is None or blob.time_created > newest:
+                    newest = blob.time_created
+
+        return {
+            "count": count,
+            "total_size_bytes": total_size,
+            "oldest_entry": oldest.isoformat() if oldest else None,
+            "newest_entry": newest.isoformat() if newest else None,
+            "configured": True,
+        }
+
 
 # Singleton instance
 _search_cache_service: Optional[SearchCacheService] = None

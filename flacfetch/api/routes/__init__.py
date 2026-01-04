@@ -1,6 +1,7 @@
 """
 Flacfetch API routes.
 """
+from .cache import router as cache_router
 from .config import router as config_router
 from .credentials import router as credentials_router
 from .download import router as download_router
@@ -15,5 +16,6 @@ __all__ = [
     "health_router",
     "config_router",
     "credentials_router",
+    "cache_router",
 ]
 

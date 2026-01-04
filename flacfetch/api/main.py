@@ -26,7 +26,15 @@ from typing import Optional
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .routes import config_router, credentials_router, download_router, health_router, search_router, torrents_router
+from .routes import (
+    cache_router,
+    config_router,
+    credentials_router,
+    download_router,
+    health_router,
+    search_router,
+    torrents_router,
+)
 from .services import get_disk_manager, get_download_manager, get_search_cache_service, set_server_started_at
 
 logger = logging.getLogger(__name__)
@@ -158,6 +166,7 @@ def create_app() -> FastAPI:
     app.include_router(torrents_router)
     app.include_router(config_router)
     app.include_router(credentials_router)
+    app.include_router(cache_router)
 
     return app
 
