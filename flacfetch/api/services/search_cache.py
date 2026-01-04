@@ -57,10 +57,27 @@ class SearchCacheService:
             self._bucket = self._get_client().bucket(self.bucket_name)
         return self._bucket
 
+    # Mapping of typographic quotes to ASCII equivalents
+    # NFKC doesn't normalize these, so we do it manually
+    _QUOTE_MAP = str.maketrans({
+        "\u2018": "'",  # LEFT SINGLE QUOTATION MARK
+        "\u2019": "'",  # RIGHT SINGLE QUOTATION MARK
+        "\u201c": '"',  # LEFT DOUBLE QUOTATION MARK
+        "\u201d": '"',  # RIGHT DOUBLE QUOTATION MARK
+        "\u2032": "'",  # PRIME
+        "\u2033": '"',  # DOUBLE PRIME
+        "\u2035": "'",  # REVERSED PRIME
+        "\u2036": '"',  # REVERSED DOUBLE PRIME
+        "\u0060": "'",  # GRAVE ACCENT
+        "\u00b4": "'",  # ACUTE ACCENT
+    })
+
     @staticmethod
     def _normalize_part(s: str) -> str:
-        """Normalize a string component: NFKC, lowercase, collapse whitespace."""
+        """Normalize a string component: NFKC, lowercase, collapse whitespace, normalize quotes."""
         s = unicodedata.normalize("NFKC", s)
+        # Normalize typographic quotes to ASCII (NFKC doesn't do this)
+        s = s.translate(SearchCacheService._QUOTE_MAP)
         s = s.lower()
         s = re.sub(r"\s+", " ", s).strip()
         return s
