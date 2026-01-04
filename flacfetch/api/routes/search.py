@@ -72,7 +72,8 @@ async def search_audio(
             raise HTTPException(status_code=500, detail=f"Search failed: {e}")
 
         # Cache results (fire-and-forget, best-effort)
-        if releases and not request.exhaustive:
+        # Always cache fresh search results, including exhaustive searches
+        if releases:
             asyncio.create_task(
                 cache_service.cache_search_results(request.artist, request.title, releases)
             )
