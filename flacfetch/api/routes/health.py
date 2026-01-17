@@ -8,6 +8,7 @@ from importlib.metadata import PackageNotFoundError, version
 from fastapi import APIRouter
 
 from ..models import (
+    DeepHealthResponse,
     DiskHealth,
     HealthResponse,
     ProvidersHealth,
@@ -15,7 +16,7 @@ from ..models import (
     TransmissionHealth,
     YtdlpHealth,
 )
-from ..services import get_disk_manager, get_server_started_at
+from ..services import get_deep_health_service, get_disk_manager, get_server_started_at
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["health"])
@@ -73,6 +74,25 @@ async def health_check() -> HealthResponse:
         providers=providers,
         ytdlp=ytdlp,
     )
+
+
+@router.get("/health/deep", response_model=DeepHealthResponse)
+async def deep_health_check(refresh: bool = False) -> DeepHealthResponse:
+    """
+    Deep health check that tests actual provider connectivity.
+
+    Unlike /health which only checks if env vars are set, this endpoint
+    makes real API calls to verify each provider is working.
+
+    Results are cached for 5 minutes to avoid excessive API calls.
+
+    Query parameters:
+    - refresh: Set to true to bypass cache and perform fresh check
+
+    This endpoint is public (no auth required) for status page integration.
+    """
+    service = get_deep_health_service()
+    return await service.check_health(refresh=refresh)
 
 
 def _check_transmission() -> TransmissionHealth:

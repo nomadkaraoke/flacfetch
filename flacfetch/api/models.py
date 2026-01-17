@@ -245,3 +245,37 @@ class HealthResponse(BaseModel):
     providers: ProvidersHealth
     ytdlp: Optional[YtdlpHealth] = None
 
+
+# =============================================================================
+# Deep Health Check Models
+# =============================================================================
+
+class ProviderHealthStatus(str, Enum):
+    """Status levels for provider health checks."""
+    OK = "ok"
+    DEGRADED = "degraded"
+    ERROR = "error"
+    UNCONFIGURED = "unconfigured"
+
+
+class ProviderDeepHealth(BaseModel):
+    """Detailed health status for a single provider."""
+    name: str
+    status: ProviderHealthStatus
+    configured: bool
+    last_check: Optional[datetime] = None
+    latency_ms: Optional[int] = None
+    error: Optional[str] = None
+    details: Optional[Dict[str, Any]] = None
+
+
+class DeepHealthResponse(BaseModel):
+    """Response from deep health check endpoint."""
+    status: str  # "healthy", "degraded", "unhealthy"
+    checked_at: datetime
+    cache_age_seconds: Optional[int] = None
+    providers: List[ProviderDeepHealth]
+    healthy_count: int
+    degraded_count: int
+    error_count: int
+
