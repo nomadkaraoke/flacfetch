@@ -6,6 +6,7 @@ from typing import Optional
 
 from .disk_manager import DiskManager, get_disk_manager
 from .download_manager import DownloadManager, get_download_manager
+from .health_check import DeepHealthService, get_deep_health_service
 from .search_cache import SearchCacheService, get_search_cache_service
 
 # Server start time tracking (set by main.py lifespan)
@@ -28,6 +29,8 @@ __all__ = [
     "get_download_manager",
     "DiskManager",
     "get_disk_manager",
+    "DeepHealthService",
+    "get_deep_health_service",
     "SearchCacheService",
     "get_search_cache_service",
     "set_server_started_at",
