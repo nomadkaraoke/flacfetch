@@ -79,24 +79,9 @@ flacfetch_storage_reader = gcp.storage.BucketIAMMember(
 # =============================================================================
 # Secrets
 # =============================================================================
-# Note: Some secrets (red-api-key, ops-api-key, etc.) may be shared with karaoke-gen.
-# We define flacfetch-specific secrets here.
-
-flacfetch_api_key_secret = secretmanager.Secret(
-    "flacfetch-api-key",
-    secret_id="flacfetch-api-key",
-    replication=secretmanager.SecretReplicationArgs(
-        auto=secretmanager.SecretReplicationAutoArgs(),
-    ),
-)
-
-flacfetch_api_url_secret = secretmanager.Secret(
-    "flacfetch-api-url",
-    secret_id="flacfetch-api-url",
-    replication=secretmanager.SecretReplicationArgs(
-        auto=secretmanager.SecretReplicationAutoArgs(),
-    ),
-)
+# Note: flacfetch-api-key and flacfetch-api-url are managed by karaoke-gen since
+# the backend needs them to communicate with flacfetch. All other secrets below
+# are flacfetch-specific.
 
 # RED tracker secrets (for private music tracker access)
 red_api_key_secret = secretmanager.Secret(
@@ -940,9 +925,8 @@ pulumi.export("gcs_bucket", bucket_name)
 pulumi.export("service_account_email", flacfetch_sa.email)
 
 # Secret exports (just names, not values)
+# Note: flacfetch-api-key and flacfetch-api-url are managed by karaoke-gen
 pulumi.export("secrets", {
-    "flacfetch_api_key": flacfetch_api_key_secret.name,
-    "flacfetch_api_url": flacfetch_api_url_secret.name,
     "red_api_key": red_api_key_secret.name,
     "red_api_url": red_api_url_secret.name,
     "ops_api_key": ops_api_key_secret.name,
