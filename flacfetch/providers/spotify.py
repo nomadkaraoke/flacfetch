@@ -66,7 +66,11 @@ class SpotifyProvider(Provider):
         return "Spotify"
 
     def _get_client(self) -> "spotipy.Spotify":
-        """Get or create authenticated Spotify client."""
+        """Get or create authenticated Spotify client.
+
+        Raises SpotifyAuthError immediately if no cached token exists,
+        preventing blocking browser-based OAuth on headless servers.
+        """
         if self._sp is not None:
             return self._sp
 
@@ -84,6 +88,23 @@ class SpotifyProvider(Provider):
                 client_secret=self._client_secret,
                 scope=" ".join(SPOTIFY_SCOPES),
             )
+
+            # Check for cached token BEFORE any API call that might trigger
+            # interactive browser-based OAuth (which blocks on headless servers)
+            cached_token = self._auth_manager.get_cached_token()
+            if not cached_token:
+                raise SpotifyAuthError(
+                    "No cached OAuth token. Run flacfetch interactively once to "
+                    "authenticate with Spotify, or disable Spotify on this server."
+                )
+
+            # Refresh if expired (this uses the cached refresh_token, no browser needed)
+            if self._auth_manager.is_token_expired(cached_token):
+                logger.info("Refreshing expired Spotify token...")
+                cached_token = self._auth_manager.refresh_access_token(
+                    cached_token["refresh_token"]
+                )
+
             self._sp = spotipy.Spotify(auth_manager=self._auth_manager)
 
             # Verify auth works
@@ -92,6 +113,8 @@ class SpotifyProvider(Provider):
 
             return self._sp
 
+        except SpotifyAuthError:
+            raise  # Re-raise our own errors
         except Exception as e:
             raise SpotifyAuthError(f"Spotify authentication failed: {e}") from e
 

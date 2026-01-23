@@ -430,6 +430,101 @@ class TestLibrespotDetection:
             assert is_librespot_available() is False
 
 
+class TestSpotifyAuthFailFast:
+    """Test that Spotify auth fails fast without cached token (for headless servers)."""
+
+    def test_get_client_fails_fast_without_cached_token(self):
+        """Should raise SpotifyAuthError immediately when no cached OAuth token exists.
+
+        This prevents blocking browser-based OAuth on headless servers.
+        Regression test for: job 2ac68b0f failed because Spotify auth blocked
+        indefinitely, preventing valid RED/OPS results from being returned.
+        """
+        provider = SpotifyProvider(client_id="test_id", client_secret="test_secret")
+
+        mock_auth_manager = MagicMock()
+        mock_auth_manager.get_cached_token.return_value = None  # No cached token
+
+        # Create mock modules for spotipy
+        mock_spotipy = MagicMock()
+        mock_oauth2 = MagicMock()
+        mock_oauth2.SpotifyOAuth.return_value = mock_auth_manager
+
+        with patch.dict("sys.modules", {"spotipy": mock_spotipy, "spotipy.oauth2": mock_oauth2}):
+            # Reset provider's cached client
+            provider._sp = None
+            provider._auth_manager = None
+
+            with pytest.raises(SpotifyAuthError) as exc_info:
+                provider._get_client()
+
+            assert "No cached OAuth token" in str(exc_info.value)
+            # Verify we didn't try to call current_user() which would trigger browser auth
+            mock_auth_manager.get_cached_token.assert_called_once()
+
+    def test_get_client_refreshes_expired_token(self):
+        """Should refresh expired token without browser interaction."""
+        provider = SpotifyProvider(client_id="test_id", client_secret="test_secret")
+
+        mock_auth_manager = MagicMock()
+        mock_auth_manager.get_cached_token.return_value = {
+            "access_token": "old_token",
+            "refresh_token": "refresh_token_123",
+        }
+        mock_auth_manager.is_token_expired.return_value = True
+        mock_auth_manager.refresh_access_token.return_value = {
+            "access_token": "new_token",
+            "refresh_token": "new_refresh_token",
+        }
+
+        mock_sp = MagicMock()
+        mock_sp.current_user.return_value = {"display_name": "Test User", "id": "test"}
+
+        # Create mock modules for spotipy
+        mock_spotipy = MagicMock()
+        mock_spotipy.Spotify.return_value = mock_sp
+        mock_oauth2 = MagicMock()
+        mock_oauth2.SpotifyOAuth.return_value = mock_auth_manager
+
+        with patch.dict("sys.modules", {"spotipy": mock_spotipy, "spotipy.oauth2": mock_oauth2}):
+            # Reset provider's cached client
+            provider._sp = None
+            provider._auth_manager = None
+            client = provider._get_client()
+
+            assert client is mock_sp
+            mock_auth_manager.refresh_access_token.assert_called_once_with("refresh_token_123")
+
+    def test_get_client_uses_valid_cached_token(self):
+        """Should use valid cached token without refresh."""
+        provider = SpotifyProvider(client_id="test_id", client_secret="test_secret")
+
+        mock_auth_manager = MagicMock()
+        mock_auth_manager.get_cached_token.return_value = {
+            "access_token": "valid_token",
+            "refresh_token": "refresh_token",
+        }
+        mock_auth_manager.is_token_expired.return_value = False
+
+        mock_sp = MagicMock()
+        mock_sp.current_user.return_value = {"display_name": "Test User", "id": "test"}
+
+        # Create mock modules for spotipy
+        mock_spotipy = MagicMock()
+        mock_spotipy.Spotify.return_value = mock_sp
+        mock_oauth2 = MagicMock()
+        mock_oauth2.SpotifyOAuth.return_value = mock_auth_manager
+
+        with patch.dict("sys.modules", {"spotipy": mock_spotipy, "spotipy.oauth2": mock_oauth2}):
+            # Reset provider's cached client
+            provider._sp = None
+            provider._auth_manager = None
+            client = provider._get_client()
+
+            assert client is mock_sp
+            mock_auth_manager.refresh_access_token.assert_not_called()
+
+
 class TestSpotifyConfigCheck:
     """Test Spotify configuration detection."""
 
