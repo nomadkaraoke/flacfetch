@@ -44,6 +44,7 @@ def check_spotify_credentials() -> CredentialCheckResult:
     Test if Spotify OAuth credentials are working.
 
     Tries to make a simple search API call to verify the token is valid.
+    Checks for cached token BEFORE any API call to prevent blocking on headless servers.
     """
     client_id = os.environ.get("SPOTIPY_CLIENT_ID")
     client_secret = os.environ.get("SPOTIPY_CLIENT_SECRET")
@@ -79,6 +80,32 @@ def check_spotify_credentials() -> CredentialCheckResult:
             scope="user-read-playback-state user-modify-playback-state streaming",
             cache_path=cache_path,
         )
+
+        # Check for cached token BEFORE any API call that might trigger
+        # interactive browser-based OAuth (which blocks on headless servers)
+        cached_token = auth_manager.get_cached_token()
+        if not cached_token:
+            return CredentialCheckResult(
+                service="Spotify",
+                status=CredentialStatus.MISSING,
+                message="No valid OAuth token in cache - needs browser authentication",
+                needs_human_action=True,
+                fix_command="flacfetch spotify-auth login && flacfetch spotify-auth upload",
+            )
+
+        # Refresh if expired (this uses the cached refresh_token, no browser needed)
+        if auth_manager.is_token_expired(cached_token):
+            logger.info("Refreshing expired Spotify token...")
+            try:
+                cached_token = auth_manager.refresh_access_token(cached_token["refresh_token"])
+            except Exception as e:
+                return CredentialCheckResult(
+                    service="Spotify",
+                    status=CredentialStatus.EXPIRED,
+                    message=f"OAuth token expired and refresh failed: {e}",
+                    needs_human_action=True,
+                    fix_command="flacfetch spotify-auth login && flacfetch spotify-auth upload",
+                )
 
         sp = spotipy.Spotify(auth_manager=auth_manager)
 
@@ -241,6 +268,7 @@ def check_local_spotify_credentials() -> CredentialCheckResult:
 
     Uses ~/.cache-spotipy for the token cache (local machine path).
     This is for CLI use on the user's machine, not the server.
+    Checks for cached token BEFORE any API call to prevent blocking.
     """
     client_id = os.environ.get("SPOTIPY_CLIENT_ID")
     client_secret = os.environ.get("SPOTIPY_CLIENT_SECRET")
@@ -276,6 +304,32 @@ def check_local_spotify_credentials() -> CredentialCheckResult:
             scope="user-read-playback-state user-modify-playback-state streaming",
             cache_path=cache_path,
         )
+
+        # Check for cached token BEFORE any API call that might trigger
+        # interactive browser-based OAuth (which blocks on headless servers)
+        cached_token = auth_manager.get_cached_token()
+        if not cached_token:
+            return CredentialCheckResult(
+                service="Spotify",
+                status=CredentialStatus.MISSING,
+                message="No valid OAuth token in cache - needs browser authentication",
+                needs_human_action=True,
+                fix_command="flacfetch fix",
+            )
+
+        # Refresh if expired (this uses the cached refresh_token, no browser needed)
+        if auth_manager.is_token_expired(cached_token):
+            logger.info("Refreshing expired Spotify token...")
+            try:
+                cached_token = auth_manager.refresh_access_token(cached_token["refresh_token"])
+            except Exception as e:
+                return CredentialCheckResult(
+                    service="Spotify",
+                    status=CredentialStatus.EXPIRED,
+                    message=f"OAuth token expired and refresh failed: {e}",
+                    needs_human_action=True,
+                    fix_command="flacfetch fix",
+                )
 
         sp = spotipy.Spotify(auth_manager=auth_manager)
 
