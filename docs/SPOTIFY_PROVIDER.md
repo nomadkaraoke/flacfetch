@@ -143,7 +143,23 @@ The infrastructure Pulumi code automatically:
 
 ### 3. OAuth Token for Headless Server
 
-Since the server is headless, you need to generate the OAuth token locally and copy it:
+Since the server is headless, you need to generate the OAuth token locally and upload it to the server.
+
+#### Option A: Using flacfetch-remote (Recommended)
+
+The easiest way is to use the `flacfetch-remote fix` command, which handles token generation and upload automatically:
+
+```bash
+# This will:
+# 1. Generate token locally (opens browser for OAuth)
+# 2. Upload token via API (takes effect immediately, no restart needed)
+# 3. Update GCP Secret Manager for persistence
+flacfetch-remote fix
+```
+
+#### Option B: Using the API Directly
+
+You can also upload tokens directly via the API for hot-reload without server restart:
 
 ```bash
 # 1. Generate token locally (opens browser)
@@ -161,11 +177,36 @@ print('Token generated successfully!')
 print(sp.me()['display_name'])
 "
 
+# 2. Upload token via API (takes effect immediately)
+curl -X POST http://SERVER:8080/config/spotify-token \
+  -H "X-API-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{\"token\": $(cat ~/.cache-spotipy)}"
+
+# 3. Verify credentials
+curl http://SERVER:8080/credentials/check -H "X-API-Key: $API_KEY"
+```
+
+The API upload automatically:
+- Validates token format (JSON, required fields, scopes)
+- Writes token to `/opt/flacfetch/.cache`
+- Invalidates the SpotifyProvider cache (hot-reload)
+- Updates GCP Secret Manager for persistence
+
+#### Option C: Manual File Copy (Legacy)
+
+For manual file copying (requires server restart):
+
+```bash
+# 1. Generate token locally (as above)
 # 2. Copy token to server
-gcloud compute scp .cache flacfetch-service:/opt/flacfetch/.cache --zone us-central1-a
+gcloud compute scp ~/.cache-spotipy flacfetch-service:/opt/flacfetch/.cache --zone us-central1-a
 
 # 3. Set ownership
 gcloud compute ssh flacfetch-service --zone us-central1-a --command "sudo chown root:root /opt/flacfetch/.cache"
+
+# 4. Restart service (required for file copy method)
+gcloud compute ssh flacfetch-service --zone us-central1-a --command "sudo systemctl restart flacfetch"
 ```
 
 ### 4. Systemd Service
@@ -237,9 +278,18 @@ cat /tmp/librespot-*.log
 
 ### "Token refresh failed"
 
-Delete the cached token and re-authenticate:
+For server deployments, use the hot-reload API:
 ```bash
-rm .cache
+# Upload fresh token via API (no restart needed)
+flacfetch-remote fix
+
+# Or verify current status
+curl http://SERVER:8080/config/spotify-token/status -H "X-API-Key: $API_KEY"
+```
+
+For local development, delete the cached token and re-authenticate:
+```bash
+rm ~/.cache-spotipy
 flacfetch "test query"  # Will prompt for OAuth
 ```
 
@@ -314,6 +364,9 @@ flacfetch --help
 |------|---------|
 | `flacfetch/providers/spotify.py` | SpotifyProvider class - search via Web API |
 | `flacfetch/downloaders/spotify.py` | SpotifyDownloader class - audio capture |
+| `flacfetch/core/config.py` | Centralized credential paths |
+| `flacfetch/api/routes/config.py` | Token upload API endpoints |
 | `tests/test_spotify.py` | Unit tests |
-| `.cache` | OAuth token cache (auto-generated) |
+| `tests/test_api_config.py` | API config tests |
+| `.cache` or `~/.cache-spotipy` | OAuth token cache (auto-generated) |
 
