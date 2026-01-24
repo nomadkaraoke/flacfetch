@@ -195,7 +195,6 @@ class TransmissionHealth(BaseModel):
     seeding_torrents: int = 0
     total_size_mb: float = 0.0
     total_uploaded_mb: float = 0.0
-    torrents: Optional[List[TorrentSummaryItem]] = None
     error: Optional[str] = None
 
 

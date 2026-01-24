@@ -7,12 +7,14 @@ Authentication: OAuth2 via spotipy (browser-based login, cached automatically)
 Quality: CD-quality FLAC output (44.1kHz/16-bit) via librespot capture
 """
 
+import os
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     import spotipy
     from spotipy.oauth2 import SpotifyOAuth
 
+from ..core.config import get_spotify_cache_path
 from ..core.interfaces import Provider
 from ..core.log import get_logger
 from ..core.matching import calculate_match_score
@@ -48,18 +50,37 @@ class SpotifyProvider(Provider):
         SPOTIPY_REDIRECT_URI: OAuth redirect URI (e.g. http://127.0.0.1:8888/callback)
     """
 
-    def __init__(self, client_id: Optional[str] = None, client_secret: Optional[str] = None):
+    def __init__(
+        self,
+        client_id: Optional[str] = None,
+        client_secret: Optional[str] = None,
+        cache_path: Optional[str] = None,
+    ):
         """Initialize the Spotify provider.
 
         Args:
             client_id: Spotify app client ID (or use SPOTIPY_CLIENT_ID env var)
             client_secret: Spotify app client secret (or use SPOTIPY_CLIENT_SECRET env var)
+            cache_path: Path to OAuth token cache file (default: from config)
         """
         self._client_id = client_id
         self._client_secret = client_secret
+        self._cache_path = cache_path or get_spotify_cache_path()
         self._sp: Optional["spotipy.Spotify"] = None
         self._auth_manager: Optional["SpotifyOAuth"] = None
+        self._cache_mtime: Optional[float] = None  # Track file modification time
         self._search_limit = 10
+
+    def invalidate(self) -> None:
+        """Clear cached client to force re-authentication on next use.
+
+        Call this after updating the OAuth token file to pick up new credentials
+        without restarting the server.
+        """
+        self._sp = None
+        self._auth_manager = None
+        self._cache_mtime = None
+        logger.info("SpotifyProvider invalidated, will reload credentials on next use")
 
     @property
     def name(self) -> str:
@@ -70,7 +91,20 @@ class SpotifyProvider(Provider):
 
         Raises SpotifyAuthError immediately if no cached token exists,
         preventing blocking browser-based OAuth on headless servers.
+
+        Automatically detects when the cache file has been updated and
+        reloads credentials without requiring a server restart.
         """
+        # Check if cache file changed since last load (hot-reload support)
+        if self._sp is not None and self._cache_mtime is not None:
+            try:
+                current_mtime = os.path.getmtime(self._cache_path)
+                if current_mtime != self._cache_mtime:
+                    logger.info("Spotify token file changed, reloading credentials...")
+                    self.invalidate()
+            except OSError:
+                pass  # File may not exist, continue with existing client
+
         if self._sp is not None:
             return self._sp
 
@@ -87,6 +121,7 @@ class SpotifyProvider(Provider):
                 client_id=self._client_id,
                 client_secret=self._client_secret,
                 scope=" ".join(SPOTIFY_SCOPES),
+                cache_path=self._cache_path,
             )
 
             # Check for cached token BEFORE any API call that might trigger
@@ -106,6 +141,12 @@ class SpotifyProvider(Provider):
                 )
 
             self._sp = spotipy.Spotify(auth_manager=self._auth_manager)
+
+            # Track file mtime for hot-reload detection
+            try:
+                self._cache_mtime = os.path.getmtime(self._cache_path)
+            except OSError:
+                self._cache_mtime = None
 
             # Verify auth works
             user = self._sp.current_user()

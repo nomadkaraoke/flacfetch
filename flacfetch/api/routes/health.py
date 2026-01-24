@@ -12,7 +12,6 @@ from ..models import (
     DiskHealth,
     HealthResponse,
     ProvidersHealth,
-    TorrentSummaryItem,
     TransmissionHealth,
     YtdlpHealth,
 )
@@ -107,8 +106,7 @@ def _check_transmission() -> TransmissionHealth:
         session = client.get_session()
         torrents = client.get_torrents()
 
-        # Build summary list
-        torrent_list = []
+        # Calculate summary stats (no individual torrent details)
         seeding_count = 0
         total_size = 0
         total_uploaded = 0
@@ -124,15 +122,6 @@ def _check_transmission() -> TransmissionHealth:
             if status_str in ['seeding', 'seed_pending']:
                 seeding_count += 1
 
-            torrent_list.append(TorrentSummaryItem(
-                id=t.id,
-                name=t.name,
-                status=status_str,
-                progress=t.progress if hasattr(t, 'progress') else 0,
-                size_mb=round(size / (1024 * 1024), 2),
-                ratio=t.ratio if hasattr(t, 'ratio') else 0,
-            ))
-
         return TransmissionHealth(
             available=True,
             version=session.version if hasattr(session, 'version') else None,
@@ -140,7 +129,6 @@ def _check_transmission() -> TransmissionHealth:
             seeding_torrents=seeding_count,
             total_size_mb=round(total_size / (1024 * 1024), 2),
             total_uploaded_mb=round(total_uploaded / (1024 * 1024), 2),
-            torrents=torrent_list,
         )
     except ImportError:
         return TransmissionHealth(
