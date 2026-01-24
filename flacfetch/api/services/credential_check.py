@@ -13,6 +13,8 @@ from typing import Optional
 
 import httpx
 
+from ...core.config import get_spotify_cache_path, get_youtube_cookies_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -58,8 +60,8 @@ def check_spotify_credentials() -> CredentialCheckResult:
             fix_command="Set SPOTIPY_CLIENT_ID and SPOTIPY_CLIENT_SECRET in GCP Secret Manager",
         )
 
-    # Check if cache file exists
-    cache_path = "/opt/flacfetch/.cache"
+    # Check if cache file exists (use centralized path)
+    cache_path = get_spotify_cache_path()
     if not os.path.exists(cache_path):
         return CredentialCheckResult(
             service="Spotify",
@@ -157,7 +159,7 @@ def check_youtube_credentials() -> CredentialCheckResult:
 
     Tries to extract info from a video that requires authentication.
     """
-    cookies_file = os.environ.get("YOUTUBE_COOKIES_FILE", "/opt/flacfetch/youtube_cookies.txt")
+    cookies_file = get_youtube_cookies_path()
 
     if not cookies_file or not os.path.exists(cookies_file):
         # YouTube can work without cookies for most videos
@@ -253,13 +255,19 @@ def check_youtube_credentials() -> CredentialCheckResult:
 # =============================================================================
 
 def get_local_spotify_cache_path() -> str:
-    """Return the local Spotify cache path (for user's machine)."""
-    return os.path.expanduser("~/.cache-spotipy")
+    """Return the local Spotify cache path (for user's machine).
+
+    This is a convenience re-export for backwards compatibility.
+    """
+    return get_spotify_cache_path(local=True)
 
 
 def get_local_youtube_cookies_path() -> str:
-    """Return the local YouTube cookies path (for user's machine)."""
-    return os.path.expanduser("~/.flacfetch/youtube_cookies.txt")
+    """Return the local YouTube cookies path (for user's machine).
+
+    This is a convenience re-export for backwards compatibility.
+    """
+    return get_youtube_cookies_path(local=True)
 
 
 def check_local_spotify_credentials() -> CredentialCheckResult:

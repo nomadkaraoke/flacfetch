@@ -184,6 +184,30 @@ class RemoteClient:
             resp.raise_for_status()
             return resp.json()
 
+    def upload_spotify_token(self, token_content: str) -> Dict[str, Any]:
+        """
+        Upload Spotify OAuth token to the remote server (immediate effect).
+
+        The server will write the token to the cache file and invalidate
+        the SpotifyProvider, making the new credentials active immediately
+        without requiring a server restart.
+
+        Args:
+            token_content: Spotify OAuth token JSON (content of .cache file)
+
+        Returns:
+            Response dict with success status and message
+        """
+        with httpx.Client() as client:
+            resp = client.post(
+                f"{self.base_url}/config/spotify-token",
+                headers=self._headers(),
+                json={"token": token_content},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
     def fetch_file(
         self,
         download_id: str,
@@ -690,6 +714,7 @@ def fix_command(args):
 
     # Track what was actually fixed
     spotify_fixed = False
+    spotify_needs_restart = False
     youtube_fixed = False
     any_errors = False
 
@@ -752,12 +777,12 @@ def fix_command(args):
             print(f"{Colors.DIM}Skipping Spotify (already working){Colors.RESET}\n")
         else:
             # User wants to re-auth anyway
-            spotify_fixed = _fix_spotify(client_id, client_secret, project)
+            spotify_fixed, spotify_needs_restart = _fix_spotify(client_id, client_secret, project, client)
             if not spotify_fixed:
                 any_errors = True
     else:
         print(f"{Colors.YELLOW}○ Spotify needs authentication{Colors.RESET}\n")
-        spotify_fixed = _fix_spotify(client_id, client_secret, project)
+        spotify_fixed, spotify_needs_restart = _fix_spotify(client_id, client_secret, project, client)
         if not spotify_fixed:
             any_errors = True
 
@@ -796,14 +821,17 @@ def fix_command(args):
 
     # Report what was fixed
     if spotify_fixed:
-        print(f"{Colors.GREEN}✓ Spotify credentials updated{Colors.RESET}")
+        if spotify_needs_restart:
+            print(f"{Colors.GREEN}✓ Spotify credentials updated (restart needed){Colors.RESET}")
+        else:
+            print(f"{Colors.GREEN}✓ Spotify credentials updated (active immediately){Colors.RESET}")
     if youtube_fixed:
         print(f"{Colors.GREEN}✓ YouTube cookies updated{Colors.RESET}")
     print()
 
-    # YouTube cookies are uploaded via API and take effect immediately
-    # Spotify token is uploaded to GCP Secret Manager and needs a restart
-    if spotify_fixed:
+    # Check if restart is needed
+    # Only Spotify with GCP-only upload needs restart; API upload is immediate
+    if spotify_needs_restart:
         print(f"{Colors.BOLD}━━━ Apply Changes ━━━{Colors.RESET}\n")
         print(f"{Colors.DIM}Spotify token was uploaded to GCP Secret Manager.{Colors.RESET}")
         print(f"{Colors.DIM}A server restart is needed for Spotify changes to take effect.{Colors.RESET}\n")
@@ -822,18 +850,39 @@ def fix_command(args):
                 print(f"{Colors.DIM}It may take 1-2 minutes for the server to come back online.{Colors.RESET}\n")
             else:
                 print(f"{Colors.RED}✗ Failed to restart: {result.stderr}{Colors.RESET}\n")
-    elif youtube_fixed:
-        print(f"{Colors.GREEN}YouTube cookies were uploaded via API and are active immediately.{Colors.RESET}")
+    else:
+        # No restart needed - either API upload worked or only YouTube was fixed
+        if spotify_fixed:
+            print(f"{Colors.GREEN}Spotify token was uploaded via API and is active immediately.{Colors.RESET}")
+        if youtube_fixed:
+            print(f"{Colors.GREEN}YouTube cookies were uploaded via API and are active immediately.{Colors.RESET}")
         print(f"{Colors.DIM}No server restart needed.{Colors.RESET}\n")
 
     print(f"{Colors.GREEN}Done!{Colors.RESET}\n")
 
 
-def _fix_spotify(client_id: str, client_secret: str, project: str) -> bool:
+def _fix_spotify(
+    client_id: str,
+    client_secret: str,
+    project: str,
+    remote_client: Optional["RemoteClient"] = None,
+) -> tuple[bool, bool]:
     """
     Fix Spotify credentials.
 
-    Returns True if successfully fixed, False otherwise.
+    Authenticates locally, then uploads the token via API for immediate effect
+    (no restart needed). Falls back to GCP Secret Manager if API fails.
+
+    Args:
+        client_id: Spotify app client ID
+        client_secret: Spotify app client secret
+        project: GCP project ID for Secret Manager fallback
+        remote_client: Optional RemoteClient for API upload (hot-reload)
+
+    Returns:
+        Tuple of (success, needs_restart).
+        - success: True if token was obtained and uploaded somewhere
+        - needs_restart: True if server restart is needed (GCP-only upload)
     """
     import subprocess
 
@@ -865,7 +914,40 @@ def _fix_spotify(client_id: str, client_secret: str, project: str) -> bool:
         user = sp.current_user()
         print(f"\n{Colors.GREEN}✓ Authenticated as: {user.get('display_name', user.get('id'))}{Colors.RESET}\n")
 
-        # Upload to GCP
+        # Read the token file for upload
+        with open(cache_path) as f:
+            token_content = f.read()
+
+        # Try API upload first (immediate effect, no restart needed)
+        api_uploaded = False
+        if remote_client:
+            print(f"{Colors.CYAN}Uploading token via API (immediate effect)...{Colors.RESET}")
+            try:
+                result = remote_client.upload_spotify_token(token_content)
+                if result.get("success"):
+                    print(f"{Colors.GREEN}✓ Token uploaded to server{Colors.RESET}")
+                    api_uploaded = True
+
+                    # Verify the token actually works by re-checking credentials
+                    print(f"{Colors.CYAN}Verifying token works on server...{Colors.RESET}")
+                    try:
+                        check_result = remote_client.check_credentials()
+                        spotify_status = check_result.get("services", {}).get("spotify", {})
+                        if spotify_status.get("status") == "ok":
+                            print(f"{Colors.GREEN}✓ Verified: {spotify_status.get('message')}{Colors.RESET}\n")
+                            return True, False  # Success, no restart needed
+                        else:
+                            print(f"{Colors.YELLOW}○ Token uploaded but verification failed: {spotify_status.get('message')}{Colors.RESET}")
+                            print(f"{Colors.DIM}Will also upload to GCP Secret Manager for persistence.{Colors.RESET}")
+                    except Exception as verify_err:
+                        print(f"{Colors.YELLOW}○ Could not verify: {verify_err}{Colors.RESET}")
+                        print(f"{Colors.DIM}Will also upload to GCP Secret Manager for persistence.{Colors.RESET}")
+                else:
+                    print(f"{Colors.YELLOW}○ API upload failed: {result.get('message', 'Unknown error')}{Colors.RESET}")
+            except Exception as e:
+                print(f"{Colors.YELLOW}○ API upload failed: {e}{Colors.RESET}")
+
+        # Upload to GCP Secret Manager (for persistence across restarts)
         print(f"{Colors.CYAN}Uploading token to GCP Secret Manager...{Colors.RESET}")
         result = subprocess.run(
             ["gcloud", "secrets", "versions", "add", "spotify-oauth-token",
@@ -874,15 +956,23 @@ def _fix_spotify(client_id: str, client_secret: str, project: str) -> bool:
             text=True,
         )
         if result.returncode == 0:
-            print(f"{Colors.GREEN}✓ Spotify token uploaded to GCP!{Colors.RESET}\n")
-            return True
+            print(f"{Colors.GREEN}✓ Spotify token uploaded to GCP!{Colors.RESET}")
+            if api_uploaded:
+                print(f"{Colors.GREEN}Token is active immediately (no restart needed).{Colors.RESET}\n")
+                return True, False  # Success, no restart needed
+            else:
+                print(f"{Colors.YELLOW}Note: Server restart required for GCP secret to take effect.{Colors.RESET}\n")
+                return True, True  # Success, but needs restart
         else:
-            print(f"{Colors.RED}✗ Failed to upload: {result.stderr}{Colors.RESET}\n")
-            return False
+            print(f"{Colors.RED}✗ Failed to upload to GCP: {result.stderr}{Colors.RESET}")
+            if api_uploaded:
+                print(f"{Colors.GREEN}Token is active via API (but won't persist across restarts).{Colors.RESET}\n")
+                return True, False  # Partial success
+            return False, False  # Complete failure
 
     except ImportError:
         print(f"{Colors.RED}✗ spotipy not installed. Install with: pip install spotipy{Colors.RESET}\n")
-        return False
+        return False, False
     except Exception as e:
         print(f"{Colors.RED}✗ Error: {e}{Colors.RESET}\n")
         return False

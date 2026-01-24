@@ -174,6 +174,35 @@ class DownloadManager:
         # Search cache TTL (1 hour)
         self._search_ttl_seconds = 3600
 
+    def invalidate_provider(self, provider_name: str) -> bool:
+        """Invalidate a provider to force credential reload.
+
+        Call this after updating credentials for a provider (e.g., Spotify OAuth token)
+        to make the provider reload its credentials without restarting the server.
+
+        Args:
+            provider_name: Name of the provider to invalidate (e.g., "Spotify")
+
+        Returns:
+            True if provider was found and invalidated, False otherwise
+        """
+        if self._fetch_manager is None:
+            # FetchManager not yet initialized, nothing to invalidate
+            return False
+
+        for provider in self._fetch_manager.providers:
+            if provider.name == provider_name:
+                if hasattr(provider, 'invalidate'):
+                    provider.invalidate()
+                    logger.info(f"Invalidated provider: {provider_name}")
+                    return True
+                else:
+                    logger.warning(f"Provider {provider_name} does not support invalidation")
+                    return False
+
+        logger.warning(f"Provider not found: {provider_name}")
+        return False
+
     def _get_fetch_manager(self):
         """Lazily initialize and return the FetchManager."""
         if self._fetch_manager is None:
