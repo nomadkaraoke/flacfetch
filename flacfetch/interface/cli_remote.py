@@ -975,7 +975,7 @@ def _fix_spotify(
         return False, False
     except Exception as e:
         print(f"{Colors.RED}✗ Error: {e}{Colors.RESET}\n")
-        return False
+        return False, False
 
 
 def _fix_youtube(client: Optional["RemoteClient"], project: str) -> tuple[bool, bool]:
