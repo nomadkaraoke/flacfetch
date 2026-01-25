@@ -21,8 +21,12 @@ graph TD
     FM --> Downloaders
     
     subgraph Providers
+        Gazelle[GazelleProvider base]
         RED[REDProvider]
+        OPS[OPSProvider]
         YouTube[YoutubeProvider]
+        RED --> Gazelle
+        OPS --> Gazelle
     end
     
     subgraph Downloaders
@@ -82,8 +86,15 @@ The `FetchManager` implements a weighted sort key:
 
 ## 3. Implementation Details
 
-### RED Provider
-*   **Lazy Loading**: Fetching file lists for *every* search result is slow. We implemented a default search limit (20 groups) to prevent rate-limiting while still finding the best match.
+### Gazelle Provider (Base Class)
+Both RED and OPS inherit from `GazelleProvider`, which provides shared functionality:
+*   **Sphinx Query Sanitization**: Escapes all 24 special characters that break Sphinx extended query syntax (based on Gazelle's `sph_escape_string()`). Includes wildcards (`?`, `*`), boolean operators (`|`, `-`, `&`), field operators (`@`, `~`, `<`, `>`), and separators (`:`, `[`, `]`, etc.).
+*   **File List Parsing**: Parses the `fileList` format (`filename{{{size}}}|||...`) and matches against track titles.
+*   **Quality Parsing**: Extracts format, bit depth, bitrate, and media source from torrent metadata.
+*   **Torrent Caching**: Caches downloaded `.torrent` files to `~/.flacfetch/cache/`.
+
+### RED/OPS Providers
+*   **Lazy Loading**: Fetching file lists for *every* search result is slow. We implemented a default search limit (10 groups) to prevent rate-limiting while still finding the best match.
 *   **Lossless Filter**: Hard-coded to only return `FLAC` results to ensure archival quality from trackers.
 *   **Base URL Required**: The `base_url` constructor parameter is mandatory; if not provided, an error is raised.
 
