@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock
 
 from flacfetch.core.models import AudioFormat, TrackQuery
+from flacfetch.providers.gazelle import GazelleProvider
 from flacfetch.providers.ops import OPSProvider
 
 # Mock base URL for testing (no real URLs in codebase)
@@ -49,6 +50,12 @@ SAMPLE_GROUP_RESPONSE = {
         ]
     }
 }
+
+def test_ops_inherits_from_gazelle():
+    """Verify OPSProvider inherits sanitization from GazelleProvider."""
+    provider = OPSProvider(api_key="test", base_url=MOCK_BASE_URL)
+    assert isinstance(provider, GazelleProvider)
+    # The comprehensive sanitization tests are in test_gazelle.py
 
 def test_ops_lossless_filtering():
     provider = OPSProvider(api_key="test", base_url=MOCK_BASE_URL)
@@ -164,44 +171,21 @@ def test_ops_html_entity_decoding():
     assert releases[0].target_file == "05 - Salute & Piri - Luv Stuck.flac"
     assert "&amp;" not in releases[0].target_file
 
-def test_ops_filelist_sanitization():
-    """Test that special characters are removed from filelist queries.
+def test_ops_requires_base_url():
+    """Test that OPSProvider raises ValueError if base_url is not provided."""
+    try:
+        OPSProvider(api_key="test", base_url="")
+        raise AssertionError("Should have raised ValueError")
+    except ValueError as e:
+        assert "base_url is required" in str(e)
 
-    Sphinx (the search engine used by OPS) treats certain characters as
-    special operators that break the search:
-    - : (colon) - field search operator
-    - / (slash) - path separator
-    - () (parentheses) - grouping
-    - [] (brackets) - character classes
-    - ! (exclamation) - NOT operator
-    - , (comma) - separator
-    - . (period) - wildcard
-    - ; (semicolon) - separator
-    """
-    provider = OPSProvider("fake_api_key", base_url=MOCK_BASE_URL)
+    try:
+        OPSProvider(api_key="test", base_url=None)
+        raise AssertionError("Should have raised ValueError")
+    except (ValueError, TypeError):
+        pass  # Expected
 
-    # Test cases: (input, expected_output)
-    test_cases = [
-        ("Flight 717: Going To Denmark", "Flight 717 Going To Denmark"),
-        ("Track (feat. Artist)", "Track feat Artist"),
-        ("Song [Remix]", "Song Remix"),
-        ("Part 1/3", "Part 1 3"),
-        ("No! Way!", "No Way"),
-        ("Item 1, 2, 3", "Item 1 2 3"),
-        ("End. Start", "End Start"),
-        ("Part A; Part B", "Part A Part B"),
-        # Multiple special chars should be collapsed to single space
-        ("Track::(Remix)", "Track Remix"),
-        # Hyphens and ampersands should be preserved (they work in Sphinx)
-        ("Track - Artist", "Track - Artist"),
-        ("Artist & Artist", "Artist & Artist"),
-        # Apostrophes should be removed (they break Sphinx search)
-        ("I'm With You", "I m With You"),
-        ("Don't Stop", "Don t Stop"),
-        ("Rock 'n' Roll", "Rock n Roll"),
-    ]
-
-    for input_query, expected in test_cases:
-        result = provider._sanitize_filelist_query(input_query)
-        assert result == expected, f"Failed for '{input_query}': got '{result}', expected '{expected}'"
-
+def test_ops_provider_name():
+    """Test that OPSProvider returns 'OPS' as its name."""
+    provider = OPSProvider(api_key="test", base_url=MOCK_BASE_URL)
+    assert provider.name == "OPS"

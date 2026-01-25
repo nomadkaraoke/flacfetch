@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-01-25
+
+### Fixed
+- Fixed tracker search failing for tracks with `?` and other Sphinx wildcard characters
+- Song titles like "Is It Any Wonder?" now return tracker results instead of only YouTube
+- Complete sanitization of all 24 Sphinx special characters based on Gazelle's `sph_escape_string()`
+
+### Changed
+- Refactored RED and OPS providers to inherit from new `GazelleProvider` base class
+- Reduced code duplication by extracting shared Gazelle tracker functionality
+- Improved code organization with single source of truth for Sphinx query sanitization
+
+### Added
+- `GazelleProvider` base class with shared functionality for Gazelle-based trackers
+- Comprehensive test suite for Sphinx query sanitization (68 test cases)
+- Tests for international character preservation (CJK, Cyrillic, Arabic, Hebrew, etc.)
+
 ## [0.8.2] - 2025-12-24
 
 ### Added
