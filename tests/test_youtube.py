@@ -294,6 +294,21 @@ class TestCheckYoutubeAvailability:
             assert result.is_geo_restricted is True
             assert "geographic" in result.error.lower() or "country" in result.error.lower()
 
+    def test_video_unavailable_with_country_keyword(self):
+        """Test 'not available in your country' triggers explicit geo-restriction."""
+        with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
+            mock_instance = MagicMock()
+            mock_yt_dlp.return_value.__enter__.return_value = mock_instance
+            mock_instance.extract_info.side_effect = yt_dlp.utils.ExtractorError(
+                "Video unavailable. This video is not available in your country"
+            )
+
+            result = check_youtube_availability("country-blocked")
+
+            assert result.available is False
+            assert result.is_geo_restricted is True
+            assert "country" in result.error.lower()
+
     def test_private_video(self):
         with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
             mock_instance = MagicMock()
