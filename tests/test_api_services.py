@@ -1,9 +1,11 @@
 """
 Tests for flacfetch API services (download manager, disk manager).
 """
+import asyncio
 import tempfile
 from datetime import datetime
-from unittest.mock import Mock
+from pathlib import Path
+from unittest.mock import Mock, patch
 
 from flacfetch.api.models import DownloadStatus
 from flacfetch.api.services.disk_manager import DiskManager
@@ -331,4 +333,98 @@ class TestSearchCache:
 
         assert cache.created_at is not None
         assert isinstance(cache.created_at, datetime)
+
+
+class TestDownloadManagerAsync:
+    """Tests for DownloadManager async execution methods."""
+
+    def test_execute_download_uses_thread_executor(self):
+        """Verify execute_download runs manager.download in a thread executor, not on the event loop."""
+        dm = DownloadManager(download_dir="/tmp/test-downloads")
+
+        search = SearchCache(search_id="s1", artist="Test", title="Song", results=[
+            Mock(source_name="YouTube", artist="Test", title="Song"),
+        ])
+        dm._searches["s1"] = search
+
+        task = DownloadTask(
+            download_id="dl_test1",
+            search_id="s1",
+            result_index=0,
+            output_filename="test.flac",
+        )
+        dm._downloads["dl_test1"] = task
+
+        mock_manager = Mock()
+        mock_manager.download.return_value = Path("/tmp/test.flac")
+
+        async def run():
+            with patch.object(dm, '_get_fetch_manager', return_value=mock_manager):
+                await dm.execute_download("dl_test1")
+
+        asyncio.new_event_loop().run_until_complete(run())
+
+        mock_manager.download.assert_called_once()
+        assert dm.get_download("dl_test1").status == DownloadStatus.COMPLETE
+
+    def test_execute_download_by_id_uses_thread_executor(self):
+        """Verify execute_download_by_id runs manager.download_by_id in a thread executor."""
+        dm = DownloadManager(download_dir="/tmp/test-downloads")
+
+        task = DownloadTask(
+            download_id="dl_test2",
+            provider="Spotify",
+            source_id="abc123",
+        )
+        dm._downloads["dl_test2"] = task
+
+        mock_manager = Mock()
+        mock_manager.download_by_id.return_value = Path("/tmp/test.flac")
+
+        async def run():
+            with patch.object(dm, '_get_fetch_manager', return_value=mock_manager):
+                await dm.execute_download_by_id("dl_test2")
+
+        asyncio.new_event_loop().run_until_complete(run())
+
+        mock_manager.download_by_id.assert_called_once()
+        assert dm.get_download("dl_test2").status == DownloadStatus.COMPLETE
+
+    def test_execute_download_does_not_block_event_loop(self):
+        """Verify a slow download doesn't block concurrent async tasks."""
+        import time
+
+        dm = DownloadManager(download_dir="/tmp/test-downloads")
+
+        task = DownloadTask(
+            download_id="dl_slow",
+            provider="Spotify",
+            source_id="slow123",
+        )
+        dm._downloads["dl_slow"] = task
+
+        def slow_download(**kwargs):
+            time.sleep(0.5)
+            return Path("/tmp/slow.flac")
+
+        mock_manager = Mock()
+        mock_manager.download_by_id.side_effect = slow_download
+
+        async def run_test():
+            concurrent_completed = False
+
+            async def concurrent_task():
+                nonlocal concurrent_completed
+                await asyncio.sleep(0.1)
+                concurrent_completed = True
+
+            with patch.object(dm, '_get_fetch_manager', return_value=mock_manager):
+                await asyncio.gather(
+                    dm.execute_download_by_id("dl_slow"),
+                    concurrent_task(),
+                )
+
+            assert concurrent_completed
+
+        asyncio.new_event_loop().run_until_complete(run_test())
 
