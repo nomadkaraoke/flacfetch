@@ -406,12 +406,16 @@ class DownloadManager:
             if not output_filename:
                 output_filename = _generate_descriptive_filename(search, release)
 
-            # Execute download
+            # Execute download in a thread to avoid blocking the event loop
             manager = self._get_fetch_manager()
-            output_path = manager.download(
-                release,
-                self.download_dir,
-                output_filename=output_filename,
+            loop = asyncio.get_running_loop()
+            output_path = await loop.run_in_executor(
+                None,
+                lambda: manager.download(
+                    release,
+                    self.download_dir,
+                    output_filename=output_filename,
+                ),
             )
 
             self.update_download(
@@ -500,15 +504,19 @@ class DownloadManager:
 
             logger.info(f"Starting direct download: {task.provider} ID={task.source_id}")
 
-            # Execute download using FetchManager.download_by_id
+            # Execute download in a thread to avoid blocking the event loop
             manager = self._get_fetch_manager()
-            output_path = manager.download_by_id(
-                source_name=task.provider,
-                source_id=task.source_id,
-                output_path=self.download_dir,
-                output_filename=task.output_filename,
-                target_file=task.target_file,
-                download_url=task.download_url,
+            loop = asyncio.get_running_loop()
+            output_path = await loop.run_in_executor(
+                None,
+                lambda: manager.download_by_id(
+                    source_name=task.provider,
+                    source_id=task.source_id,
+                    output_path=self.download_dir,
+                    output_filename=task.output_filename,
+                    target_file=task.target_file,
+                    download_url=task.download_url,
+                ),
             )
 
             self.update_download(
