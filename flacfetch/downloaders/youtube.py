@@ -143,7 +143,7 @@ def check_youtube_availability(
             is_geo_restricted=True,
         )
 
-    except yt_dlp.utils.ExtractorError as e:
+    except (yt_dlp.utils.ExtractorError, yt_dlp.utils.DownloadError) as e:
         error_str = str(e).lower()
         result = YoutubeAvailability(
             available=False,

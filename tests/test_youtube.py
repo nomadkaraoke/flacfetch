@@ -279,13 +279,28 @@ class TestCheckYoutubeAvailability:
             assert result.is_geo_restricted is True
             assert "not available" in result.error.lower()
 
-    def test_video_unavailable_generic(self):
-        """Test generic 'Video unavailable' error (common for geo-restricted content)."""
+    def test_video_unavailable_generic_extractor_error(self):
+        """Test generic 'Video unavailable' via ExtractorError."""
         with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
             mock_instance = MagicMock()
             mock_yt_dlp.return_value.__enter__.return_value = mock_instance
             mock_instance.extract_info.side_effect = yt_dlp.utils.ExtractorError(
                 "Video unavailable. This video is not available"
+            )
+
+            result = check_youtube_availability("-yV25PrHglw")
+
+            assert result.available is False
+            assert result.is_geo_restricted is True
+            assert "geographic" in result.error.lower() or "country" in result.error.lower()
+
+    def test_video_unavailable_download_error(self):
+        """Test 'Video unavailable' via DownloadError (real yt-dlp behavior)."""
+        with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
+            mock_instance = MagicMock()
+            mock_yt_dlp.return_value.__enter__.return_value = mock_instance
+            mock_instance.extract_info.side_effect = yt_dlp.utils.DownloadError(
+                "ERROR: [youtube] -yV25PrHglw: Video unavailable. This video is not available"
             )
 
             result = check_youtube_availability("-yV25PrHglw")
