@@ -174,6 +174,27 @@ class CleanupResponse(BaseModel):
 
 
 # =============================================================================
+# YouTube Availability Models
+# =============================================================================
+
+class CheckYoutubeRequest(BaseModel):
+    """Request to check YouTube video availability."""
+    url: str = Field(..., description="YouTube video URL or video ID")
+
+
+class CheckYoutubeResponse(BaseModel):
+    """Response from YouTube availability check."""
+    available: bool
+    video_id: str
+    title: Optional[str] = None
+    error: Optional[str] = None
+    is_geo_restricted: bool = False
+    is_age_restricted: bool = False
+    is_private: bool = False
+    is_removed: bool = False
+
+
+# =============================================================================
 # Health Models
 # =============================================================================
 

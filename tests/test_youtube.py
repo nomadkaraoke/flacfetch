@@ -1,7 +1,13 @@
-"""Tests for YouTube provider"""
+"""Tests for YouTube provider and availability checking"""
 from unittest.mock import MagicMock, patch
 
+import yt_dlp
+
 from flacfetch.core.models import AudioFormat, TrackQuery
+from flacfetch.downloaders.youtube import (
+    check_youtube_availability,
+    extract_video_id,
+)
 from flacfetch.providers.youtube import YoutubeProvider
 
 
@@ -211,4 +217,169 @@ class TestYoutubeProvider:
 
         result = provider.fetch_artifact(release)
         assert result is None
+
+
+class TestExtractVideoId:
+    """Test YouTube video ID extraction from various URL formats."""
+
+    def test_bare_video_id(self):
+        assert extract_video_id("dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+
+    def test_bare_video_id_with_hyphen(self):
+        assert extract_video_id("-yV25PrHglw") == "-yV25PrHglw"
+
+    def test_standard_url(self):
+        assert extract_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+
+    def test_short_url(self):
+        assert extract_video_id("https://youtu.be/dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+
+    def test_embed_url(self):
+        assert extract_video_id("https://www.youtube.com/embed/dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+
+    def test_url_with_extra_params(self):
+        assert extract_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=30") == "dQw4w9WgXcQ"
+
+    def test_unparseable_returns_as_is(self):
+        assert extract_video_id("not-a-url") == "not-a-url"
+
+
+class TestCheckYoutubeAvailability:
+    """Test YouTube availability checking."""
+
+    def test_available_video(self):
+        with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
+            mock_instance = MagicMock()
+            mock_yt_dlp.return_value.__enter__.return_value = mock_instance
+            mock_instance.extract_info.return_value = {
+                'title': 'Test Video',
+                'id': 'dQw4w9WgXcQ',
+            }
+
+            result = check_youtube_availability("dQw4w9WgXcQ")
+
+            assert result.available is True
+            assert result.video_id == "dQw4w9WgXcQ"
+            assert result.title == "Test Video"
+            assert result.error is None
+            assert result.is_geo_restricted is False
+
+    def test_geo_restricted_video(self):
+        with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
+            mock_instance = MagicMock()
+            mock_yt_dlp.return_value.__enter__.return_value = mock_instance
+            mock_instance.extract_info.side_effect = yt_dlp.utils.GeoRestrictedError(
+                "This video is not available in your country"
+            )
+
+            result = check_youtube_availability("geo-blocked-id1")
+
+            assert result.available is False
+            assert result.video_id == "geo-blocked-id1"
+            assert result.is_geo_restricted is True
+            assert "not available" in result.error.lower()
+
+    def test_video_unavailable_generic(self):
+        """Test generic 'Video unavailable' error (common for geo-restricted content)."""
+        with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
+            mock_instance = MagicMock()
+            mock_yt_dlp.return_value.__enter__.return_value = mock_instance
+            mock_instance.extract_info.side_effect = yt_dlp.utils.ExtractorError(
+                "Video unavailable. This video is not available"
+            )
+
+            result = check_youtube_availability("-yV25PrHglw")
+
+            assert result.available is False
+            assert result.is_geo_restricted is True
+            assert "geographic" in result.error.lower() or "country" in result.error.lower()
+
+    def test_video_unavailable_with_country_keyword(self):
+        """Test 'not available in your country' triggers explicit geo-restriction."""
+        with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
+            mock_instance = MagicMock()
+            mock_yt_dlp.return_value.__enter__.return_value = mock_instance
+            mock_instance.extract_info.side_effect = yt_dlp.utils.ExtractorError(
+                "Video unavailable. This video is not available in your country"
+            )
+
+            result = check_youtube_availability("country-blocked")
+
+            assert result.available is False
+            assert result.is_geo_restricted is True
+            assert "country" in result.error.lower()
+
+    def test_private_video(self):
+        with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
+            mock_instance = MagicMock()
+            mock_yt_dlp.return_value.__enter__.return_value = mock_instance
+            mock_instance.extract_info.side_effect = yt_dlp.utils.ExtractorError(
+                "This video is private"
+            )
+
+            result = check_youtube_availability("private-id")
+
+            assert result.available is False
+            assert result.is_private is True
+            assert result.is_geo_restricted is False
+
+    def test_removed_video(self):
+        with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
+            mock_instance = MagicMock()
+            mock_yt_dlp.return_value.__enter__.return_value = mock_instance
+            mock_instance.extract_info.side_effect = yt_dlp.utils.ExtractorError(
+                "Video has been removed by the uploader"
+            )
+
+            result = check_youtube_availability("removed-id")
+
+            assert result.available is False
+            assert result.is_removed is True
+            assert result.is_geo_restricted is False
+
+    def test_age_restricted_video(self):
+        with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
+            mock_instance = MagicMock()
+            mock_yt_dlp.return_value.__enter__.return_value = mock_instance
+            mock_instance.extract_info.side_effect = yt_dlp.utils.ExtractorError(
+                "Sign in to confirm your age"
+            )
+
+            result = check_youtube_availability("age-id")
+
+            assert result.available is False
+            assert result.is_age_restricted is True
+            assert result.is_geo_restricted is False
+
+    def test_unexpected_error(self):
+        with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
+            mock_instance = MagicMock()
+            mock_yt_dlp.return_value.__enter__.return_value = mock_instance
+            mock_instance.extract_info.side_effect = RuntimeError("Network timeout")
+
+            result = check_youtube_availability("some-id")
+
+            assert result.available is False
+            assert "Network timeout" in result.error
+
+    def test_no_info_returned(self):
+        with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
+            mock_instance = MagicMock()
+            mock_yt_dlp.return_value.__enter__.return_value = mock_instance
+            mock_instance.extract_info.return_value = None
+
+            result = check_youtube_availability("null-id")
+
+            assert result.available is False
+
+    def test_accepts_full_url(self):
+        with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
+            mock_instance = MagicMock()
+            mock_yt_dlp.return_value.__enter__.return_value = mock_instance
+            mock_instance.extract_info.return_value = {'title': 'Test', 'id': 'abc123xyz9_'}
+
+            result = check_youtube_availability("https://www.youtube.com/watch?v=abc123xyz9_")
+
+            assert result.available is True
+            assert result.video_id == "abc123xyz9_"
 

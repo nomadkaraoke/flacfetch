@@ -9,6 +9,8 @@ from fastapi.responses import FileResponse
 
 from ..auth import verify_api_key
 from ..models import (
+    CheckYoutubeRequest,
+    CheckYoutubeResponse,
     DownloadByIdRequest,
     DownloadRequest,
     DownloadStartResponse,
@@ -265,6 +267,57 @@ async def download_file(
         path=task.output_path,
         filename=filename,
         media_type=media_type,
+    )
+
+
+@router.post("/check-youtube", response_model=CheckYoutubeResponse)
+async def check_youtube_availability_endpoint(
+    request: CheckYoutubeRequest,
+    api_key: str = Depends(verify_api_key),
+) -> CheckYoutubeResponse:
+    """
+    Check if a YouTube video is available for download from this server's location.
+
+    Use this endpoint to validate YouTube URLs early (e.g., at job creation time)
+    before committing to a download. Detects geo-restrictions, private/removed
+    videos, and other unavailability reasons.
+
+    This is particularly useful when users submit YouTube URLs from a different
+    country than where the flacfetch server is hosted, as YouTube content
+    availability varies by region.
+    """
+    import asyncio
+
+    from flacfetch.downloaders.youtube import check_youtube_availability
+
+    logger.info(f"Checking YouTube availability for: {request.url}")
+
+    # Run the blocking yt-dlp call in a thread pool
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None,
+        check_youtube_availability,
+        request.url,
+    )
+
+    if result.available:
+        logger.info(f"YouTube video {result.video_id} is available: {result.title}")
+    else:
+        logger.warning(
+            f"YouTube video {result.video_id} is NOT available: {result.error} "
+            f"(geo={result.is_geo_restricted}, private={result.is_private}, "
+            f"removed={result.is_removed}, age={result.is_age_restricted})"
+        )
+
+    return CheckYoutubeResponse(
+        available=result.available,
+        video_id=result.video_id,
+        title=result.title,
+        error=result.error,
+        is_geo_restricted=result.is_geo_restricted,
+        is_age_restricted=result.is_age_restricted,
+        is_private=result.is_private,
+        is_removed=result.is_removed,
     )
 
 

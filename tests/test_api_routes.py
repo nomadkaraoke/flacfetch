@@ -126,6 +126,46 @@ class TestTorrentRoute:
         assert req.target_free_gb == 20.0
 
 
+class TestCheckYoutubeRoute:
+    """Tests for /check-youtube endpoint logic."""
+
+    def test_check_youtube_request_validation(self):
+        """Test check youtube request validation."""
+        from flacfetch.api.models import CheckYoutubeRequest
+
+        req = CheckYoutubeRequest(url="https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        assert req.url == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+        req = CheckYoutubeRequest(url="-yV25PrHglw")
+        assert req.url == "-yV25PrHglw"
+
+    def test_check_youtube_response_available(self):
+        """Test check youtube response for available video."""
+        from flacfetch.api.models import CheckYoutubeResponse
+
+        resp = CheckYoutubeResponse(
+            available=True,
+            video_id="dQw4w9WgXcQ",
+            title="Rick Astley - Never Gonna Give You Up",
+        )
+        assert resp.available is True
+        assert resp.is_geo_restricted is False
+
+    def test_check_youtube_response_geo_restricted(self):
+        """Test check youtube response for geo-restricted video."""
+        from flacfetch.api.models import CheckYoutubeResponse
+
+        resp = CheckYoutubeResponse(
+            available=False,
+            video_id="-yV25PrHglw",
+            error="This video is not available in your server's country/region.",
+            is_geo_restricted=True,
+        )
+        assert resp.available is False
+        assert resp.is_geo_restricted is True
+        assert resp.is_private is False
+
+
 class TestHealthRoute:
     """Tests for /health endpoint."""
 
