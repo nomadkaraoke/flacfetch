@@ -116,8 +116,9 @@ async def run_keeper():
             f"Spotify every {SPOTIFY_REFRESH_INTERVAL // 3600}h"
         )
 
-        last_youtube_refresh = 0.0
-        last_spotify_refresh = 0.0
+        # Initialize to trigger immediately on first loop iteration
+        last_youtube_refresh = float("-inf")
+        last_spotify_refresh = float("-inf")
 
         while True:
             now = asyncio.get_event_loop().time()
