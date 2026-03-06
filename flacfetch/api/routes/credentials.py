@@ -1,7 +1,9 @@
 """
 Credential health check endpoints for flacfetch HTTP API.
 """
+import json
 import logging
+import os
 
 from fastapi import APIRouter, Depends, Query
 
@@ -64,3 +66,22 @@ async def check_youtube(
         "fix_command": result.fix_command,
         "tested_at": result.tested_at.isoformat(),
     }
+
+
+@router.get("/credentials/keeper-status")
+async def get_keeper_status(
+    api_key: str = Depends(verify_api_key),
+):
+    """Get the status of the credential keeper (browser automation service)."""
+    status_file = os.environ.get(
+        "KEEPER_STATUS_FILE",
+        "/mnt/flacfetch-data/browser-profiles/keeper-status.json",
+    )
+
+    try:
+        with open(status_file) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {"status": "not_running", "message": "Credential keeper status file not found"}
+    except json.JSONDecodeError:
+        return {"status": "error", "message": "Credential keeper status file is corrupted"}

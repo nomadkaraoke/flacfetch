@@ -51,6 +51,10 @@ spotify = [
 ejs = [
     "yt-dlp-ejs>=0.3.0",
 ]
+keeper = [
+    "patchright>=0.1.0",
+    "httpx>=0.28.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-mock>=3.10.0",
@@ -94,7 +98,7 @@ flacfetch = "flacfetch.interface.cli:main"
 flacfetch-remote = "flacfetch.interface.cli_remote:main"
 
 [tool.setuptools]
-packages = ["flacfetch", "flacfetch.core", "flacfetch.providers", "flacfetch.downloaders", "flacfetch.interface", "flacfetch.api", "flacfetch.api.routes", "flacfetch.api.services"]
+packages = ["flacfetch", "flacfetch.core", "flacfetch.providers", "flacfetch.downloaders", "flacfetch.interface", "flacfetch.api", "flacfetch.api.routes", "flacfetch.api.services", "flacfetch.credential_keeper"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

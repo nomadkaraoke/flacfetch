@@ -16,6 +16,12 @@ This directory contains Pulumi infrastructure code that manages all Google Cloud
 │  │  │ Transmission │◄──►│ Flacfetch API  │◄──►│ GCS Bucket    │   │ │
 │  │  │   Daemon     │    │   :8080        │    │ (uploads)     │   │ │
 │  │  └──────────────┘    └────────────────┘    └───────────────┘   │ │
+│  │                            ▲                                     │ │
+│  │                            │ uploads cookies/tokens              │ │
+│  │  ┌─────────────────────────┴──────────────────────────────────┐ │ │
+│  │  │  Credential Keeper (Patchright + Xvfb)                      │ │ │
+│  │  │  Maintains YouTube cookies & Spotify OAuth via browser      │ │ │
+│  │  └────────────────────────────────────────────────────────────┘ │ │
 │  │         │                                                        │ │
 │  │         ▼                                                        │ │
 │  │  ┌────────────────────────────────────────────────────────────┐ │ │
@@ -25,6 +31,7 @@ This directory contains Pulumi infrastructure code that manages all Google Cloud
 │  │  │  • /transmission/downloads/     - Downloaded files          │ │ │
 │  │  │  • /transmission/config/torrents/ - .torrent metadata       │ │ │
 │  │  │  • /transmission/config/resume/   - Download state          │ │ │
+│  │  │  • /browser-profiles/google/    - Persistent browser session│ │ │
 │  │  │                                                              │ │ │
 │  │  │  ⚠️  This disk has autoDelete=false                         │ │ │
 │  │  │     Torrent data survives VM deletion!                      │ │ │
@@ -53,6 +60,8 @@ This directory contains Pulumi infrastructure code that manages all Google Cloud
 | `flacfetch-api-key` | Secret | API authentication key |
 | `red-api-key/url` | Secrets | RED tracker API credentials |
 | `ops-api-key/url` | Secrets | OPS tracker API credentials |
+| `flacfetch-account-email` | Secret | Google account for credential keeper |
+| `flacfetch-account-password` | Secret | Google account password |
 
 ## Prerequisites
 
@@ -193,6 +202,10 @@ echo -n "https://your.red.url" | gcloud secrets versions add red-api-url --data-
 # Update OPS API credentials
 echo -n "your-ops-key" | gcloud secrets versions add ops-api-key --data-file=-
 echo -n "https://your.ops.url" | gcloud secrets versions add ops-api-url --data-file=-
+
+# Update credential keeper account (for browser automation)
+echo -n "nomadflacfetch@gmail.com" | gcloud secrets versions add flacfetch-account-email --data-file=-
+echo -n "your-google-password" | gcloud secrets versions add flacfetch-account-password --data-file=-
 ```
 
 ## Monitoring
@@ -213,8 +226,13 @@ curl http://104.198.214.26:8080/torrents -H "X-API-Key: YOUR_KEY"
 View VM logs:
 
 ```bash
+# Flacfetch API logs
 gcloud compute ssh flacfetch-service --zone=us-central1-a \
   --command="sudo journalctl -u flacfetch -f"
+
+# Credential keeper logs
+gcloud compute ssh flacfetch-service --zone=us-central1-a \
+  --command="sudo tail -f /var/log/flacfetch-credential-keeper.log"
 ```
 
 ## Troubleshooting
@@ -258,11 +276,11 @@ pulumi refresh  # Sync state with actual cloud resources
 
 | Resource | Monthly Cost (approx) |
 |----------|----------------------|
-| e2-small VM (24/7) | ~$12 |
+| e2-medium VM (24/7) | ~$24 |
 | 30GB SSD boot disk | ~$5 |
 | 50GB standard data disk | ~$2 |
 | Static IP | ~$3 |
-| **Total** | **~$22/month** |
+| **Total** | **~$34/month** |
 
 ## Integration with karaoke-gen
 
