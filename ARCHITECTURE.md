@@ -102,7 +102,32 @@ Both RED and OPS inherit from `GazelleProvider`, which provides shared functiona
 *   **Topic Search**: Appends "topic" to search queries to surface auto-generated "Art Tracks" (high quality, static image) which are preferred over user uploads.
 *   **URL Handling**: Constructs `youtu.be` short links for easy sharing/checking.
 
-## 4. Future Improvements
+## 4. Credential Keeper
+
+The credential keeper is a browser automation subsystem that runs alongside the flacfetch API on the GCE VM. It maintains a persistent Chrome session logged into Google, using it to auto-renew both YouTube cookies and Spotify OAuth tokens.
+
+### Architecture
+
+```
+credential-keeper (systemd service)
+├── keeper.py          - Scheduling loop (YouTube every 8h, Spotify every 12h)
+├── browser.py         - Patchright browser lifecycle (persistent profile, Xvfb)
+├── google_login.py    - Google account login/session verification
+├── youtube.py         - Cookie extraction in Netscape format + upload via API
+└── spotify.py         - OAuth flow via "Continue with Google" + token exchange
+```
+
+### Key Design Decisions
+
+*   **Patchright over stock Playwright**: Google aggressively detects automation. Patchright removes `navigator.webdriver`, patches the chrome object, and bypasses CDP detection.
+*   **Headed mode via Xvfb**: Many bot detectors probe headless-specific behaviors. Running headed on a virtual display avoids this.
+*   **Single persistent browser profile**: One Chrome profile logged into `nomadflacfetch@gmail.com` handles both YouTube (cookies from Google session) and Spotify (via "Continue with Google" SSO).
+*   **Profile on persistent disk**: Stored at `/mnt/flacfetch-data/browser-profiles/google/` so the session survives VM restarts without re-login.
+*   **No residential proxy**: The VM has a static IP and this is a single account accessing its own data, not scraping.
+*   **Polling over `wait_for_selector`**: Patchright has a bug under systemd where `wait_for_selector` times out even when the element exists. The keeper uses `query_selector` polling as a workaround.
+*   **Request event listener for OAuth redirect**: Spotify redirects to `localhost:8888/callback` which Chrome can't load. Instead of route interception (which matched too broadly), we use `page.on("request")` to capture the redirect URL before Chrome fails.
+
+## 5. Future Improvements
 *   **Metadata Tagging**: Auto-tag downloaded files using MusicBrainz/Discogs.
 *   **Spectral Analysis**: Integrate `ffmpeg` or `sox` to verify frequency cutoffs post-download automatically.
 
