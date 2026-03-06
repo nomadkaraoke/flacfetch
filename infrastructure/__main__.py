@@ -161,6 +161,32 @@ pushbullet_api_key_secret = secretmanager.Secret(
     ),
 )
 
+# Flacfetch account credentials (for credential keeper browser automation)
+flacfetch_account_email_secret = secretmanager.Secret(
+    "flacfetch-account-email",
+    secret_id="flacfetch-account-email",
+    replication=secretmanager.SecretReplicationArgs(
+        auto=secretmanager.SecretReplicationAutoArgs(),
+    ),
+)
+
+flacfetch_account_password_secret = secretmanager.Secret(
+    "flacfetch-account-password",
+    secret_id="flacfetch-account-password",
+    replication=secretmanager.SecretReplicationArgs(
+        auto=secretmanager.SecretReplicationAutoArgs(),
+    ),
+)
+
+# Grant flacfetch service account permission to update spotify-oauth-token secret
+# Needed for credential keeper and token refresh writeback
+spotify_oauth_token_iam = secretmanager.SecretIamMember(
+    "spotify-oauth-token-writer",
+    secret_id=spotify_oauth_token_secret.id,
+    role="roles/secretmanager.secretVersionAdder",
+    member=flacfetch_sa.email.apply(lambda email: f"serviceAccount:{email}"),
+)
+
 # Grant flacfetch service account permission to update youtube-cookies secret
 # This is needed for the cookie upload API endpoint
 youtube_cookies_iam = secretmanager.SecretIamMember(
@@ -220,7 +246,7 @@ echo "========================================"
 # Install dependencies (idempotent)
 echo "Installing/updating system dependencies..."
 apt-get update
-apt-get install -y python3-pip python3-venv transmission-daemon ffmpeg git curl unzip
+apt-get install -y python3-pip python3-venv transmission-daemon ffmpeg git curl unzip xvfb
 
 # =============================================================================
 # Install librespot (for Spotify audio capture)
@@ -453,6 +479,10 @@ if [ -d "flacfetch" ]; then
 
     # Install/update yt-dlp-ejs for YouTube JS challenge solving
     pip install --upgrade yt-dlp yt-dlp-ejs --quiet
+
+    # Install credential keeper dependencies (patchright + browser)
+    pip install -e ".[keeper]" --quiet
+    patchright install chromium --quiet 2>/dev/null || python -m patchright install chromium
 else
     echo "Fresh flacfetch installation..."
     git clone https://github.com/nomadkaraoke/flacfetch.git
@@ -467,6 +497,10 @@ else
 
     # Install yt-dlp-ejs for YouTube JS challenge solving
     pip install yt-dlp-ejs
+
+    # Install credential keeper dependencies (patchright + browser)
+    pip install -e ".[keeper]"
+    patchright install chromium || python -m patchright install chromium
 fi
 
 # Get version
@@ -551,6 +585,23 @@ if [ -n "$PUSHBULLET_API_KEY" ]; then
 else
     echo "WARNING: No Pushbullet API key configured. Credential health check notifications disabled."
 fi
+
+# =============================================================================
+# Credential Keeper Account Credentials
+# =============================================================================
+FLACFETCH_ACCOUNT_EMAIL=$(gcloud secrets versions access latest --secret=flacfetch-account-email 2>/dev/null || echo "")
+FLACFETCH_ACCOUNT_PASSWORD=$(gcloud secrets versions access latest --secret=flacfetch-account-password 2>/dev/null || echo "")
+
+if [ -n "$FLACFETCH_ACCOUNT_EMAIL" ]; then
+    echo "Credential keeper account configured"
+else
+    echo "WARNING: No credential keeper account configured. Browser automation will not work."
+fi
+
+# Create browser profile directory on persistent disk
+BROWSER_PROFILE_DIR="$PERSISTENT_MOUNT/browser-profiles"
+mkdir -p "$BROWSER_PROFILE_DIR/google"
+echo "Browser profile directory: $BROWSER_PROFILE_DIR"
 
 # =============================================================================
 # Create/Update Systemd Service
@@ -787,6 +838,76 @@ echo "Running initial credential check..."
 /opt/flacfetch/check-credentials.sh || true
 
 # =============================================================================
+# Xvfb Virtual Display (for credential keeper browser)
+# =============================================================================
+echo "Creating Xvfb virtual display service..."
+
+cat > /etc/systemd/system/xvfb.service << 'XVFB_SERVICE'
+[Unit]
+Description=Xvfb Virtual Display
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/Xvfb :99 -screen 0 1280x720x24 -nolisten tcp
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+XVFB_SERVICE
+
+systemctl daemon-reload
+systemctl enable xvfb
+systemctl start xvfb
+echo "Xvfb virtual display started on :99"
+
+# =============================================================================
+# Credential Keeper Service (browser automation)
+# =============================================================================
+if [ -n "$FLACFETCH_ACCOUNT_EMAIL" ] && [ -n "$FLACFETCH_ACCOUNT_PASSWORD" ]; then
+    echo "Creating credential keeper service..."
+
+    cat > /etc/systemd/system/credential-keeper.service << KEEPER_SERVICE
+[Unit]
+Description=Flacfetch Credential Keeper (browser automation)
+After=network.target xvfb.service flacfetch.service
+Requires=xvfb.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/flacfetch
+Environment="DISPLAY=:99"
+Environment="FLACFETCH_API_KEY=${FLACFETCH_API_KEY}"
+Environment="FLACFETCH_ACCOUNT_EMAIL=${FLACFETCH_ACCOUNT_EMAIL}"
+Environment="FLACFETCH_ACCOUNT_PASSWORD=${FLACFETCH_ACCOUNT_PASSWORD}"
+Environment="SPOTIPY_CLIENT_ID=${SPOTIPY_CLIENT_ID}"
+Environment="SPOTIPY_CLIENT_SECRET=${SPOTIPY_CLIENT_SECRET}"
+Environment="SPOTIPY_REDIRECT_URI=${SPOTIPY_REDIRECT_URI}"
+Environment="PUSHBULLET_API_KEY=${PUSHBULLET_API_KEY}"
+Environment="BROWSER_PROFILE_DIR=${BROWSER_PROFILE_DIR}"
+Environment="KEEPER_STATUS_FILE=${BROWSER_PROFILE_DIR}/keeper-status.json"
+Environment="PATH=/opt/deno/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/opt/flacfetch/venv/bin/python -m flacfetch.credential_keeper
+Restart=always
+RestartSec=30
+StandardOutput=append:/var/log/flacfetch-credential-keeper.log
+StandardError=append:/var/log/flacfetch-credential-keeper.log
+
+[Install]
+WantedBy=multi-user.target
+KEEPER_SERVICE
+
+    systemctl daemon-reload
+    systemctl enable credential-keeper
+    systemctl restart credential-keeper
+    echo "Credential keeper service started"
+else
+    echo "Skipping credential keeper (no account credentials configured)"
+fi
+
+# =============================================================================
 # Summary
 # =============================================================================
 echo ""
@@ -829,6 +950,19 @@ echo "Deno: $(/opt/deno/bin/deno --version 2>/dev/null | head -1 || echo 'not in
 echo "Update timer: $(systemctl is-active ytdlp-update.timer 2>/dev/null || echo 'not configured')"
 
 echo ""
+echo "Credential Keeper Status:"
+echo "-------------------------"
+if systemctl is-active credential-keeper >/dev/null 2>&1; then
+    echo "Credential keeper: running"
+    echo "Xvfb display: $(systemctl is-active xvfb 2>/dev/null || echo 'not running')"
+    if [ -f "$BROWSER_PROFILE_DIR/keeper-status.json" ]; then
+        cat "$BROWSER_PROFILE_DIR/keeper-status.json" | python3 -m json.tool 2>/dev/null
+    fi
+else
+    echo "Credential keeper: not running"
+fi
+
+echo ""
 echo "Health Check:"
 echo "-------------"
 curl -s http://localhost:8080/health | python3 -m json.tool 2>/dev/null || echo "Health check failed"
@@ -841,7 +975,7 @@ curl -s http://localhost:8080/health | python3 -m json.tool 2>/dev/null || echo 
 flacfetch_vm = compute.Instance(
     "flacfetch-service",
     name="flacfetch-service",
-    machine_type="e2-small",  # 0.5 vCPU, 2GB RAM - sufficient for I/O-bound torrent workload
+    machine_type="e2-medium",  # 1 vCPU, 4GB RAM - needed for Chromium browser (credential keeper)
     zone=zone,
     boot_disk=compute.InstanceBootDiskArgs(
         initialize_params=compute.InstanceBootDiskInitializeParamsArgs(
@@ -936,5 +1070,7 @@ pulumi.export("secrets", {
     "spotify_oauth_token": spotify_oauth_token_secret.name,
     "pushbullet_api_key": pushbullet_api_key_secret.name,
     "youtube_cookies": youtube_cookies_secret.name,
+    "flacfetch_account_email": flacfetch_account_email_secret.name,
+    "flacfetch_account_password": flacfetch_account_password_secret.name,
 })
 

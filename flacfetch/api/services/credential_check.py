@@ -41,6 +41,47 @@ class CredentialCheckResult:
             self.tested_at = datetime.now(timezone.utc)
 
 
+def _persist_spotify_token_to_secret_manager(cache_path: str) -> None:
+    """Write the current Spotify token cache back to Secret Manager.
+
+    This ensures refreshed tokens survive VM restarts (where the startup script
+    overwrites the cache file from Secret Manager).
+    """
+    try:
+        from google.cloud import secretmanager
+
+        with open(cache_path) as f:
+            token_content = f.read()
+
+        if not token_content.strip():
+            return
+
+        project_id = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("GCP_PROJECT")
+        if not project_id:
+            import requests
+            try:
+                response = requests.get(
+                    "http://metadata.google.internal/computeMetadata/v1/project/project-id",
+                    headers={"Metadata-Flavor": "Google"},
+                    timeout=2,
+                )
+                project_id = response.text
+            except Exception:
+                logger.debug("Could not determine GCP project ID for token writeback")
+                return
+
+        client = secretmanager.SecretManagerServiceClient()
+        secret_name = f"projects/{project_id}/secrets/spotify-oauth-token"
+        client.add_secret_version(
+            request={"parent": secret_name, "payload": {"data": token_content.encode("utf-8")}}
+        )
+        logger.info("Persisted refreshed Spotify token to Secret Manager")
+    except ImportError:
+        logger.debug("google-cloud-secret-manager not installed, skipping token writeback")
+    except Exception as e:
+        logger.warning(f"Failed to persist Spotify token to Secret Manager: {e}")
+
+
 def check_spotify_credentials() -> CredentialCheckResult:
     """
     Test if Spotify OAuth credentials are working.
@@ -100,6 +141,8 @@ def check_spotify_credentials() -> CredentialCheckResult:
             logger.info("Refreshing expired Spotify token...")
             try:
                 cached_token = auth_manager.refresh_access_token(cached_token["refresh_token"])
+                # Write refreshed token back to Secret Manager so it survives VM restarts
+                _persist_spotify_token_to_secret_manager(cache_path)
             except Exception as e:
                 return CredentialCheckResult(
                     service="Spotify",
