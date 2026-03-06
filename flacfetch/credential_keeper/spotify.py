@@ -98,6 +98,9 @@ async def refresh_spotify_token(page) -> bool:
     OAuth authorize URL, clicks 'Continue with Google', and captures the
     authorization code from the redirect.
 
+    Uses route interception to capture the localhost redirect URL before Chrome
+    tries to navigate to it (which would fail since nothing is listening).
+
     Returns True if token was successfully obtained and uploaded.
     """
     try:
@@ -105,85 +108,123 @@ async def refresh_spotify_token(page) -> bool:
         redirect_uri = os.environ.get("SPOTIPY_REDIRECT_URI", "http://127.0.0.1:8888/callback")
         redirect_host = urlparse(redirect_uri).netloc  # "127.0.0.1:8888"
 
-        logger.info("Starting Spotify OAuth flow...")
-        await page.goto(oauth_url, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(2000)
+        # Capture the redirect URL via request event listener.
+        # When Spotify redirects to our localhost callback, Chrome can't load it
+        # (nothing listening), but we can capture the URL from the request event.
+        captured_url = {}
 
-        # Check if Spotify auto-approved (already authorized + logged in via Google)
-        current_url = page.url
-        if redirect_host in current_url:
-            # Already redirected - extract code
-            code = _extract_code_from_url(current_url)
-            if code:
-                logger.info("Spotify auto-approved (already authorized)")
-                token_data = await _exchange_code_for_token(code)
-                return await _upload_token(token_data)
+        def on_request(request):
+            url = request.url
+            if url.startswith(redirect_uri.rsplit("/", 1)[0]):
+                captured_url["url"] = url
+                logger.info(f"Captured redirect URL: {url[:80]}...")
 
-        # Look for "Continue with Google" button
-        google_button = None
-        for selector in [
-            'button:has-text("Continue with Google")',
-            '[data-testid="google-login-button"]',
-            'button:has-text("Google")',
-            'a:has-text("Continue with Google")',
-        ]:
-            google_button = await page.query_selector(selector)
-            if google_button:
-                break
+        page.on("request", on_request)
 
-        if not google_button:
-            # Maybe we're on the Spotify consent/agree page
-            agree_button = await page.query_selector('button[data-testid="auth-accept"]')
-            if agree_button:
-                logger.info("Clicking Spotify authorize/agree button")
-                await agree_button.click()
-                await page.wait_for_timeout(3000)
-                current_url = page.url
-                if redirect_host in current_url:
-                    code = _extract_code_from_url(current_url)
-                    if code:
-                        token_data = await _exchange_code_for_token(code)
-                        return await _upload_token(token_data)
-
-            logger.error(f"Could not find 'Continue with Google' button. Current URL: {page.url}")
-            return False
-
-        logger.info("Clicking 'Continue with Google'")
-        await google_button.click()
-
-        # Wait for the Google OAuth consent + redirect back to Spotify, then to our redirect_uri
-        # The redirect to localhost will fail (nothing listening), but we capture the URL
         try:
-            await page.wait_for_url(f"**{redirect_host}**", timeout=30000)
-        except Exception:
-            # page.wait_for_url may throw if navigation "fails" (localhost not reachable)
-            # but the URL is still captured
-            pass
+            logger.info("Starting Spotify OAuth flow...")
+            try:
+                await page.goto(oauth_url, wait_until="domcontentloaded", timeout=30000)
+            except Exception as e:
+                # If Spotify auto-redirects to localhost (which isn't listening),
+                # Chrome will throw ERR_CONNECTION_REFUSED. That's expected -
+                # we capture the URL via the request event listener.
+                if captured_url.get("url"):
+                    logger.info("Spotify redirected immediately (auto-approved, caught via request event)")
+                else:
+                    logger.warning(f"Navigation error (may be expected): {e}")
+            await page.wait_for_timeout(1000)
 
-        await page.wait_for_timeout(1000)
-        current_url = page.url
+            # Check if already redirected (auto-approved)
+            if captured_url.get("url"):
+                code = _extract_code_from_url(captured_url["url"])
+                if code:
+                    logger.info("Spotify auto-approved (already authorized)")
+                    token_data = await _exchange_code_for_token(code)
+                    return await _upload_token(token_data)
 
-        if redirect_host not in current_url:
-            # Try checking if we ended up on a Spotify consent page
-            agree_button = await page.query_selector('button[data-testid="auth-accept"]')
-            if agree_button:
-                logger.info("Clicking Spotify authorize/agree button after Google login")
-                await agree_button.click()
-                try:
-                    await page.wait_for_url(f"**{redirect_host}**", timeout=15000)
-                except Exception:
-                    pass
-                await page.wait_for_timeout(1000)
+            # Also check current URL in case Chrome followed the redirect
+            current_url = page.url
+            if redirect_host in current_url:
+                code = _extract_code_from_url(current_url)
+                if code:
+                    logger.info("Spotify auto-approved (URL redirect)")
+                    token_data = await _exchange_code_for_token(code)
+                    return await _upload_token(token_data)
+
+            # Look for "Continue with Google" button
+            google_button = None
+            for selector in [
+                'button:has-text("Continue with Google")',
+                '[data-testid="google-login-button"]',
+                'button:has-text("Google")',
+                'a:has-text("Continue with Google")',
+            ]:
+                google_button = await page.query_selector(selector)
+                if google_button:
+                    break
+
+            if not google_button:
+                # Maybe we're on the Spotify consent/agree page
+                agree_button = await page.query_selector('button[data-testid="auth-accept"]')
+                if agree_button:
+                    logger.info("Clicking Spotify authorize/agree button")
+                    await agree_button.click()
+                    await page.wait_for_timeout(5000)
+                    if captured_url.get("url"):
+                        code = _extract_code_from_url(captured_url["url"])
+                        if code:
+                            token_data = await _exchange_code_for_token(code)
+                            return await _upload_token(token_data)
+
+                logger.error(f"Could not find 'Continue with Google' button. Current URL: {page.url}")
+                return False
+
+            logger.info("Clicking 'Continue with Google'")
+            await google_button.click()
+
+            # Wait for the redirect to be captured (via request event or URL change)
+            for _ in range(30):
+                if captured_url.get("url"):
+                    break
+                # Also check current URL
                 current_url = page.url
+                if redirect_host in current_url or "chrome-error" in current_url:
+                    # Chrome may have tried to load the redirect and failed
+                    break
+                await page.wait_for_timeout(1000)
 
-        code = _extract_code_from_url(current_url)
-        if not code:
-            logger.error(f"No authorization code in redirect URL: {current_url}")
-            return False
+            # Try extracting from captured request or current URL
+            redirect_url = captured_url.get("url") or page.url
+            if "chrome-error" in redirect_url:
+                # Chrome error page - the redirect URL might be in navigation history
+                # Try going back to find it
+                logger.warning("Chrome showed error page for redirect. Checking navigation entries...")
+                redirect_url = captured_url.get("url", "")
 
-        logger.info("Got authorization code, exchanging for token...")
-        token_data = await _exchange_code_for_token(code)
-        return await _upload_token(token_data)
+            # Check for Spotify consent page if no redirect yet
+            if not captured_url.get("url") and redirect_host not in page.url:
+                agree_button = await page.query_selector('button[data-testid="auth-accept"]')
+                if agree_button:
+                    logger.info("Clicking Spotify authorize/agree button after Google login")
+                    await agree_button.click()
+                    for _ in range(15):
+                        if captured_url.get("url"):
+                            break
+                        await page.wait_for_timeout(1000)
+                    redirect_url = captured_url.get("url") or page.url
+
+            code = _extract_code_from_url(redirect_url)
+            if not code:
+                logger.error(f"No authorization code in URL: {redirect_url[:100]}")
+                return False
+
+            logger.info("Got authorization code, exchanging for token...")
+            token_data = await _exchange_code_for_token(code)
+            return await _upload_token(token_data)
+
+        finally:
+            page.remove_listener("request", on_request)
 
     except Exception as e:
         logger.error(f"Spotify OAuth flow failed: {e}")
