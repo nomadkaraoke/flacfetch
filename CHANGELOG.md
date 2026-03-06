@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.2] - 2026-03-06
+
+### Added
+- Pushbullet success notifications when credential keeper refreshes YouTube cookies or Spotify tokens
+- Controlled by `KEEPER_NOTIFY_ON_SUCCESS` env var (default: `true`), set to `false` to disable
+
+### Changed
+- Credential keeper failure notifications now use emoji prefixes for quick visual scanning
+
+## [0.19.1] - 2026-03-06
+
+### Fixed
+- Fixed credential keeper Chrome launch failures due to missing system shared libraries (libnss3, libatk, etc.)
+- Fixed "Opening in existing browser session" errors by cleaning up Chrome `SingletonLock` files before launch
+- Fixed `wait_for_selector` timeouts under systemd by switching to polling with `query_selector` (Patchright bug)
+- Fixed Google login check using heavy `myaccount.google.com` — now uses lightweight `accounts.google.com/`
+- Fixed Spotify OAuth redirect capture using overly broad route interceptor — switched to `page.on("request")` event listener
+- Fixed Spotify `page.goto` throwing `ERR_CONNECTION_REFUSED` on auto-approved localhost redirect
+- Fixed initial refresh never triggering due to monotonic clock timing (`float("-inf")` instead of `0.0`)
+
+## [0.19.0] - 2026-03-06
+
+### Added
+- Credential keeper: browser automation service that auto-renews YouTube cookies and Spotify OAuth tokens
+- Uses Patchright (anti-detection Playwright fork) with persistent Chrome profile logged into Google
+- Runs as systemd service alongside existing flacfetch API on the GCE VM
+- YouTube cookies extracted in Netscape format and uploaded via flacfetch API every 8 hours
+- Spotify OAuth flow via "Continue with Google" button, token refreshed every 12 hours
+- Xvfb virtual display for headed browser mode (avoids headless detection)
+- Browser profile persisted on data disk (survives VM restarts without re-login)
+- Pushbullet notifications on credential refresh failures
+- VM upgraded from e2-small to e2-medium (4GB RAM) for Chromium
+- GCP secrets for Google account credentials (`flacfetch-account-email`, `flacfetch-account-password`)
+
 ## [0.18.3] - 2026-03-05
 
 ### Fixed

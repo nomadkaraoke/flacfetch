@@ -264,6 +264,36 @@ gcloud compute instances describe flacfetch-service --zone=us-central1-a \
   --format="yaml(disks)"
 ```
 
+### Chrome/Patchright Issues (Credential Keeper)
+
+**Missing shared libraries** (`libnspr4.so`, `libnss3.so`, etc.):
+`patchright install chromium` only downloads the browser binary — Chrome's system dependencies must be installed separately via apt-get. The startup script handles this, but if debugging manually:
+```bash
+apt-get install -y libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
+    libdrm2 libdbus-1-3 libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 \
+    libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 libxshmfence1
+```
+
+**"Opening in existing browser session"**:
+Chrome leaves `SingletonLock` files after crashes. The browser launcher cleans these automatically, but if debugging manually:
+```bash
+rm -f /mnt/flacfetch-data/browser-profiles/google/SingletonLock
+rm -f /mnt/flacfetch-data/browser-profiles/google/SingletonCookie
+rm -f /mnt/flacfetch-data/browser-profiles/google/SingletonSocket
+```
+
+**`wait_for_selector` times out but element exists**:
+Known Patchright bug under systemd — `wait_for_selector` hangs even when `query_selector` finds the element immediately. The credential keeper uses polling with `query_selector` as a workaround.
+
+### IaC Drift
+
+GHA deploy does `git pull + pip install + restart` but does **not** run `pulumi up`. If you change the startup script in `__main__.py`, you must run `pulumi up` separately:
+```bash
+cd infrastructure
+source venv/bin/activate
+pulumi up
+```
+
 ### State Conflicts
 
 If multiple people are working on the infrastructure:

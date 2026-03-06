@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 YOUTUBE_REFRESH_INTERVAL = int(os.environ.get("KEEPER_YOUTUBE_INTERVAL", 8 * 3600))  # 8 hours
 SPOTIFY_REFRESH_INTERVAL = int(os.environ.get("KEEPER_SPOTIFY_INTERVAL", 12 * 3600))  # 12 hours
 
+# Whether to send Pushbullet notifications on successful refreshes
+NOTIFY_ON_SUCCESS = os.environ.get("KEEPER_NOTIFY_ON_SUCCESS", "true").lower() in ("true", "1", "yes")
+
 # Status file path
 STATUS_FILE = os.environ.get("KEEPER_STATUS_FILE", "/mnt/flacfetch-data/keeper-status.json")
 
@@ -145,9 +148,15 @@ async def run_keeper():
                         "last_refresh": datetime.now(timezone.utc).isoformat(),
                         "last_refresh_status": "ok" if success else "error",
                     })
-                    if not success:
+                    if success:
+                        if NOTIFY_ON_SUCCESS:
+                            await _send_notification(
+                                "✅ YouTube Cookies Refreshed",
+                                "YouTube cookies extracted and uploaded successfully.",
+                            )
+                    else:
                         await _send_notification(
-                            "Credential Keeper: YouTube Cookie Refresh Failed",
+                            "❌ YouTube Cookie Refresh Failed",
                             "Could not extract/upload YouTube cookies.",
                         )
 
@@ -172,9 +181,15 @@ async def run_keeper():
                         "last_refresh_status": "ok" if success else "error",
                         "used_google_login": True,
                     })
-                    if not success:
+                    if success:
+                        if NOTIFY_ON_SUCCESS:
+                            await _send_notification(
+                                "✅ Spotify Token Refreshed",
+                                "Spotify OAuth token obtained and uploaded successfully.",
+                            )
+                    else:
                         await _send_notification(
-                            "Credential Keeper: Spotify Token Refresh Failed",
+                            "❌ Spotify Token Refresh Failed",
                             "Could not complete Spotify OAuth flow.",
                         )
 
