@@ -169,7 +169,8 @@ class TestSpotifyOAuth:
 
         assert "client_id=test-client-id" in url
         assert "response_type=code" in url
-        assert "redirect_uri=http://127.0.0.1:8888/callback" in url
+        assert "redirect_uri=" in url
+        assert "127.0.0.1" in url
         assert "streaming" in url
 
     def test_build_oauth_url_missing_client_id(self):

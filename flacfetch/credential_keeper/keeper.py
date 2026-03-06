@@ -11,7 +11,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .browser import close_browser, launch_browser
+from .browser import launch_browser
 from .google_login import ensure_google_logged_in
 from .spotify import refresh_spotify_token
 from .youtube import refresh_youtube_cookies
@@ -57,7 +57,7 @@ def _save_status(status: dict):
         logger.warning(f"Could not save status file: {e}")
 
 
-def _send_notification(title: str, body: str):
+async def _send_notification(title: str, body: str):
     """Send a Pushbullet notification."""
     api_key = os.environ.get("PUSHBULLET_API_KEY")
     if not api_key:
@@ -66,12 +66,13 @@ def _send_notification(title: str, body: str):
     try:
         import httpx
 
-        httpx.post(
-            "https://api.pushbullet.com/v2/pushes",
-            headers={"Access-Token": api_key, "Content-Type": "application/json"},
-            json={"type": "note", "title": title, "body": body},
-            timeout=30,
-        )
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                "https://api.pushbullet.com/v2/pushes",
+                headers={"Access-Token": api_key, "Content-Type": "application/json"},
+                json={"type": "note", "title": title, "body": body},
+                timeout=30,
+            )
     except Exception as e:
         logger.warning(f"Failed to send notification: {e}")
 
@@ -98,7 +99,7 @@ async def run_keeper():
         # Initial Google login check
         if not await ensure_google_logged_in(page):
             logger.error("Failed to log into Google - credential keeper cannot proceed")
-            _send_notification(
+            await _send_notification(
                 "Credential Keeper: Google Login Failed",
                 "Could not log into nomadflacfetch@gmail.com. Manual intervention needed.",
             )
@@ -133,7 +134,7 @@ async def run_keeper():
                         "last_refresh_status": "error",
                         "error": "Google session lost",
                     })
-                    _send_notification(
+                    await _send_notification(
                         "Credential Keeper: Google Login Lost",
                         "Google session expired and re-login failed.",
                     )
@@ -144,7 +145,7 @@ async def run_keeper():
                         "last_refresh_status": "ok" if success else "error",
                     })
                     if not success:
-                        _send_notification(
+                        await _send_notification(
                             "Credential Keeper: YouTube Cookie Refresh Failed",
                             "Could not extract/upload YouTube cookies.",
                         )
@@ -171,7 +172,7 @@ async def run_keeper():
                         "used_google_login": True,
                     })
                     if not success:
-                        _send_notification(
+                        await _send_notification(
                             "Credential Keeper: Spotify Token Refresh Failed",
                             "Could not complete Spotify OAuth flow.",
                         )
@@ -184,8 +185,16 @@ async def run_keeper():
 
     except Exception as e:
         logger.error(f"Credential keeper crashed: {e}", exc_info=True)
-        _send_notification("Credential Keeper Crashed", str(e))
+        await _send_notification("Credential Keeper Crashed", str(e))
         raise
     finally:
-        if pw and context:
-            await close_browser(pw, context)
+        if context:
+            try:
+                await context.close()
+            except Exception:
+                pass
+        if pw:
+            try:
+                await pw.stop()
+            except Exception:
+                pass

@@ -2,7 +2,7 @@
 import json
 import logging
 import os
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 
@@ -20,19 +20,21 @@ def _build_oauth_url() -> str:
     redirect_uri = os.environ.get("SPOTIPY_REDIRECT_URI", "http://127.0.0.1:8888/callback")
     scope = "user-read-playback-state user-modify-playback-state streaming"
 
-    return (
-        "https://accounts.spotify.com/authorize"
-        f"?client_id={client_id}"
-        f"&response_type=code"
-        f"&redirect_uri={redirect_uri}"
-        f"&scope={scope.replace(' ', '%20')}"
-    )
+    params = urlencode({
+        "client_id": client_id,
+        "response_type": "code",
+        "redirect_uri": redirect_uri,
+        "scope": scope,
+    })
+    return f"https://accounts.spotify.com/authorize?{params}"
 
 
 async def _exchange_code_for_token(code: str) -> dict:
     """Exchange an authorization code for access + refresh tokens."""
     client_id = os.environ.get("SPOTIPY_CLIENT_ID")
     client_secret = os.environ.get("SPOTIPY_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        raise ValueError("SPOTIPY_CLIENT_ID and SPOTIPY_CLIENT_SECRET must be set")
     redirect_uri = os.environ.get("SPOTIPY_REDIRECT_URI", "http://127.0.0.1:8888/callback")
 
     async with httpx.AsyncClient() as client:

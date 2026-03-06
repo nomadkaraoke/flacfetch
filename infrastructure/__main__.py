@@ -593,7 +593,7 @@ FLACFETCH_ACCOUNT_EMAIL=$(gcloud secrets versions access latest --secret=flacfet
 FLACFETCH_ACCOUNT_PASSWORD=$(gcloud secrets versions access latest --secret=flacfetch-account-password 2>/dev/null || echo "")
 
 if [ -n "$FLACFETCH_ACCOUNT_EMAIL" ]; then
-    echo "Credential keeper account configured: $FLACFETCH_ACCOUNT_EMAIL"
+    echo "Credential keeper account configured"
 else
     echo "WARNING: No credential keeper account configured. Browser automation will not work."
 fi
