@@ -27,6 +27,12 @@ async def launch_browser():
 
     logger.info(f"Launching browser with profile at {profile_dir}")
 
+    # Remove stale lock files from previous crashes to prevent
+    # "Opening in existing browser session" errors
+    for lock_file in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
+        lock_path = Path(profile_dir) / lock_file
+        lock_path.unlink(missing_ok=True)
+
     pw = await async_playwright().start()
 
     # Launch persistent context (keeps cookies, localStorage, etc.)
@@ -37,6 +43,7 @@ async def launch_browser():
         locale="en-US",
         timezone_id="America/New_York",
         args=[
+            "--no-sandbox",
             "--disable-blink-features=AutomationControlled",
             "--no-first-run",
             "--no-default-browser-check",
