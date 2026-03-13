@@ -812,6 +812,7 @@ Environment="SPOTIPY_CLIENT_SECRET=${SPOTIPY_CLIENT_SECRET}"
 Environment="SPOTIPY_REDIRECT_URI=${SPOTIPY_REDIRECT_URI}"
 Environment="YOUTUBE_COOKIES_FILE=${YOUTUBE_COOKIES_FILE}"
 Environment="PUSHBULLET_API_KEY=${PUSHBULLET_API_KEY}"
+Environment="KEEPER_STATUS_FILE=${BROWSER_PROFILE_DIR}/keeper-status.json"
 Environment="PATH=/opt/deno/bin:/usr/local/bin:/usr/bin:/bin"
 CRED_CHECK_SERVICE
 
@@ -891,7 +892,7 @@ Environment="SPOTIPY_REDIRECT_URI=${SPOTIPY_REDIRECT_URI}"
 Environment="PUSHBULLET_API_KEY=${PUSHBULLET_API_KEY}"
 Environment="BROWSER_PROFILE_DIR=${BROWSER_PROFILE_DIR}"
 Environment="KEEPER_STATUS_FILE=${BROWSER_PROFILE_DIR}/keeper-status.json"
-Environment="KEEPER_NOTIFY_ON_SUCCESS=true"
+Environment="KEEPER_NOTIFY_ON_SUCCESS=false"
 Environment="PATH=/opt/deno/bin:/usr/local/bin:/usr/bin:/bin"
 ExecStart=/opt/flacfetch/venv/bin/python -m flacfetch.credential_keeper
 Restart=always

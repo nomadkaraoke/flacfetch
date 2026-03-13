@@ -3,7 +3,12 @@ Credential health check service for flacfetch.
 
 Validates that Spotify and YouTube credentials are working,
 and sends Pushbullet notifications with status and fix instructions.
+
+The health check is aware of the credential keeper service. If the keeper
+is actively managing credentials (recent successful refreshes), the health
+check suppresses alerts for transient expiration — the keeper will handle it.
 """
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -16,6 +21,10 @@ import httpx
 from ...core.config import get_spotify_cache_path, get_youtube_cookies_path
 
 logger = logging.getLogger(__name__)
+
+# Max age (seconds) for a keeper refresh to be considered "active".
+# If the keeper last refreshed within this window, we trust it to handle things.
+_KEEPER_ACTIVE_THRESHOLD = 24 * 3600  # 24 hours
 
 
 class CredentialStatus(str, Enum):
@@ -475,6 +484,50 @@ def check_local_youtube_credentials() -> CredentialCheckResult:
         )
 
 
+def _is_keeper_actively_managing(service: str) -> bool:
+    """Check if the credential keeper is actively managing a service's credentials.
+
+    Reads the keeper status file and returns True if the keeper has successfully
+    refreshed the given service within the active threshold. This prevents the
+    health check from sending false alarms when credentials are temporarily
+    expired but the keeper is about to refresh them.
+    """
+    status_file = os.environ.get(
+        "KEEPER_STATUS_FILE",
+        "/mnt/flacfetch-data/keeper-status.json",
+    )
+
+    try:
+        with open(status_file) as f:
+            status = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        # No status file = keeper not running, don't suppress alerts
+        return False
+
+    service_key = service.lower()  # "youtube" or "spotify"
+    service_status = status.get(service_key, {})
+
+    last_refresh_status = service_status.get("last_refresh_status")
+    last_refresh = service_status.get("last_refresh")
+
+    if last_refresh_status != "ok" or not last_refresh:
+        return False
+
+    try:
+        last_refresh_time = datetime.fromisoformat(last_refresh)
+        age = (datetime.now(timezone.utc) - last_refresh_time).total_seconds()
+        if age <= _KEEPER_ACTIVE_THRESHOLD:
+            logger.info(
+                f"Keeper is actively managing {service} "
+                f"(last successful refresh {age / 3600:.1f}h ago) — suppressing alert"
+            )
+            return True
+    except (ValueError, TypeError):
+        pass
+
+    return False
+
+
 def send_pushbullet_notification(
     title: str,
     body: str,
@@ -573,18 +626,35 @@ def run_credential_health_check(
         if youtube_result.fix_command:
             results["fix_commands"].append(f"YouTube: {youtube_result.fix_command}")
 
+    # Check if the keeper is actively managing credentials that appear expired.
+    # If so, suppress alerts — the keeper will refresh them on its next cycle.
+    spotify_needs_alert = spotify_result.needs_human_action
+    youtube_needs_alert = youtube_result.needs_human_action
+
+    if spotify_needs_alert and _is_keeper_actively_managing("spotify"):
+        spotify_needs_alert = False
+        results["services"]["spotify"]["suppressed"] = True
+        results["services"]["spotify"]["suppressed_reason"] = "keeper is actively managing"
+
+    if youtube_needs_alert and _is_keeper_actively_managing("youtube"):
+        youtube_needs_alert = False
+        results["services"]["youtube"]["suppressed"] = True
+        results["services"]["youtube"]["suppressed_reason"] = "keeper is actively managing"
+
+    actually_needs_action = spotify_needs_alert or youtube_needs_alert
+
     # Send notification if needed
     if notify:
-        if results["needs_action"]:
-            # Something needs fixing
+        if actually_needs_action:
+            # Something needs fixing that the keeper can't handle
             title = "⚠️ Flacfetch: Credentials Need Attention"
             body_lines = ["One or more services need re-authentication:\n"]
 
-            if spotify_result.needs_human_action:
+            if spotify_needs_alert:
                 body_lines.append(f"❌ Spotify: {spotify_result.message}")
                 body_lines.append(f"   Fix: {spotify_result.fix_command}\n")
 
-            if youtube_result.needs_human_action:
+            if youtube_needs_alert:
                 body_lines.append(f"❌ YouTube: {youtube_result.message}")
                 body_lines.append(f"   Fix: {youtube_result.fix_command}\n")
 

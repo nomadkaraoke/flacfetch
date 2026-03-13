@@ -23,7 +23,7 @@ YOUTUBE_REFRESH_INTERVAL = int(os.environ.get("KEEPER_YOUTUBE_INTERVAL", 8 * 360
 SPOTIFY_REFRESH_INTERVAL = int(os.environ.get("KEEPER_SPOTIFY_INTERVAL", 12 * 3600))  # 12 hours
 
 # Whether to send Pushbullet notifications on successful refreshes
-NOTIFY_ON_SUCCESS = os.environ.get("KEEPER_NOTIFY_ON_SUCCESS", "true").lower() in ("true", "1", "yes")
+NOTIFY_ON_SUCCESS = os.environ.get("KEEPER_NOTIFY_ON_SUCCESS", "false").lower() in ("true", "1", "yes")
 
 # Status file path
 STATUS_FILE = os.environ.get("KEEPER_STATUS_FILE", "/mnt/flacfetch-data/keeper-status.json")
