@@ -494,7 +494,7 @@ def _is_keeper_actively_managing(service: str) -> bool:
     """
     status_file = os.environ.get(
         "KEEPER_STATUS_FILE",
-        "/mnt/flacfetch-data/keeper-status.json",
+        "/mnt/flacfetch-data/browser-profiles/keeper-status.json",
     )
 
     try:
