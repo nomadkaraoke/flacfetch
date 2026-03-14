@@ -837,9 +837,9 @@ systemctl start flacfetch-credential-check.timer
 
 echo "Credential health check timer enabled (runs daily at 7pm UTC / 2pm EST)"
 
-# Run initial credential check
-echo "Running initial credential check..."
-/opt/flacfetch/check-credentials.sh || true
+# Skip initial credential check on startup — the keeper needs time to complete
+# its first refresh cycle before credentials are valid. The daily timer at
+# 7pm UTC will catch any real issues once the keeper has had time to run.
 
 # =============================================================================
 # Xvfb Virtual Display (for credential keeper browser)
