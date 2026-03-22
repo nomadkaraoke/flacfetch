@@ -221,15 +221,20 @@ jobs:
                 git pull
                 
                 echo \"📦 Installing dependencies...\"
-                pip install -e \".[api]\" --quiet
-                
-                echo \"🔄 Restarting service...\"
+                pip install -e \".[api,keeper]\" --quiet
+
+                echo \"🔄 Restarting services...\"
                 systemctl restart flacfetch
-                
+                if systemctl is-enabled credential-keeper >/dev/null 2>&1; then
+                  systemctl restart credential-keeper
+                  echo \"✅ credential-keeper restarted\"
+                fi
+
                 sleep 3
-                
+
                 echo \"✅ Checking service status...\"
                 systemctl is-active flacfetch
+                systemctl is-active credential-keeper 2>/dev/null || true
               '
             "
           
