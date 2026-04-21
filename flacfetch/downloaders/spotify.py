@@ -107,6 +107,33 @@ class SpotifyDownloader(Downloader):
             raise SpotifyDownloadError("SpotifyProvider not configured")
         return self._provider.get_access_token()
 
+    def _resolve_duration_secs(
+        self, sp: "spotipy.Spotify", track_id: str, release: Release
+    ) -> int:
+        """Resolve track duration in seconds.
+
+        The PCM capture loop compares captured bytes against an expected size
+        derived from duration. A wrong duration silently fails short tracks:
+        if the expected-size guess is too large, the real full-track capture
+        never reaches the 70% threshold and the download fails with a false
+        "Download timeout" (see _wait_for_download).
+
+        Prefer the duration already on the release (from search). Otherwise
+        look it up via the Web API, which is reliable and cheap. Only fall
+        back to the 300s default if both fail.
+        """
+        if release.duration_seconds:
+            return release.duration_seconds
+        try:
+            duration_ms = sp.track(track_id).get("duration_ms")
+            if duration_ms:
+                secs = duration_ms // 1000
+                logger.debug(f"Resolved duration from Spotify API: {secs}s")
+                return secs
+        except Exception as e:
+            logger.warning(f"Failed to look up track duration, using default: {e}")
+        return 300
+
     def download(
         self,
         release: Release,
@@ -144,7 +171,6 @@ class SpotifyDownloader(Downloader):
 
         track_uri = f"spotify:track:{track_id}"
         track_name = release.target_file or release.title
-        duration_secs = release.duration_seconds or 300  # Default 5 min if unknown
 
         logger.info(f"Downloading from Spotify: {release.artist} - {track_name}")
 
@@ -168,6 +194,8 @@ class SpotifyDownloader(Downloader):
             sp = self._get_spotify_client()
         except Exception as e:
             raise SpotifyDownloadError(f"Authentication failed: {e}") from e
+
+        duration_secs = self._resolve_duration_secs(sp, track_id, release)
 
         # Start librespot with OAuth token
         logger.debug(f"Starting librespot: {self._librespot_path}")

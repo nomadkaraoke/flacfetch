@@ -359,6 +359,69 @@ class TestSpotifyDownloader:
         with pytest.raises(SpotifyDownloadError, match="Invalid Spotify URI"):
             downloader.download(release, "/tmp")
 
+    def test_resolve_duration_prefers_release(self):
+        """Uses duration_seconds on the release when set, without hitting the API."""
+        downloader = SpotifyDownloader(provider=MagicMock())
+        sp = MagicMock()
+        release = Release(
+            title="t", artist="a",
+            quality=Quality(AudioFormat.FLAC),
+            source_name="Spotify",
+            download_url="spotify:track:4PTG3Z6ehGkBFwjybzWkR8",
+            duration_seconds=213,
+        )
+
+        assert downloader._resolve_duration_secs(sp, "4PTG3Z6ehGkBFwjybzWkR8", release) == 213
+        sp.track.assert_not_called()
+
+    def test_resolve_duration_falls_back_to_api(self):
+        """When release has no duration, looks it up via the Spotify Web API.
+
+        Regression test: download-by-id doesn't populate duration_seconds on the
+        Release, so short tracks used to fail with 'Download timeout' because
+        the default 300s expected_size was larger than the actual capture.
+        """
+        downloader = SpotifyDownloader(provider=MagicMock())
+        sp = MagicMock()
+        sp.track.return_value = {"duration_ms": 159567}  # 159s, same as the bug report
+        release = Release(
+            title="t", artist="a",
+            quality=Quality(AudioFormat.FLAC),
+            source_name="Spotify",
+            download_url="spotify:track:0LmMZe0g80Z60zoTqR3cai",
+        )
+
+        assert downloader._resolve_duration_secs(sp, "0LmMZe0g80Z60zoTqR3cai", release) == 159
+        sp.track.assert_called_once_with("0LmMZe0g80Z60zoTqR3cai")
+
+    def test_resolve_duration_falls_back_to_default_on_api_error(self):
+        """If the API lookup fails, use the 300s default rather than raising."""
+        downloader = SpotifyDownloader(provider=MagicMock())
+        sp = MagicMock()
+        sp.track.side_effect = Exception("transient network error")
+        release = Release(
+            title="t", artist="a",
+            quality=Quality(AudioFormat.FLAC),
+            source_name="Spotify",
+            download_url="spotify:track:4PTG3Z6ehGkBFwjybzWkR8",
+        )
+
+        assert downloader._resolve_duration_secs(sp, "4PTG3Z6ehGkBFwjybzWkR8", release) == 300
+
+    def test_resolve_duration_falls_back_when_api_returns_no_duration(self):
+        """If the API returns a track without duration_ms, use the default."""
+        downloader = SpotifyDownloader(provider=MagicMock())
+        sp = MagicMock()
+        sp.track.return_value = {"id": "foo"}  # no duration_ms
+        release = Release(
+            title="t", artist="a",
+            quality=Quality(AudioFormat.FLAC),
+            source_name="Spotify",
+            download_url="spotify:track:4PTG3Z6ehGkBFwjybzWkR8",
+        )
+
+        assert downloader._resolve_duration_secs(sp, "4PTG3Z6ehGkBFwjybzWkR8", release) == 300
+
 
 class TestSpotifyIntegration:
     """Integration tests for provider and downloader working together."""
