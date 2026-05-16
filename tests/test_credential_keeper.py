@@ -134,7 +134,7 @@ class TestYouTubeCookieExtraction:
 
     @pytest.mark.asyncio
     async def test_extract_non_youtube_cookies_raises(self):
-        """Test that cookies without YouTube/Google domains raise ValueError."""
+        """Test that cookies without YouTube domains raise ValueError."""
         from flacfetch.credential_keeper.youtube import extract_netscape_cookies
 
         mock_context = MagicMock()
@@ -145,8 +145,58 @@ class TestYouTubeCookieExtraction:
 
         mock_context.cookies = other_cookies
 
-        with pytest.raises(ValueError, match="none for YouTube/Google"):
+        with pytest.raises(ValueError, match="none for YouTube"):
             await extract_netscape_cookies(mock_context)
+
+    @pytest.mark.asyncio
+    async def test_extract_passes_no_url_filter(self):
+        """Verify cookies are extracted with no URL filter.
+
+        Regression test: filtering by ``urls=[youtube.com, google.com]`` drops
+        cookies with Partitioned / SameSite attributes that yt-dlp needs to
+        bypass YouTube's bot-detection (SID, HSID, LOGIN_INFO, etc.). Must
+        match what ``yt-dlp --cookies-from-browser`` reads.
+        """
+        from flacfetch.credential_keeper.youtube import extract_netscape_cookies
+
+        mock_context = MagicMock()
+        call_args: list = []
+
+        async def capture_cookies(*args, **kwargs):
+            call_args.append((args, kwargs))
+            return [{"domain": ".youtube.com", "path": "/", "secure": True, "expires": 0,
+                     "name": "SID", "value": "x"}]
+
+        mock_context.cookies = capture_cookies
+        await extract_netscape_cookies(mock_context)
+
+        assert len(call_args) == 1
+        args, kwargs = call_args[0]
+        # No positional URL list and no urls= kwarg → captures everything
+        assert args == ()
+        assert kwargs == {}
+
+    @pytest.mark.asyncio
+    async def test_extract_captures_full_youtube_auth_bundle(self):
+        """The exporter must preserve auth cookies like SID/HSID/LOGIN_INFO."""
+        from flacfetch.credential_keeper.youtube import extract_netscape_cookies
+
+        mock_context = MagicMock()
+        auth_cookies = ["SID", "HSID", "SSID", "APISID", "SAPISID", "LOGIN_INFO",
+                        "__Secure-1PSID", "__Secure-3PSID", "YSC"]
+
+        async def full_bundle(*args, **kwargs):
+            return [
+                {"domain": ".youtube.com", "path": "/", "secure": True, "expires": 1735689600,
+                 "name": name, "value": f"v_{name}"}
+                for name in auth_cookies
+            ]
+
+        mock_context.cookies = full_bundle
+        result = await extract_netscape_cookies(mock_context)
+
+        for name in auth_cookies:
+            assert f"\t{name}\tv_{name}" in result, f"missing cookie {name} in export"
 
 
 # =============================================================================
