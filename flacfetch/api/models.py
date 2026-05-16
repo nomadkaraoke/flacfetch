@@ -192,6 +192,7 @@ class CheckYoutubeResponse(BaseModel):
     is_age_restricted: bool = False
     is_private: bool = False
     is_removed: bool = False
+    is_bot_blocked: bool = False
 
 
 # =============================================================================

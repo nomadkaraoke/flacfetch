@@ -287,17 +287,21 @@ async def check_youtube_availability_endpoint(
     availability varies by region.
     """
     import asyncio
+    from functools import partial
 
-    from flacfetch.downloaders.youtube import check_youtube_availability
+    from flacfetch.downloaders.youtube import check_youtube_availability, get_cookies_file
 
-    logger.info(f"Checking YouTube availability for: {request.url}")
+    cookies_file = get_cookies_file()
+    logger.info(
+        f"Checking YouTube availability for: {request.url} "
+        f"(cookies={'yes' if cookies_file else 'no'})"
+    )
 
-    # Run the blocking yt-dlp call in a thread pool
+    # Run the blocking yt-dlp call in a thread pool, explicitly forwarding cookies
     loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(
         None,
-        check_youtube_availability,
-        request.url,
+        partial(check_youtube_availability, request.url, cookies_file=cookies_file),
     )
 
     if result.available:
@@ -306,7 +310,8 @@ async def check_youtube_availability_endpoint(
         logger.warning(
             f"YouTube video {result.video_id} is NOT available: {result.error} "
             f"(geo={result.is_geo_restricted}, private={result.is_private}, "
-            f"removed={result.is_removed}, age={result.is_age_restricted})"
+            f"removed={result.is_removed}, age={result.is_age_restricted}, "
+            f"bot_blocked={result.is_bot_blocked})"
         )
 
     return CheckYoutubeResponse(
@@ -318,6 +323,7 @@ async def check_youtube_availability_endpoint(
         is_age_restricted=result.is_age_restricted,
         is_private=result.is_private,
         is_removed=result.is_removed,
+        is_bot_blocked=result.is_bot_blocked,
     )
 
 

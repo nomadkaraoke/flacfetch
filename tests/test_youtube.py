@@ -364,7 +364,97 @@ class TestCheckYoutubeAvailability:
 
             assert result.available is False
             assert result.is_age_restricted is True
+            assert result.is_bot_blocked is False
             assert result.is_geo_restricted is False
+
+    def test_age_restricted_inappropriate_phrasing(self):
+        """yt-dlp also reports 'inappropriate for some users' for age gates."""
+        with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
+            mock_instance = MagicMock()
+            mock_yt_dlp.return_value.__enter__.return_value = mock_instance
+            mock_instance.extract_info.side_effect = yt_dlp.utils.ExtractorError(
+                "This video may be inappropriate for some users"
+            )
+
+            result = check_youtube_availability("inappropriate-id")
+
+            assert result.available is False
+            assert result.is_age_restricted is True
+            assert result.is_bot_blocked is False
+
+    def test_bot_challenge_is_not_age_restriction(self):
+        """YouTube's 'Sign in to confirm you're not a bot' must NOT be classified as age-restricted.
+
+        Regression test for the false-positive where the substring match on
+        'sign in' / 'age' (the latter matched 'page', 'message', etc.)
+        misclassified bot-detection challenges as age-restriction, causing
+        users to see a misleading 'This video is age-restricted' error.
+        """
+        with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
+            mock_instance = MagicMock()
+            mock_yt_dlp.return_value.__enter__.return_value = mock_instance
+            mock_instance.extract_info.side_effect = yt_dlp.utils.DownloadError(
+                "ERROR: [youtube] CXukwbosncw: Sign in to confirm you're not a bot. "
+                "Use --cookies-from-browser or --cookies for the authentication."
+            )
+
+            result = check_youtube_availability("CXukwbosncw")
+
+            assert result.available is False
+            assert result.is_bot_blocked is True
+            assert result.is_age_restricted is False
+            assert result.is_geo_restricted is False
+            assert result.is_private is False
+            assert result.is_removed is False
+
+    def test_bot_challenge_unicode_apostrophe(self):
+        """yt-dlp's bot-challenge uses the Unicode right-single-quote (’) in 'you’re'."""
+        with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
+            mock_instance = MagicMock()
+            mock_yt_dlp.return_value.__enter__.return_value = mock_instance
+            mock_instance.extract_info.side_effect = yt_dlp.utils.DownloadError(
+                "ERROR: [youtube] abc: Sign in to confirm you’re not a bot."
+            )
+
+            result = check_youtube_availability("abc")
+
+            assert result.is_bot_blocked is True
+            assert result.is_age_restricted is False
+
+    def test_generic_message_word_does_not_trigger_age(self):
+        """Generic errors containing 'page' or 'message' must not trigger age-restriction."""
+        with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
+            mock_instance = MagicMock()
+            mock_yt_dlp.return_value.__enter__.return_value = mock_instance
+            mock_instance.extract_info.side_effect = yt_dlp.utils.ExtractorError(
+                "Unable to extract initial player response from page"
+            )
+
+            result = check_youtube_availability("some-id")
+
+            assert result.is_age_restricted is False
+            assert result.is_bot_blocked is False
+
+    def test_sign_in_without_bot_or_age_phrase_is_unclassified(self):
+        """A bare 'Sign in' message (no bot/age phrasing) must not be classified.
+
+        Closes the regression surface around the elif boundary: if yt-dlp ever
+        ships a new 'sign in' variant we don't recognize, we want it to land
+        in the generic 'unavailable' bucket rather than be mislabeled.
+        """
+        with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
+            mock_instance = MagicMock()
+            mock_yt_dlp.return_value.__enter__.return_value = mock_instance
+            mock_instance.extract_info.side_effect = yt_dlp.utils.DownloadError(
+                "ERROR: [youtube] abc: Sign in to view this video"
+            )
+
+            result = check_youtube_availability("abc")
+
+            assert result.is_bot_blocked is False
+            assert result.is_age_restricted is False
+            assert result.is_private is False
+            assert result.is_removed is False
 
     def test_unexpected_error(self):
         with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:

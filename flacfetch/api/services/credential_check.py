@@ -284,8 +284,13 @@ def check_youtube_credentials() -> CredentialCheckResult:
                 needs_human_action=True,
                 fix_command="flacfetch cookies upload",
             )
-        elif "age" in error_str or "restricted" in error_str:
-            # Age-restricted content - cookies might still be valid
+        elif any(p in error_str for p in [
+            "confirm your age", "inappropriate for some users",
+            "age-restricted", "age restricted",
+        ]):
+            # Age-restricted content - cookies might still be valid.
+            # Match specific phrases (not raw 'age' / 'restricted' substrings
+            # which over-match on 'page' / 'message' / 'geo-restricted' / etc.)
             return CredentialCheckResult(
                 service="YouTube",
                 status=CredentialStatus.OK,

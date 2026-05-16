@@ -68,6 +68,7 @@ class YoutubeAvailability:
     is_age_restricted: bool = False
     is_private: bool = False
     is_removed: bool = False
+    is_bot_blocked: bool = False
 
 
 def extract_video_id(url_or_id: str) -> str:
@@ -177,7 +178,35 @@ def check_youtube_availability(
             result.is_private = True
             result.is_geo_restricted = False
 
-        if any(phrase in error_str for phrase in ['age', 'sign in']):
+        # YouTube's bot-detection challenge: "Sign in to confirm you're not a bot."
+        # This is NOT age restriction - it indicates auth / cookie / IP-reputation
+        # problems and almost always means our YouTube session needs fresher cookies
+        # or the server is being throttled. Check this BEFORE age-restriction since
+        # both error messages contain "sign in".
+        #
+        # yt-dlp uses the Unicode right-single-quotation-mark (U+2019) rather
+        # than the ASCII apostrophe. str.lower() preserves it, so we match
+        # both forms explicitly. ’ escapes keep this unambiguous against
+        # editors that might silently normalize curly quotes.
+        if any(phrase in error_str for phrase in [
+            "not a bot",
+            "you’re not a bot",   # Unicode (yt-dlp's actual output)
+            "you're not a bot",         # ASCII fallback
+            "confirm you’re not",  # Unicode
+            "confirm you're not",       # ASCII fallback
+        ]):
+            result.is_bot_blocked = True
+            result.is_geo_restricted = False
+
+        # Real age-restriction surfaces as "Sign in to confirm your age" or
+        # "This video may be inappropriate for some users". Match on the
+        # age-specific phrasing, not the generic "sign in" / "age" substring
+        # which over-matched on bot-challenges and any error containing "page",
+        # "message", etc.
+        elif any(phrase in error_str for phrase in [
+            'confirm your age', 'inappropriate for some users',
+            'age-restricted', 'age restricted',
+        ]):
             result.is_age_restricted = True
             result.is_geo_restricted = False
 
