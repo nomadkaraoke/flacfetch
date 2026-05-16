@@ -76,6 +76,18 @@ flacfetch_storage_reader = gcp.storage.BucketIAMMember(
     member=flacfetch_sa.email.apply(lambda email: f"serviceAccount:{email}"),
 )
 
+# Grant Cloud Logging write access so the on-VM google-guest-agent-manager
+# can publish its journal to Cloud Logging. Without this, the manager logs
+# a PermissionDenied warning every cycle and we lose visibility into
+# SSH-key-sync / plugin lifecycle events. Diagnosed 2026-05-16 after the
+# manager evicted its CorePlugin and broke gha deploys silently.
+flacfetch_logging_writer = gcp.projects.IAMMember(
+    "flacfetch-logging-writer",
+    project=project_id,
+    role="roles/logging.logWriter",
+    member=flacfetch_sa.email.apply(lambda email: f"serviceAccount:{email}"),
+)
+
 # =============================================================================
 # Secrets
 # =============================================================================
