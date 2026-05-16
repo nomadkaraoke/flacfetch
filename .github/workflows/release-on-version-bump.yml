@@ -208,9 +208,15 @@ jobs:
       - name: Deploy to flacfetch VM
         run: |
           echo "🚀 Deploying to flacfetch VM..."
-          
-          # SSH to VM and update
+
+          # Use IAP tunnel for SSH: authenticates via GCP IAM (the deployer SA
+          # already has roles/iap.tunnelResourceAccessor) instead of pushing a
+          # project-wide SSH key and waiting for google-guest-agent to
+          # provision the `runner` user. Immune to guest-agent plugin
+          # lifecycle issues — the May 2026 deploy outage was caused by the
+          # agent-manager evicting its CorePlugin, which broke SSH-key sync.
           gcloud compute ssh flacfetch-service \
+            --tunnel-through-iap \
             --zone=us-central1-a \
             --command="
               sudo su -c '
