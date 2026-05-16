@@ -435,6 +435,27 @@ class TestCheckYoutubeAvailability:
             assert result.is_age_restricted is False
             assert result.is_bot_blocked is False
 
+    def test_sign_in_without_bot_or_age_phrase_is_unclassified(self):
+        """A bare 'Sign in' message (no bot/age phrasing) must not be classified.
+
+        Closes the regression surface around the elif boundary: if yt-dlp ever
+        ships a new 'sign in' variant we don't recognize, we want it to land
+        in the generic 'unavailable' bucket rather than be mislabeled.
+        """
+        with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
+            mock_instance = MagicMock()
+            mock_yt_dlp.return_value.__enter__.return_value = mock_instance
+            mock_instance.extract_info.side_effect = yt_dlp.utils.DownloadError(
+                "ERROR: [youtube] abc: Sign in to view this video"
+            )
+
+            result = check_youtube_availability("abc")
+
+            assert result.is_bot_blocked is False
+            assert result.is_age_restricted is False
+            assert result.is_private is False
+            assert result.is_removed is False
+
     def test_unexpected_error(self):
         with patch('yt_dlp.YoutubeDL') as mock_yt_dlp:
             mock_instance = MagicMock()

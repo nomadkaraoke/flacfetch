@@ -183,9 +183,17 @@ def check_youtube_availability(
         # problems and almost always means our YouTube session needs fresher cookies
         # or the server is being throttled. Check this BEFORE age-restriction since
         # both error messages contain "sign in".
+        #
+        # yt-dlp uses the Unicode right-single-quotation-mark (U+2019) rather
+        # than the ASCII apostrophe. str.lower() preserves it, so we match
+        # both forms explicitly. ’ escapes keep this unambiguous against
+        # editors that might silently normalize curly quotes.
         if any(phrase in error_str for phrase in [
-            "not a bot", "you're not a bot", "you’re not a bot",
-            "confirm you're not", "confirm you’re not",
+            "not a bot",
+            "you’re not a bot",   # Unicode (yt-dlp's actual output)
+            "you're not a bot",         # ASCII fallback
+            "confirm you’re not",  # Unicode
+            "confirm you're not",       # ASCII fallback
         ]):
             result.is_bot_blocked = True
             result.is_geo_restricted = False
