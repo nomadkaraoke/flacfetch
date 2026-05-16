@@ -20,6 +20,30 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/config", tags=["config"])
 
 
+def _destroy_old_secret_versions(client, secret_path: str, keep: int = 5) -> None:
+    """Destroy ENABLED secret versions beyond the newest `keep`.
+
+    OAuth/cookie secrets are rewritten on every refresh, which would
+    otherwise accumulate hundreds of versions and cost ~$0.06/version/month
+    in replica storage. Only the newest version is read (`versions/latest`),
+    so older versions are dead weight.
+    """
+    try:
+        versions = list(client.list_secret_versions(request={"parent": secret_path}))
+        enabled = [
+            v for v in versions
+            if v.state == v.State.ENABLED  # type: ignore[attr-defined]
+        ]
+        enabled.sort(key=lambda v: v.create_time, reverse=True)
+        for v in enabled[keep:]:
+            try:
+                client.destroy_secret_version(request={"name": v.name})
+            except Exception as e:
+                logger.warning(f"Failed to destroy {v.name}: {e}")
+    except Exception as e:
+        logger.warning(f"Failed to prune old secret versions for {secret_path}: {e}")
+
+
 # =============================================================================
 # Models
 # =============================================================================
@@ -136,6 +160,8 @@ def _update_secret(cookies_content: str) -> bool:
                 "payload": {"data": cookies_content.encode("utf-8")},
             }
         )
+
+        _destroy_old_secret_versions(client, secret_name, keep=5)
 
         logger.info(f"Updated youtube-cookies secret: {response.name}")
         return True
@@ -426,6 +452,8 @@ def _update_spotify_secret(token_content: str) -> bool:
                 "payload": {"data": token_content.encode("utf-8")},
             }
         )
+
+        _destroy_old_secret_versions(client, secret_name, keep=5)
 
         logger.info(f"Updated spotify-oauth-token secret: {response.name}")
         return True

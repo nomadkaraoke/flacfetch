@@ -3,7 +3,7 @@ import json
 import os
 import tempfile
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from flacfetch.api.routes.config import (
     CookiesStatusResponse,
@@ -12,6 +12,7 @@ from flacfetch.api.routes.config import (
     SpotifyTokenStatusResponse,
     SpotifyTokenUploadRequest,
     SpotifyTokenUploadResponse,
+    _destroy_old_secret_versions,
     _get_cookies_file_path,
     _validate_cookies_format,
     _validate_spotify_token_format,
@@ -656,3 +657,54 @@ class TestSpotifyTokenRoutes:
                         data = response.json()
                         assert "No token file" in data["message"]
 
+
+
+class TestDestroyOldSecretVersions:
+    """Tests for _destroy_old_secret_versions helper."""
+
+    @staticmethod
+    def _mk_version(name, create_time):
+        state_enum = MagicMock()
+        state_enum.ENABLED = "ENABLED"
+        v = MagicMock()
+        v.name = name
+        v.state = state_enum.ENABLED
+        v.State = state_enum  # so `v.state == v.State.ENABLED` resolves
+        v.create_time = create_time
+        return v
+
+    def test_destroys_versions_beyond_keep_count(self):
+        client = MagicMock()
+        versions = [self._mk_version(f"v{i}", i) for i in range(7)]
+        client.list_secret_versions.return_value = versions
+
+        _destroy_old_secret_versions(client, "projects/p/secrets/s", keep=3)
+
+        destroyed_names = [
+            c.kwargs["request"]["name"]
+            for c in client.destroy_secret_version.call_args_list
+        ]
+        assert sorted(destroyed_names) == ["v0", "v1", "v2", "v3"]
+
+    def test_swallows_list_errors(self):
+        client = MagicMock()
+        client.list_secret_versions.side_effect = RuntimeError("boom")
+        _destroy_old_secret_versions(client, "projects/p/secrets/s", keep=5)
+        client.destroy_secret_version.assert_not_called()
+
+    def test_swallows_per_version_destroy_errors(self):
+        client = MagicMock()
+        versions = [self._mk_version(f"v{i}", i) for i in range(7)]
+        client.list_secret_versions.return_value = versions
+        client.destroy_secret_version.side_effect = [
+            RuntimeError("nope"), None, None, None,
+        ]
+        _destroy_old_secret_versions(client, "projects/p/secrets/s", keep=3)
+        assert client.destroy_secret_version.call_count == 4
+
+    def test_does_nothing_when_below_keep_count(self):
+        client = MagicMock()
+        versions = [self._mk_version(f"v{i}", i) for i in range(3)]
+        client.list_secret_versions.return_value = versions
+        _destroy_old_secret_versions(client, "projects/p/secrets/s", keep=5)
+        client.destroy_secret_version.assert_not_called()
