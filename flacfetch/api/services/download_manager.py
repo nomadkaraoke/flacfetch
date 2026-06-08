@@ -216,6 +216,11 @@ class DownloadManager:
             self._fetch_manager.add_provider(YoutubeProvider())
             self._fetch_manager.register_downloader("YouTube", YoutubeDownloader())
 
+            # Generic URL downloader: yt-dlp's universal extractor handles any
+            # supported site (Facebook, SoundCloud, TikTok, Vimeo, ...). Reuses
+            # the YouTube downloader, which is already site-agnostic.
+            self._fetch_manager.register_downloader("URL", YoutubeDownloader())
+
             # Add RED provider if configured (requires both key and URL)
             red_key = os.environ.get("RED_API_KEY")
             red_url = os.environ.get("RED_API_URL")

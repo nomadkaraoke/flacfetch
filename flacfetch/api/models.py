@@ -82,11 +82,11 @@ class DownloadRequest(BaseModel):
 
 class DownloadByIdRequest(BaseModel):
     """Request to download directly by source ID (without requiring a cached search)."""
-    source_name: str = Field(..., description="Provider name (RED, OPS, YouTube, Spotify)")
-    source_id: str = Field(..., description="Source-specific ID (torrent ID, video ID, track ID)")
+    source_name: str = Field(..., description="Provider name (RED, OPS, YouTube, Spotify, URL)")
+    source_id: str = Field(..., description="Source-specific ID (torrent ID, video ID, track ID; for URL, any stable identifier such as the URL itself)")
     output_filename: Optional[str] = Field(None, description="Custom output filename (without extension)")
     target_file: Optional[str] = Field(None, description="For torrents, specific file to extract")
-    download_url: Optional[str] = Field(None, description="For YouTube/Spotify, direct URL")
+    download_url: Optional[str] = Field(None, description="For YouTube/Spotify, direct URL. REQUIRED for source_name='URL' (any yt-dlp-supported site, e.g. Facebook, SoundCloud, TikTok).")
     upload_to_gcs: bool = Field(False, description="Upload to GCS when complete")
     gcs_path: Optional[str] = Field(None, description="GCS path (required if upload_to_gcs)")
 

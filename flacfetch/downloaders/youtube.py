@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -9,6 +10,32 @@ from ..core.interfaces import Downloader
 from ..core.models import Release
 
 logger = logging.getLogger(__name__)
+
+# Abuse / runaway protection for downloads. Both are overridable via env so we
+# can tune without a redeploy.
+# - Duration cap: yt-dlp refuses media longer than this (evaluated BEFORE the
+#   download starts, so we never fetch a multi-hour file).
+# - Wall-clock cap: hard limit on time spent actually downloading a file.
+DEFAULT_MAX_DURATION_SECONDS = 3600   # 1 hour
+DEFAULT_MAX_DOWNLOAD_SECONDS = 300    # 5 minutes
+
+
+def _get_max_duration_seconds() -> int:
+    try:
+        return int(os.environ.get("FLACFETCH_MAX_DURATION_SECONDS", DEFAULT_MAX_DURATION_SECONDS))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_DURATION_SECONDS
+
+
+def _get_max_download_seconds() -> int:
+    try:
+        return int(os.environ.get("FLACFETCH_MAX_DOWNLOAD_SECONDS", DEFAULT_MAX_DOWNLOAD_SECONDS))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_DOWNLOAD_SECONDS
+
+
+class DownloadTimeoutError(Exception):
+    """Raised when a download exceeds the wall-clock time limit."""
 
 
 def get_cookies_file() -> Optional[str]:
@@ -270,11 +297,54 @@ class YoutubeDownloader(Downloader):
         # Get base options (includes cookies if available)
         ydl_opts = get_ytdlp_base_opts(self.cookies_file)
 
+        # Abuse / runaway protection.
+        max_duration = _get_max_duration_seconds()
+        max_download_seconds = _get_max_download_seconds()
+
+        # Reject over-long media (and live streams, which have no fixed end)
+        # BEFORE downloading. yt-dlp evaluates match_filter during extraction,
+        # so we never start fetching a multi-hour file. The rejection reason is
+        # stashed so we can surface a clear error (extract_info returns None).
+        reject = {}
+
+        def _match_filter(info_dict, *, incomplete=False):
+            # Skip filtering on partial metadata; yt-dlp re-invokes this with
+            # complete info before the actual download, where the cap is enforced.
+            if incomplete:
+                return None
+            if info_dict.get("is_live"):
+                reason = "Live streams are not supported"
+                reject["msg"] = reason
+                return reason
+            duration = info_dict.get("duration")
+            if duration is not None and duration > max_duration:
+                reason = (
+                    f"Media duration {int(duration)}s exceeds the "
+                    f"{max_duration}s ({max_duration // 60} min) limit"
+                )
+                reject["msg"] = reason
+                return reason
+            return None
+
+        # Hard wall-clock cap on the actual download. Enforced cooperatively via
+        # a progress hook (fires on each chunk); raising aborts the download.
+        download_start = time.monotonic()
+
+        def _timeout_hook(d):
+            if time.monotonic() - download_start > max_download_seconds:
+                raise DownloadTimeoutError(
+                    f"Download exceeded the {max_download_seconds}s time limit"
+                )
+
         # Add download-specific options
         ydl_opts.update({
             'format': 'bestaudio/best',
             'outtmpl': outtmpl,
             'quiet': False,
+            'match_filter': _match_filter,
+            'progress_hooks': [_timeout_hook],
+            # Guard against stalled connections during extraction/download.
+            'socket_timeout': 30,
         })
 
         # Log if using cookies
@@ -285,9 +355,11 @@ class YoutubeDownloader(Downloader):
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(release.download_url, download=True)
+                # extract_info returns None when match_filter rejected the media.
+                if info is None:
+                    raise ValueError(reject.get("msg", "Media rejected or unavailable"))
                 # Get the actual filename that was used
-                if info:
-                    downloaded_file = ydl.prepare_filename(info)
+                downloaded_file = ydl.prepare_filename(info)
             print("YouTube download complete.")
             if not downloaded_file:
                 raise RuntimeError("Failed to determine downloaded filename")

@@ -103,21 +103,30 @@ async def start_download_by_id(
     this fetches the .torrent file by ID. For YouTube/Spotify, it downloads directly.
 
     Parameters:
-    - source_name: Provider name (RED, OPS, YouTube, Spotify)
+    - source_name: Provider name (RED, OPS, YouTube, Spotify, URL)
     - source_id: Source-specific ID (torrent ID, video ID, track ID)
     - target_file: For torrents, specific file to extract from the torrent
-    - download_url: For YouTube/Spotify, the direct URL (optional, constructed from source_id if missing)
+    - download_url: For YouTube/Spotify, the direct URL (optional, constructed from source_id if missing).
+      REQUIRED for source_name='URL' (any yt-dlp-supported site, e.g. Facebook, SoundCloud, TikTok).
 
     The download runs in the background. Use GET /download/{download_id}/status to check progress.
     """
     manager = get_download_manager()
 
     # Validate source_name
-    valid_sources = ["RED", "OPS", "YouTube", "Spotify"]
+    valid_sources = ["RED", "OPS", "YouTube", "Spotify", "URL"]
     if request.source_name not in valid_sources:
         raise HTTPException(
             status_code=400,
             detail=f"Invalid source_name '{request.source_name}'. Valid options: {valid_sources}"
+        )
+
+    # The generic "URL" source downloads an arbitrary yt-dlp-supported URL and
+    # therefore requires the download_url to be supplied explicitly.
+    if request.source_name == "URL" and not request.download_url:
+        raise HTTPException(
+            status_code=400,
+            detail="download_url is required when source_name is 'URL'"
         )
 
     # Validate GCS params

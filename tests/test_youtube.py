@@ -488,3 +488,113 @@ class TestCheckYoutubeAvailability:
             assert result.available is True
             assert result.video_id == "abc123xyz9_"
 
+
+class TestYoutubeDownloaderLimits:
+    """Abuse/runaway protection on YoutubeDownloader.download (duration cap + timeout)."""
+
+    def _release(self, url="https://www.facebook.com/share/v/1EnC8Bi5Uq/"):
+        from flacfetch.core.models import AudioFormat, Quality, Release
+        return Release(
+            title="T", artist="", quality=Quality(AudioFormat.AAC),
+            source_name="URL", download_url=url,
+        )
+
+    def _fake_ydl(self, *, extract_behaviour):
+        """Build a fake yt_dlp.YoutubeDL class capturing opts and driving the hooks."""
+        captured = {}
+
+        class FakeYDL:
+            def __init__(self, opts):
+                captured["opts"] = opts
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def extract_info(self, url, download):
+                return extract_behaviour(captured["opts"])
+
+            def prepare_filename(self, info):
+                return "/out/Artist - Title.m4a"
+
+        return FakeYDL, captured
+
+    def test_rejects_media_over_duration_cap(self):
+        import pytest
+
+        from flacfetch.downloaders.youtube import YoutubeDownloader
+
+        def behaviour(opts):
+            # Emulate yt-dlp: match_filter returning a reason => media skipped => None
+            reason = opts["match_filter"]({"duration": 7200, "is_live": False})
+            return None if reason else {"id": "x"}
+
+        FakeYDL, _ = self._fake_ydl(extract_behaviour=behaviour)
+        with patch("yt_dlp.YoutubeDL", FakeYDL):
+            with pytest.raises(ValueError, match="exceeds"):
+                YoutubeDownloader().download(self._release(), "/out")
+
+    def test_rejects_live_streams(self):
+        import pytest
+
+        from flacfetch.downloaders.youtube import YoutubeDownloader
+
+        def behaviour(opts):
+            reason = opts["match_filter"]({"duration": None, "is_live": True})
+            return None if reason else {"id": "x"}
+
+        FakeYDL, _ = self._fake_ydl(extract_behaviour=behaviour)
+        with patch("yt_dlp.YoutubeDL", FakeYDL):
+            with pytest.raises(ValueError, match="Live streams"):
+                YoutubeDownloader().download(self._release(), "/out")
+
+    def test_allows_media_within_duration_cap(self):
+        from flacfetch.downloaders.youtube import YoutubeDownloader
+
+        def behaviour(opts):
+            # Short clip: match_filter returns None (allowed), download proceeds
+            assert opts["match_filter"]({"duration": 200, "is_live": False}) is None
+            return {"id": "x"}
+
+        FakeYDL, _ = self._fake_ydl(extract_behaviour=behaviour)
+        with patch("yt_dlp.YoutubeDL", FakeYDL):
+            result = YoutubeDownloader().download(self._release(), "/out")
+        assert result == "/out/Artist - Title.m4a"
+
+    def test_download_timeout_aborts(self, monkeypatch):
+        import pytest
+
+        from flacfetch.downloaders.youtube import DownloadTimeoutError, YoutubeDownloader
+
+        # Zero budget => the very first progress callback trips the wall-clock cap.
+        monkeypatch.setenv("FLACFETCH_MAX_DOWNLOAD_SECONDS", "0")
+
+        def behaviour(opts):
+            # Driving the progress hook simulates yt-dlp reporting download progress.
+            opts["progress_hooks"][0]({"status": "downloading"})
+            return {"id": "x"}
+
+        FakeYDL, _ = self._fake_ydl(extract_behaviour=behaviour)
+        with patch("yt_dlp.YoutubeDL", FakeYDL):
+            with pytest.raises(DownloadTimeoutError, match="time limit"):
+                YoutubeDownloader().download(self._release(), "/out")
+
+    def test_duration_cap_is_env_configurable(self, monkeypatch):
+        import pytest
+
+        from flacfetch.downloaders.youtube import YoutubeDownloader
+
+        # Lower the cap to 60s; a 5-minute clip must now be rejected.
+        monkeypatch.setenv("FLACFETCH_MAX_DURATION_SECONDS", "60")
+
+        def behaviour(opts):
+            reason = opts["match_filter"]({"duration": 300, "is_live": False})
+            return None if reason else {"id": "x"}
+
+        FakeYDL, _ = self._fake_ydl(extract_behaviour=behaviour)
+        with patch("yt_dlp.YoutubeDL", FakeYDL):
+            with pytest.raises(ValueError, match="exceeds"):
+                YoutubeDownloader().download(self._release(), "/out")
+
