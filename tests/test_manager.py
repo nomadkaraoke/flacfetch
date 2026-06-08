@@ -498,6 +498,46 @@ class TestDownloadById:
         release = call_args[0][0]
         assert release.download_url == "spotify:track:trackid123"
 
+    def test_download_by_id_generic_url(self):
+        """Test download_by_id for generic URL passes the URL straight through"""
+        mgr = FetchManager()
+        mock_dl = Mock(spec=Downloader)
+        mock_dl.download.return_value = "/path/to/file.m4a"
+
+        mgr.register_downloader("URL", mock_dl)
+
+        fb_url = "https://www.facebook.com/share/v/1EnC8Bi5Uq/"
+        result = mgr.download_by_id(
+            source_name="URL",
+            source_id=fb_url,
+            output_path="/output",
+            output_filename="Artist - Title",
+            download_url=fb_url,
+        )
+
+        assert result == "/path/to/file.m4a"
+        mock_dl.download.assert_called_once()
+
+        call_args = mock_dl.download.call_args
+        release = call_args[0][0]
+        assert isinstance(release, Release)
+        assert release.source_name == "URL"
+        assert release.download_url == fb_url
+
+    def test_download_by_id_generic_url_requires_download_url(self):
+        """Test download_by_id for generic URL fails clearly without a download_url"""
+        mgr = FetchManager()
+        mock_dl = Mock(spec=Downloader)
+        mgr.register_downloader("URL", mock_dl)
+
+        with pytest.raises(ValueError, match="download_url is required"):
+            mgr.download_by_id(
+                source_name="URL",
+                source_id="some-id",
+                output_path="/output",
+            )
+        mock_dl.download.assert_not_called()
+
     def test_download_by_id_red_torrent(self):
         """Test download_by_id for RED creates Release with correct quality"""
         mgr = FetchManager()

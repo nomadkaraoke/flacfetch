@@ -420,6 +420,26 @@ class FetchManager:
             logger.info(f"Starting YouTube download for {download_url}...")
             return downloader.download(release, output_path, output_filename=output_filename)
 
+        # Generic URL: any yt-dlp-supported site (Facebook, SoundCloud, TikTok,
+        # Vimeo, ...). The URL must be supplied explicitly; we hand it straight
+        # to the (site-agnostic) yt-dlp downloader.
+        if source_name == "URL":
+            if not download_url:
+                msg = "download_url is required for source_name 'URL'"
+                logger.error(msg)
+                raise ValueError(msg)
+
+            release = Release(
+                title=output_filename or source_id,
+                artist="",
+                quality=Quality(format=AudioFormat.AAC, media=MediaSource.WEB),
+                source_name=source_name,
+                download_url=download_url,
+                source_id=source_id,
+            )
+            logger.info(f"Starting generic URL download for {download_url}...")
+            return downloader.download(release, output_path, output_filename=output_filename)
+
         if source_name == "Spotify":
             if not download_url:
                 download_url = f"spotify:track:{source_id}"

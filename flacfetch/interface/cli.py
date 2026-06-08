@@ -1476,6 +1476,8 @@ Spotify Setup (requires Premium account):
 
     manager.add_provider(YoutubeProvider())
     manager.register_downloader("YouTube", YoutubeDownloader())
+    # Generic URL downloader (any yt-dlp-supported site), reuses YouTube downloader.
+    manager.register_downloader("URL", YoutubeDownloader())
 
     # Determine search limits and early termination
     search_limit = args.limit
