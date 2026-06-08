@@ -308,6 +308,10 @@ class YoutubeDownloader(Downloader):
         reject = {}
 
         def _match_filter(info_dict, *, incomplete=False):
+            # Skip filtering on partial metadata; yt-dlp re-invokes this with
+            # complete info before the actual download, where the cap is enforced.
+            if incomplete:
+                return None
             if info_dict.get("is_live"):
                 reason = "Live streams are not supported"
                 reject["msg"] = reason
