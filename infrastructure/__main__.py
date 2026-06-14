@@ -190,21 +190,25 @@ flacfetch_account_password_secret = secretmanager.Secret(
     ),
 )
 
-# Grant flacfetch service account permission to update spotify-oauth-token secret
-# Needed for credential keeper and token refresh writeback
+# Grant flacfetch service account permission to add AND destroy versions of the
+# spotify-oauth-token secret. secretVersionManager is a superset of
+# secretVersionAdder that also grants versions.destroy — required for the
+# rotation prune (keep newest 5). Without destroy permission the prune silently
+# fails and ENABLED versions accumulate (cost regression, fixed Jun 2026).
 spotify_oauth_token_iam = secretmanager.SecretIamMember(
     "spotify-oauth-token-writer",
     secret_id=spotify_oauth_token_secret.id,
-    role="roles/secretmanager.secretVersionAdder",
+    role="roles/secretmanager.secretVersionManager",
     member=flacfetch_sa.email.apply(lambda email: f"serviceAccount:{email}"),
 )
 
-# Grant flacfetch service account permission to update youtube-cookies secret
-# This is needed for the cookie upload API endpoint
+# Grant flacfetch service account permission to add AND destroy versions of the
+# youtube-cookies secret (cookie upload endpoint + rotation prune). See note
+# above re: secretVersionManager vs secretVersionAdder.
 youtube_cookies_iam = secretmanager.SecretIamMember(
     "youtube-cookies-writer",
     secret_id=youtube_cookies_secret.id,
-    role="roles/secretmanager.secretVersionAdder",
+    role="roles/secretmanager.secretVersionManager",
     member=flacfetch_sa.email.apply(lambda email: f"serviceAccount:{email}"),
 )
 

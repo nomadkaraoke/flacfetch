@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.1] - 2026-06-14
+
+### Fixed
+- Secret-version prune now actually destroys stale versions. The flacfetch
+  service account was granted `secretVersionAdder` but not `secretVersionManager`,
+  so `destroy_secret_version` silently failed with PERMISSION_DENIED and ENABLED
+  versions of `youtube-cookies` / `spotify-oauth-token` accumulated unbounded
+  (a GCP cost regression). IAM role upgraded to `secretVersionManager`.
+- The Spotify token health-check writeback (`_persist_spotify_token_to_secret_manager`)
+  now prunes old versions too — previously it added a version without pruning,
+  bypassing the cleanup the config endpoints already did.
+
+### Changed
+- Prune logic consolidated into `flacfetch/api/services/secret_manager_utils.py`
+  so every secret write path prunes consistently.
+
 ## [0.19.2] - 2026-03-06
 
 ### Added
