@@ -24,8 +24,10 @@ class TestAppCreation:
         from flacfetch.api import create_app
         app = create_app()
 
-        # Get all route paths
-        routes = [route.path for route in app.routes]
+        # Collect registered paths in a way that works across FastAPI versions
+        # (newer versions hide included-router routes behind _IncludedRouter).
+        from _route_paths import collect_route_paths
+        routes = collect_route_paths(app)
 
         # Check key routes exist
         assert "/health" in routes

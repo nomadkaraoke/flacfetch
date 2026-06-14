@@ -15,7 +15,10 @@ class TestCacheRoutes:
         from flacfetch.api import create_app
         app = create_app()
 
-        routes = [route.path for route in app.routes]
+        # Collect registered paths in a way that works across FastAPI versions
+        # (newer versions hide included-router routes behind _IncludedRouter).
+        from _route_paths import collect_route_paths
+        routes = collect_route_paths(app)
 
         assert "/cache/stats" in routes
         assert "/cache/search" in routes
