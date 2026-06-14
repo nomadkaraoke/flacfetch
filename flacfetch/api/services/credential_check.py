@@ -84,6 +84,12 @@ def _persist_spotify_token_to_secret_manager(cache_path: str) -> None:
         client.add_secret_version(
             request={"parent": secret_name, "payload": {"data": token_content.encode("utf-8")}}
         )
+        # Prune stale versions on this write path too — otherwise the
+        # health-check writeback accumulates ENABLED versions unbounded
+        # (the config-endpoint path already prunes, this one used not to).
+        from .secret_manager_utils import destroy_old_secret_versions
+
+        destroy_old_secret_versions(client, secret_name, keep=5)
         logger.info("Persisted refreshed Spotify token to Secret Manager")
     except ImportError:
         logger.debug("google-cloud-secret-manager not installed, skipping token writeback")

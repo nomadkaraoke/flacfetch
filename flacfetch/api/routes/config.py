@@ -15,33 +15,15 @@ from pydantic import BaseModel, Field
 
 from ...core.config import get_spotify_cache_path, get_youtube_cookies_path
 from ..auth import verify_api_key
+from ..services.secret_manager_utils import destroy_old_secret_versions
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/config", tags=["config"])
 
-
-def _destroy_old_secret_versions(client, secret_path: str, keep: int = 5) -> None:
-    """Destroy ENABLED secret versions beyond the newest `keep`.
-
-    OAuth/cookie secrets are rewritten on every refresh, which would
-    otherwise accumulate hundreds of versions and cost ~$0.06/version/month
-    in replica storage. Only the newest version is read (`versions/latest`),
-    so older versions are dead weight.
-    """
-    try:
-        versions = list(client.list_secret_versions(request={"parent": secret_path}))
-        enabled = [
-            v for v in versions
-            if v.state == v.State.ENABLED  # type: ignore[attr-defined]
-        ]
-        enabled.sort(key=lambda v: v.create_time, reverse=True)
-        for v in enabled[keep:]:
-            try:
-                client.destroy_secret_version(request={"name": v.name})
-            except Exception as e:
-                logger.warning(f"Failed to destroy {v.name}: {e}")
-    except Exception as e:
-        logger.warning(f"Failed to prune old secret versions for {secret_path}: {e}")
+# Backwards-compatible alias: the prune helper now lives in the shared
+# secret_manager_utils module so every write path (including the credential
+# health-check token writeback) prunes consistently.
+_destroy_old_secret_versions = destroy_old_secret_versions
 
 
 # =============================================================================

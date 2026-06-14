@@ -43,6 +43,55 @@ class TestPersistSpotifyToken:
             else:
                 sys.modules.pop("google.cloud.secretmanager", None)
 
+    def test_writeback_prunes_old_versions(self, tmp_path):
+        """Regression: the token writeback path must prune old versions.
+
+        Previously this path called add_secret_version WITHOUT pruning (and the
+        flacfetch SA lacked destroy permission), so ENABLED versions accumulated
+        unbounded — a cost regression fixed June 2026. This guards the code half.
+        """
+        import sys
+
+        from flacfetch.api.services.credential_check import _persist_spotify_token_to_secret_manager
+
+        cache_file = tmp_path / ".cache"
+        cache_file.write_text(json.dumps({"access_token": "tok"}))
+
+        def _mk_version(name, create_time):
+            state_enum = MagicMock()
+            state_enum.ENABLED = "ENABLED"
+            v = MagicMock()
+            v.name = name
+            v.state = state_enum.ENABLED
+            v.State = state_enum  # so `v.state == v.State.ENABLED` resolves
+            v.create_time = create_time
+            return v
+
+        mock_client = MagicMock()
+        mock_client.list_secret_versions.return_value = [
+            _mk_version(f"v{i}", i) for i in range(8)
+        ]
+        mock_sm_module = MagicMock()
+        mock_sm_module.SecretManagerServiceClient.return_value = mock_client
+
+        original = sys.modules.get("google.cloud.secretmanager")
+        sys.modules["google.cloud.secretmanager"] = mock_sm_module
+        try:
+            with patch.dict(os.environ, {"GOOGLE_CLOUD_PROJECT": "test-project"}):
+                _persist_spotify_token_to_secret_manager(str(cache_file))
+            mock_client.add_secret_version.assert_called_once()
+            # keep=5 of 8 ENABLED → the 3 oldest are destroyed
+            destroyed = [
+                c.kwargs["request"]["name"]
+                for c in mock_client.destroy_secret_version.call_args_list
+            ]
+            assert sorted(destroyed) == ["v0", "v1", "v2"]
+        finally:
+            if original is not None:
+                sys.modules["google.cloud.secretmanager"] = original
+            else:
+                sys.modules.pop("google.cloud.secretmanager", None)
+
     def test_writeback_skips_empty_file(self, tmp_path):
         """Test that writeback skips if cache file is empty."""
         from flacfetch.api.services.credential_check import _persist_spotify_token_to_secret_manager
