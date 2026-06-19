@@ -51,7 +51,20 @@ sudo FF_ADMIN_USER=andrew \
 
 `FF_GIT_REF` (default `main`), `FF_REPO`, `FF_GCP_PROJECT` (`nomadkaraoke`),
 `FF_GCS_BUCKET`, `FF_MIN_DATA_GB` (default `50`), `LIBRESPOT_VERSION` (`0.8.0`),
-`FF_ADMIN_USER`, `FF_ADMIN_PUBKEY`.
+`FF_ADMIN_USER`, `FF_ADMIN_PUBKEY`, `FF_ENABLE_KEEPER` (default `true`).
+
+### Staging vs cutover (`FF_ENABLE_KEEPER`)
+
+The credential keeper is a **single-writer** — it must not run while another box's
+keeper is live (shared Google account + rotating Secret Manager secrets). While the
+old box is still serving:
+
+```bash
+sudo FF_ENABLE_KEEPER=false bash deploy/provision.sh   # stage: everything up except keeper
+```
+
+At cutover, after stopping the old box's keeper, re-run with `FF_ENABLE_KEEPER=true`.
+Full sequencing in `../docs/archive/2026-06-18-netcup-provision-design.md`.
 
 ## Safety notes
 

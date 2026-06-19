@@ -36,6 +36,11 @@ FF_GCS_BUCKET="${FF_GCS_BUCKET:-karaoke-gen-storage-nomadkaraoke}"
 FF_MIN_DATA_GB="${FF_MIN_DATA_GB:-50}"
 LIBRESPOT_VERSION="${LIBRESPOT_VERSION:-0.8.0}"
 SPOTIPY_REDIRECT_URI="${SPOTIPY_REDIRECT_URI:-http://127.0.0.1:8888/callback}"
+# Staging guard: keep the credential keeper + cred-check timer STOPPED so this
+# box does not fight the live box for the shared Google session / the rotating
+# Secret Manager secrets (single-writer). Set true only at cutover, once the old
+# box's keeper is stopped. The units are still written either way.
+FF_ENABLE_KEEPER="${FF_ENABLE_KEEPER:-true}"
 
 # ---- fixed paths (match prod so systemd units are identical) ---------------
 APP_DIR=/opt/flacfetch
@@ -505,7 +510,6 @@ fi
 systemctl daemon-reload
 systemctl enable --now xvfb >/dev/null 2>&1 || true
 systemctl enable --now ytdlp-update.timer >/dev/null 2>&1 || true
-systemctl enable --now flacfetch-credential-check.timer >/dev/null 2>&1 || true
 systemctl enable flacfetch >/dev/null 2>&1 || true
 if [ -f "$ENV_FILE" ]; then
   systemctl restart flacfetch
@@ -513,7 +517,18 @@ if [ -f "$ENV_FILE" ]; then
 else
   warn "not starting flacfetch (no $ENV_FILE) — it would run without secrets"
 fi
-if [ "$KEEPER_CONFIGURED" = true ]; then systemctl enable --now credential-keeper >/dev/null 2>&1 && systemctl restart credential-keeper || true; fi
+# Keeper + cred-check touch the SHARED Google session and the rotating Secret
+# Manager secrets. Only enable them once this is the sole live box (cutover).
+if [ "$FF_ENABLE_KEEPER" = true ]; then
+  systemctl enable --now flacfetch-credential-check.timer >/dev/null 2>&1 || true
+  if [ "$KEEPER_CONFIGURED" = true ]; then
+    systemctl enable --now credential-keeper >/dev/null 2>&1 && systemctl restart credential-keeper || true
+    log "credential keeper started"
+  fi
+else
+  systemctl disable --now credential-keeper flacfetch-credential-check.timer >/dev/null 2>&1 || true
+  warn "FF_ENABLE_KEEPER=false — keeper + cred-check left STOPPED (staging; avoids dual-writer conflict with the live GCP box). Set FF_ENABLE_KEEPER=true at cutover."
+fi
 
 # =============================================================================
 log "Summary"

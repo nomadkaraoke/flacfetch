@@ -71,6 +71,44 @@ vCPU / 7.8 GiB / 256 GB). **All stages green:**
 Systemd units (ported 1:1 from the GCE script): `flacfetch`, `xvfb`,
 `credential-keeper`, `ytdlp-update.timer`, `flacfetch-credential-check.timer`.
 
+## Cutover sequencing (conflict-aware) — `flacup` is the future prod box
+
+`flacup.nomadkaraoke.com` will replace the GCE box, but the old box keeps serving
+karaoke-gen until a controlled cutover (targeted for a weekend, not interrupting
+live traffic). The one thing that **cannot run on both boxes at once**:
+
+> **The credential keeper is a single-writer.** Two keepers would log into the same
+> `nomadflacfetch@gmail.com` from two IPs (Google security flags) *and* both write
+> rotated `youtube-cookies` / `spotify-oauth-token` versions back to Secret Manager,
+> racing + churning the keep-newest-5 prune. The daily `flacfetch-credential-check`
+> timer can also refresh+writeback, so it's gated the same way.
+
+Provisioner support: **`FF_ENABLE_KEEPER=false`** (staging default for pre-cutover)
+writes the keeper + cred-check units but leaves them stopped. Set `true` only at
+cutover, *after* the old box's keeper is stopped.
+
+**Stage now / this weekend (zero conflict — old box untouched):**
+1. Enable **2FA on RED + OPS** (plan §3.1) so the new IP is a non-event for trackers.
+2. Create a `flacfetch-service` SA key; place `/etc/flacfetch/gcs-sa.json` +
+   `/etc/flacfetch/flacfetch.env` (from Secret Manager) on `flacup`.
+3. `sudo FF_ENABLE_KEEPER=false bash deploy/provision.sh` → flacfetch API up, GCS
+   reachable, **no keeper, no torrents** (transmission empty until cutover, so no
+   tracker announce from the new IP).
+4. Validate the non-conflicting bits: `/health` + `/health/deep`, a GCS read/write
+   round-trip, and the Spotify localhost-OAuth redirect sanity (plan §4.6).
+
+**Cutover (when ready):**
+1. **Stop the GCE keeper** (`systemctl stop credential-keeper` on the old box) — now
+   there is a single writer.
+2. `rsync` transmission state + downloads **and the logged-in Chrome profile**
+   (`/mnt/flacfetch-data/browser-profiles/google/`) old → new (copying the warm
+   profile beats a fresh login from a new IP, plan §3.6).
+3. `sudo FF_ENABLE_KEEPER=true bash deploy/provision.sh` on `flacup` → keeper +
+   cred-check come up; confirm cookie + Spotify refresh succeed.
+4. Repoint karaoke-gen's flacfetch base URL → `flacup.nomadkaraoke.com`; run one
+   end-to-end job; watch RED/OPS ratio.
+5. Bake in parallel a few days, then decommission the GCE box (plan §4.9).
+
 ## Follow-ups (not in v1)
 
 - Host firewall (ufw/nftables) — lock `:8080` to karaoke-gen egress and/or front
