@@ -61,6 +61,7 @@ vCPU / 7.8 GiB / 256 GB). **All stages green:**
 
 ```
 /etc/flacfetch/flacfetch.env     # static secrets (operator-populated, chmod 600)
+/etc/flacfetch/runtime.env       # secrets the units read via EnvironmentFile= (chmod 600, generated)
 /etc/flacfetch/gcs-sa.json       # flacfetch-service SA key (operator-placed, chmod 600)
 /opt/flacfetch/                  # git checkout + venv
 /mnt/flacfetch-data/             # data partition (vda5)
@@ -70,6 +71,13 @@ vCPU / 7.8 GiB / 256 GB). **All stages green:**
 
 Systemd units (ported 1:1 from the GCE script): `flacfetch`, `xvfb`,
 `credential-keeper`, `ytdlp-update.timer`, `flacfetch-credential-check.timer`.
+
+**Secrets are NOT inlined in the unit files.** The GCE script embedded
+`Environment="RED_API_KEY=…"` directly in each `.service` — and systemd writes
+those world-readable (644), exposing them to any local user. Here the secrets are
+written to `runtime.env` (chmod 600, root) and pulled in with
+`EnvironmentFile=-/etc/flacfetch/runtime.env`; only non-secret config stays inline.
+(Worth back-porting this hardening to the GCE box too.)
 
 ## Cutover sequencing (conflict-aware) — `flacup` is the future prod box
 

@@ -48,6 +48,7 @@ VENV="$APP_DIR/venv"
 ETC_DIR=/etc/flacfetch
 ENV_FILE="$ETC_DIR/flacfetch.env"
 SA_KEY="$ETC_DIR/gcs-sa.json"
+RUNTIME_ENV="$ETC_DIR/runtime.env"   # 600, root-only; keeps secrets out of unit files
 DATA_MOUNT=/mnt/flacfetch-data
 DATA_LABEL=flacfetch-data
 TRANSMISSION_DATA="$DATA_MOUNT/transmission"
@@ -70,7 +71,7 @@ export DEBIAN_FRONTEND=noninteractive
 # =============================================================================
 log "Stage 1 — apt dependencies"
 # =============================================================================
-APT_CORE="python3-pip python3-venv python3-full transmission-daemon ffmpeg git curl unzip xvfb ca-certificates"
+APT_CORE="python3-pip python3-venv python3-full transmission-daemon ffmpeg git curl unzip xvfb ca-certificates gdisk util-linux"
 APT_CHROME="libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libdbus-1-3 \
  libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
  libgbm1 libpango-1.0-0 libcairo2 libasound2 libxshmfence1"
@@ -208,12 +209,17 @@ if [ -d "$APP_DIR/.git" ]; then
   log "updating existing checkout ($FF_GIT_REF)"
   git config --global --add safe.directory "$APP_DIR"
   git -C "$APP_DIR" stash >/dev/null 2>&1 || true
-  git -C "$APP_DIR" fetch origin --quiet || warn "git fetch failed"
-  git -C "$APP_DIR" reset --hard "origin/$FF_GIT_REF" || warn "git reset failed"
+  git -C "$APP_DIR" fetch origin --tags --prune --quiet || warn "git fetch failed"
+  # works for a branch (reset to its remote tip) or a tag/commit (reset to the ref)
+  if git -C "$APP_DIR" show-ref --verify --quiet "refs/remotes/origin/$FF_GIT_REF"; then
+    git -C "$APP_DIR" reset --hard "origin/$FF_GIT_REF" || warn "git reset failed"
+  else
+    git -C "$APP_DIR" reset --hard "$FF_GIT_REF" || warn "git reset failed"
+  fi
 else
   log "fresh clone ($FF_GIT_REF)"
   git clone --quiet "$FF_REPO" "$APP_DIR" || die "git clone failed"
-  git -C "$APP_DIR" checkout "$FF_GIT_REF" || true
+  git -C "$APP_DIR" checkout "$FF_GIT_REF" --quiet || warn "git checkout $FF_GIT_REF failed"
 fi
 [ -d "$VENV" ] || python3 -m venv "$VENV"
 # shellcheck disable=SC1091
@@ -256,6 +262,24 @@ if [ -f "$ENV_FILE" ]; then
 else
   warn "no env file at $ENV_FILE — credentialed services will be created but not started"
 fi
+# Secrets go in a root-only (600) EnvironmentFile, NEVER inline in the unit files
+# (which systemd writes world-readable 644). Units reference this via
+# EnvironmentFile=-... (optional, so a no-secret run still works).
+install -d -m 700 "$ETC_DIR"
+( umask 077; cat > "$RUNTIME_ENV" <<RT
+FLACFETCH_API_KEY=$FLACFETCH_API_KEY
+RED_API_KEY=$RED_API_KEY
+RED_API_URL=$RED_API_URL
+OPS_API_KEY=$OPS_API_KEY
+OPS_API_URL=$OPS_API_URL
+SPOTIPY_CLIENT_ID=$SPOTIPY_CLIENT_ID
+SPOTIPY_CLIENT_SECRET=$SPOTIPY_CLIENT_SECRET
+PUSHBULLET_API_KEY=$PUSHBULLET_API_KEY
+FLACFETCH_ACCOUNT_EMAIL=$FLACFETCH_ACCOUNT_EMAIL
+FLACFETCH_ACCOUNT_PASSWORD=$FLACFETCH_ACCOUNT_PASSWORD
+RT
+)
+chmod 600 "$RUNTIME_ENV"
 
 # =============================================================================
 log "Stage 7 — librespot (Spotify capture)"
@@ -338,13 +362,7 @@ Requires=transmission-daemon.service
 Type=simple
 User=root
 WorkingDirectory=$APP_DIR
-Environment="FLACFETCH_API_KEY=${FLACFETCH_API_KEY}"
-Environment="RED_API_KEY=${RED_API_KEY}"
-Environment="RED_API_URL=${RED_API_URL}"
-Environment="OPS_API_KEY=${OPS_API_KEY}"
-Environment="OPS_API_URL=${OPS_API_URL}"
-Environment="SPOTIPY_CLIENT_ID=${SPOTIPY_CLIENT_ID}"
-Environment="SPOTIPY_CLIENT_SECRET=${SPOTIPY_CLIENT_SECRET}"
+EnvironmentFile=-$RUNTIME_ENV
 Environment="SPOTIPY_REDIRECT_URI=${SPOTIPY_REDIRECT_URI}"
 Environment="PATH=$DENO_INSTALL/bin:/usr/local/bin:/usr/bin:/bin"
 Environment="DENO_INSTALL=$DENO_INSTALL"
@@ -357,7 +375,6 @@ Environment="FLACFETCH_DOWNLOAD_DIR=${DOWNLOAD_DIR}"
 Environment="TRANSMISSION_HOST=localhost"
 Environment="TRANSMISSION_PORT=9091"
 Environment="YOUTUBE_COOKIES_FILE=${YOUTUBE_COOKIES_FILE}"
-Environment="PUSHBULLET_API_KEY=${PUSHBULLET_API_KEY}"
 ExecStart=$VENV/bin/flacfetch serve --host 0.0.0.0 --port 8080
 Restart=always
 RestartSec=10
@@ -444,11 +461,9 @@ Type=oneshot
 ExecStart=$APP_DIR/check-credentials.sh
 User=root
 WorkingDirectory=$APP_DIR
-Environment="SPOTIPY_CLIENT_ID=${SPOTIPY_CLIENT_ID}"
-Environment="SPOTIPY_CLIENT_SECRET=${SPOTIPY_CLIENT_SECRET}"
+EnvironmentFile=-$RUNTIME_ENV
 Environment="SPOTIPY_REDIRECT_URI=${SPOTIPY_REDIRECT_URI}"
 Environment="YOUTUBE_COOKIES_FILE=${YOUTUBE_COOKIES_FILE}"
-Environment="PUSHBULLET_API_KEY=${PUSHBULLET_API_KEY}"
 Environment="KEEPER_STATUS_FILE=${BROWSER_PROFILE_DIR}/keeper-status.json"
 Environment="GOOGLE_CLOUD_PROJECT=${FF_GCP_PROJECT}"
 Environment="GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS}"
@@ -477,14 +492,9 @@ Requires=xvfb.service
 Type=simple
 User=root
 WorkingDirectory=$APP_DIR
+EnvironmentFile=-$RUNTIME_ENV
 Environment="DISPLAY=:99"
-Environment="FLACFETCH_API_KEY=${FLACFETCH_API_KEY}"
-Environment="FLACFETCH_ACCOUNT_EMAIL=${FLACFETCH_ACCOUNT_EMAIL}"
-Environment="FLACFETCH_ACCOUNT_PASSWORD=${FLACFETCH_ACCOUNT_PASSWORD}"
-Environment="SPOTIPY_CLIENT_ID=${SPOTIPY_CLIENT_ID}"
-Environment="SPOTIPY_CLIENT_SECRET=${SPOTIPY_CLIENT_SECRET}"
 Environment="SPOTIPY_REDIRECT_URI=${SPOTIPY_REDIRECT_URI}"
-Environment="PUSHBULLET_API_KEY=${PUSHBULLET_API_KEY}"
 Environment="BROWSER_PROFILE_DIR=${BROWSER_PROFILE_DIR}"
 Environment="KEEPER_STATUS_FILE=${BROWSER_PROFILE_DIR}/keeper-status.json"
 Environment="KEEPER_NOTIFY_ON_SUCCESS=false"
