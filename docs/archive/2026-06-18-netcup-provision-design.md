@@ -9,8 +9,8 @@
 ## Validation that justified this work (2026-06-18)
 
 A throwaway smoke test (`nomadkaraoke/netcup-vps-test/test-setup.sh`) ran on the
-provisioned box (`flacup.nomadkaraoke.com`, `152.53.245.109`, Debian 13 trixie, 4
-vCPU / 7.8 GiB / 256 GB). **All stages green:**
+provisioned box (`flacup.nomadkaraoke.com`, Debian 13 trixie, 4 vCPU / 7.8 GiB /
+256 GB). **All stages green:**
 
 - **Stage 4 (make-or-break):** headed Patchright Chromium launched under Xvfb and
   loaded `accounts.google.com` (`title='Sign in - Google Accounts'`), `ldd` clean.
@@ -86,7 +86,7 @@ karaoke-gen until a controlled cutover (targeted for a weekend, not interrupting
 live traffic). The one thing that **cannot run on both boxes at once**:
 
 > **The credential keeper is a single-writer.** Two keepers would log into the same
-> `nomadflacfetch@gmail.com` from two IPs (Google security flags) *and* both write
+> shared keeper Google account from two IPs (Google security flags) *and* both write
 > rotated `youtube-cookies` / `spotify-oauth-token` versions back to Secret Manager,
 > racing + churning the keep-newest-5 prune. The daily `flacfetch-credential-check`
 > timer can also refresh+writeback, so it's gated the same way.
