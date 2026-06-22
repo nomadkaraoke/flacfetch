@@ -27,11 +27,19 @@ def main() -> int:
         client = secretmanager.SecretManagerServiceClient()
         name = f"projects/{project}/secrets/{secret_id}/versions/latest"
         resp = client.access_secret_version(request={"name": name})
-        sys.stdout.buffer.write(resp.payload.data)
-        return 0
+        payload = resp.payload.data
     except Exception as exc:  # noqa: BLE001 - provisioner treats any failure as "absent"
-        print(f"secret fetch failed for {secret_id}: {exc}", file=sys.stderr)
+        # Log only the exception *type*, never str(exc): the payload is a secret
+        # and we must not risk it (or anything derived) reaching stderr/logs.
+        print(
+            f"secret fetch failed for {secret_id}: {type(exc).__name__}",
+            file=sys.stderr,
+        )
         return 1
+    # Write outside the try so a broken-pipe on stdout isn't caught (and logged)
+    # while the secret payload is in scope.
+    sys.stdout.buffer.write(payload)
+    return 0
 
 
 if __name__ == "__main__":
