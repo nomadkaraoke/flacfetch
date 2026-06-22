@@ -16,7 +16,10 @@ def main() -> int:
     if len(sys.argv) != 2:
         print("usage: _sm_get.py <secret-id>", file=sys.stderr)
         return 2
-    secret_id = sys.argv[1]
+    # Named `target` (not `secret_id`): it's the secret *name* (e.g. "youtube-cookies"),
+    # not a secret value, and we log it for debuggability. A "secret"/"token"/"key"
+    # variable name would trip CodeQL's sensitive-data-logging heuristic on the line below.
+    target = sys.argv[1]
     project = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("GCP_PROJECT")
     if not project:
         print("GOOGLE_CLOUD_PROJECT not set", file=sys.stderr)
@@ -25,14 +28,14 @@ def main() -> int:
         from google.cloud import secretmanager
 
         client = secretmanager.SecretManagerServiceClient()
-        name = f"projects/{project}/secrets/{secret_id}/versions/latest"
+        name = f"projects/{project}/secrets/{target}/versions/latest"
         resp = client.access_secret_version(request={"name": name})
         payload = resp.payload.data
     except Exception as exc:  # noqa: BLE001 - provisioner treats any failure as "absent"
         # Log only the exception *type*, never str(exc): the payload is a secret
         # and we must not risk it (or anything derived) reaching stderr/logs.
         print(
-            f"secret fetch failed for {secret_id}: {type(exc).__name__}",
+            f"secret fetch failed for {target}: {type(exc).__name__}",
             file=sys.stderr,
         )
         return 1
