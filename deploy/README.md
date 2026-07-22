@@ -70,5 +70,11 @@ Full sequencing in `../docs/archive/2026-06-18-netcup-provision-design.md`.
 
 - The data-partition step **only** creates a new partition in free space and
   **never** mkfs's a device that already has a filesystem — safe to re-run.
-- Services run as `root` (matches prod; the keeper runs headed Chrome
-  `--no-sandbox`). De-rooting and a host firewall on `:8080` are follow-ups.
+- `flacfetch`, `credential-keeper` and the cred-check timer run as the dedicated
+  non-root **`flacfetch`** service user (override with `FF_SERVICE_USER`). It is
+  added to the `debian-transmission` group and the download tree is group-shared
+  + setgid so both processes read/write completed files. Only `xvfb` and the
+  yt-dlp updater (which restarts services) stay `root`. The keeper still runs
+  headed Chrome `--no-sandbox`; its browser is installed into
+  `$APP_DIR/ms-playwright` (`PLAYWRIGHT_BROWSERS_PATH`) so the non-root user can
+  find it. A host firewall on `:8080` is handled at the Cloudflare edge / nftables.

@@ -8,16 +8,21 @@
 #     sudo bash deploy/provision.sh
 #
 # What it does (each step is idempotent):
-#   1. apt deps (Chromium/Xvfb libs, transmission, ffmpeg, ...)   [Debian 13 t64-aware]
-#   2. (optional) non-root sudo login user                        [FF_ADMIN_USER/PUBKEY]
-#   3. data partition on the root disk -> /mnt/flacfetch-data     [creates vda5 in free space]
-#   4. Deno runtime (yt-dlp EJS)
-#   5. flacfetch checkout + venv + extras + Patchright chromium
-#   6. secrets: static from /etc/flacfetch/flacfetch.env;
+#   1.  apt deps (Chromium/Xvfb libs, transmission, ffmpeg, ...)  [Debian 13 t64-aware]
+#   2.  (optional) non-root sudo login user                       [FF_ADMIN_USER/PUBKEY]
+#   2b. dedicated non-root service user ($FF_SERVICE_USER)        [runs flacfetch + keeper]
+#   3.  data partition on the root disk -> /mnt/flacfetch-data    [creates vda5 in free space]
+#   4.  Deno runtime (yt-dlp EJS)
+#   5.  flacfetch checkout + venv + extras + Patchright chromium  [browser -> $APP_DIR/ms-playwright]
+#   6.  secrets: static from /etc/flacfetch/flacfetch.env;
 #               GCS + rotating secrets via SA key (GOOGLE_APPLICATION_CREDENTIALS)
-#   7. librespot (downloaded from GCS via SA key)
-#   8. transmission settings + persistent-disk symlinks
-#   9. systemd units: flacfetch, xvfb, credential-keeper, ytdlp/cred-check timers
+#   7.  librespot (downloaded from GCS via SA key)
+#   8.  transmission settings + persistent-disk symlinks
+#   8b. service-user ownership (chown app tree, group-share download dir)
+#   9.  systemd units: flacfetch, xvfb, credential-keeper, ytdlp/cred-check timers
+#
+# flacfetch, credential-keeper and the cred-check timer run as the non-root
+# $FF_SERVICE_USER (least privilege); only xvfb + the yt-dlp updater stay root.
 #
 # Secret-optional: with no .env / SA key it installs all infra and SKIPS the
 # credentialed services with warnings (same posture as the GCE script). Drop the
@@ -41,6 +46,11 @@ SPOTIPY_REDIRECT_URI="${SPOTIPY_REDIRECT_URI:-http://127.0.0.1:8888/callback}"
 # Secret Manager secrets (single-writer). Set true only at cutover, once the old
 # box's keeper is stopped. The units are still written either way.
 FF_ENABLE_KEEPER="${FF_ENABLE_KEEPER:-true}"
+# Dedicated non-root service user that runs flacfetch + the credential keeper +
+# the credential-check timer (least privilege). It is added to the
+# debian-transmission group so it can read/write the shared torrent download
+# tree. Xvfb + the yt-dlp updater stay as root (updater restarts services).
+FF_SERVICE_USER="${FF_SERVICE_USER:-flacfetch}"
 
 # ---- fixed paths (match prod so systemd units are identical) ---------------
 APP_DIR=/opt/flacfetch
@@ -55,6 +65,7 @@ TRANSMISSION_DATA="$DATA_MOUNT/transmission"
 TRANSMISSION_CONFIG_DIR="/var/lib/transmission-daemon/.config/transmission-daemon"
 TRANSMISSION_SETTINGS="/etc/transmission-daemon/settings.json"
 BROWSER_PROFILE_DIR="$DATA_MOUNT/browser-profiles"
+PLAYWRIGHT_BROWSERS_PATH="$APP_DIR/ms-playwright"  # shared, service-user-owned (not /root/.cache)
 DENO_INSTALL=/opt/deno
 LIBRESPOT_BIN=/usr/local/bin/librespot
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -157,6 +168,27 @@ if [ -n "${FF_ADMIN_USER:-}" ]; then
   fi
 else
   log "skipping admin user (set FF_ADMIN_USER + FF_ADMIN_PUBKEY to create one)"
+fi
+
+# =============================================================================
+log "Stage 2b — dedicated non-root service user ($FF_SERVICE_USER)"
+# =============================================================================
+# flacfetch + credential-keeper + credential-check run as this user, not root.
+# Its home is the app dir (owned by it after Stage 8b); nologin shell. It joins
+# the debian-transmission group so it can read completed torrents and write its
+# own YouTube/Spotify downloads into the shared download tree.
+if ! id "$FF_SERVICE_USER" >/dev/null 2>&1; then
+  log "creating system user '$FF_SERVICE_USER'"
+  useradd --system --home-dir "$APP_DIR" --no-create-home \
+          --shell /usr/sbin/nologin "$FF_SERVICE_USER" \
+    || die "failed to create service user $FF_SERVICE_USER"
+else
+  log "service user '$FF_SERVICE_USER' already exists"
+fi
+if id debian-transmission >/dev/null 2>&1; then
+  usermod -aG debian-transmission "$FF_SERVICE_USER" \
+    && log "added '$FF_SERVICE_USER' to debian-transmission group" \
+    || warn "could not add '$FF_SERVICE_USER' to debian-transmission group"
 fi
 
 # =============================================================================
@@ -272,6 +304,11 @@ pip install --upgrade pip --quiet
 pip install -e "${APP_DIR}[api,spotify]" --quiet || die "pip install flacfetch[api,spotify] failed"
 pip install --upgrade yt-dlp yt-dlp-ejs --quiet || warn "yt-dlp/ejs install failed"
 pip install -e "${APP_DIR}[keeper]" --quiet || die "pip install flacfetch[keeper] failed"
+# Install the browser into a shared, service-user-owned path (not /root/.cache/
+# ms-playwright) so the non-root keeper can find it. Must match the keeper unit's
+# PLAYWRIGHT_BROWSERS_PATH below.
+export PLAYWRIGHT_BROWSERS_PATH
+mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"
 patchright install chromium >/dev/null 2>&1 || python -m patchright install chromium \
   || warn "patchright chromium install failed"
 FLACFETCH_VERSION="$(python -c 'import flacfetch; print(flacfetch.__version__)' 2>/dev/null || echo unknown)"
@@ -392,9 +429,48 @@ systemctl start transmission-daemon
 for _ in $(seq 1 10); do transmission-remote localhost:9091 -l >/dev/null 2>&1 && { log "transmission up"; break; }; sleep 1; done
 
 # =============================================================================
+log "Stage 8b — service-user ownership (de-root)"
+# =============================================================================
+# Hand the app tree + runtime state to the non-root service user so flacfetch,
+# the keeper, and the cred-check timer never need root. Idempotent.
+DOWNLOAD_DIR="$TRANSMISSION_DATA/downloads"
+if id "$FF_SERVICE_USER" >/dev/null 2>&1; then
+  # App checkout, venv, browser binary, gazelle/torrent caches, seeded rotating
+  # secrets ($APP_DIR/.cache + youtube_cookies.txt all live under $APP_DIR).
+  # These ownership handoffs are load-bearing: if any fail the non-root units
+  # below can't read the app tree / profile / SA key, so fail hard rather than
+  # ship broken services.
+  chown -R "$FF_SERVICE_USER:$FF_SERVICE_USER" "$APP_DIR" || die "chown $APP_DIR failed"
+  # Warm Chrome profile + keeper-status.json (NOT the transmission subtree, which
+  # stays debian-transmission-owned).
+  install -d -o "$FF_SERVICE_USER" -g "$FF_SERVICE_USER" "$BROWSER_PROFILE_DIR"
+  chown -R "$FF_SERVICE_USER:$FF_SERVICE_USER" "$BROWSER_PROFILE_DIR" || die "chown $BROWSER_PROFILE_DIR failed"
+  # SA key is opened by the app process (GOOGLE_APPLICATION_CREDENTIALS) — the
+  # service user must read it. Keep 600. runtime.env stays 600/root: systemd
+  # reads EnvironmentFile as root before dropping privileges.
+  if [ -f "$SA_KEY" ]; then
+    chown "$FF_SERVICE_USER:$FF_SERVICE_USER" "$SA_KEY" || die "chown $SA_KEY failed"
+    chmod 600 "$SA_KEY"
+  fi
+
+  # Shared download tree: transmission (debian-transmission) downloads torrents
+  # here and flacfetch reads them AND writes its own YouTube/Spotify outputs.
+  # Make it group-shared + setgid so new files inherit the debian-transmission
+  # group; the flacfetch unit sets UMask=002 so peers stay group-writable.
+  if id debian-transmission >/dev/null 2>&1 && [ -d "$DOWNLOAD_DIR" ]; then
+    chgrp -R debian-transmission "$DOWNLOAD_DIR" 2>/dev/null || true
+    chmod -R g+rwX "$DOWNLOAD_DIR" 2>/dev/null || true
+    find "$DOWNLOAD_DIR" -type d -exec chmod g+s {} + 2>/dev/null || true
+    log "download tree $DOWNLOAD_DIR is group-shared (debian-transmission, setgid)"
+  fi
+  log "ownership handed to '$FF_SERVICE_USER'"
+else
+  warn "service user '$FF_SERVICE_USER' missing — leaving files root-owned"
+fi
+
+# =============================================================================
 log "Stage 9 — systemd units"
 # =============================================================================
-DOWNLOAD_DIR="$TRANSMISSION_DATA/downloads"
 
 cat > /etc/systemd/system/flacfetch.service <<SYSTEMD
 [Unit]
@@ -404,9 +480,13 @@ Requires=transmission-daemon.service
 
 [Service]
 Type=simple
-User=root
+User=$FF_SERVICE_USER
+Group=$FF_SERVICE_USER
+SupplementaryGroups=debian-transmission
+UMask=002
 WorkingDirectory=$APP_DIR
 EnvironmentFile=-$RUNTIME_ENV
+Environment="HOME=$APP_DIR"
 Environment="SPOTIPY_REDIRECT_URI=${SPOTIPY_REDIRECT_URI}"
 Environment="PATH=$DENO_INSTALL/bin:/usr/local/bin:/usr/bin:/bin"
 Environment="DENO_INSTALL=$DENO_INSTALL"
@@ -503,9 +583,12 @@ After=network.target flacfetch.service
 [Service]
 Type=oneshot
 ExecStart=$APP_DIR/check-credentials.sh
-User=root
+User=$FF_SERVICE_USER
+Group=$FF_SERVICE_USER
+UMask=002
 WorkingDirectory=$APP_DIR
 EnvironmentFile=-$RUNTIME_ENV
+Environment="HOME=$APP_DIR"
 Environment="SPOTIPY_REDIRECT_URI=${SPOTIPY_REDIRECT_URI}"
 Environment="YOUTUBE_COOKIES_FILE=${YOUTUBE_COOKIES_FILE}"
 Environment="KEEPER_STATUS_FILE=${BROWSER_PROFILE_DIR}/keeper-status.json"
@@ -534,9 +617,13 @@ Requires=xvfb.service
 
 [Service]
 Type=simple
-User=root
+User=$FF_SERVICE_USER
+Group=$FF_SERVICE_USER
+UMask=002
 WorkingDirectory=$APP_DIR
 EnvironmentFile=-$RUNTIME_ENV
+Environment="HOME=$APP_DIR"
+Environment="PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH}"
 Environment="DISPLAY=:99"
 Environment="SPOTIPY_REDIRECT_URI=${SPOTIPY_REDIRECT_URI}"
 Environment="BROWSER_PROFILE_DIR=${BROWSER_PROFILE_DIR}"
