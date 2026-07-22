@@ -150,3 +150,56 @@ class TestSelectiveDownload:
                     assert 1 in call_kwargs.get('files_wanted', [])
             finally:
                 os.unlink(torrent_path)
+
+
+class TestAddTorrentMetainfo:
+    """Regression tests for how the torrent is handed to transmission."""
+
+    def test_add_torrent_passes_bytes_not_path(self):
+        """The .torrent must be added as raw bytes (base64 `metainfo`), NOT as a
+        file-path string. transmission-rpc sends a path string as `filename` for
+        the daemon to read locally, which transmission 4.x rejects with
+        "unrecognized info" (it worked on 3.x). Bytes/metainfo works on both.
+        """
+        with patch('flacfetch.downloaders.torrent.transmission_rpc') as mock_rpc:
+            from flacfetch.downloaders.torrent import TorrentDownloader
+
+            mock_client = Mock()
+            mock_rpc.Client.return_value = mock_client
+
+            torrent_bytes = b'd8:announce20:http://tracker/annce4:infod4:name4:teste'
+            with tempfile.NamedTemporaryFile(suffix='.torrent', delete=False) as f:
+                f.write(torrent_bytes)
+                torrent_path = f.name
+
+            try:
+                mock_release = Mock()
+                mock_release.download_url = torrent_path
+                mock_release.title = "Test Album"
+                mock_release.target_file = None  # skip selective-download branch
+
+                mock_torrent = Mock()
+                mock_torrent.id = 1
+                mock_torrent.name = "Test Album"
+                mock_client.add_torrent.return_value = mock_torrent
+                mock_client.get_torrent.return_value = mock_torrent
+
+                downloader = TorrentDownloader()
+                downloader.client = mock_client
+                downloader._ensure_daemon_running = Mock(return_value=True)
+
+                try:
+                    downloader.download(mock_release, tempfile.gettempdir())
+                except Exception:
+                    pass  # may fail later awaiting completion; we only assert the add call
+
+                assert mock_client.add_torrent.called, "add_torrent was never called"
+                call = mock_client.add_torrent.call_args
+                first_arg = call.args[0] if call.args else call.kwargs.get('torrent')
+                assert isinstance(first_arg, (bytes, bytearray)), (
+                    f"add_torrent must receive bytes (metainfo), got {type(first_arg).__name__}"
+                )
+                assert first_arg == torrent_bytes
+                assert first_arg != torrent_path
+            finally:
+                os.unlink(torrent_path)

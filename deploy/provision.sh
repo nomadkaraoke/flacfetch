@@ -87,6 +87,50 @@ else
 fi
 
 # =============================================================================
+log "Stage 1b — transmission 4.1.3 (source build)"
+# =============================================================================
+# Debian 13 ships only transmission 4.1.0-beta2, which RED/OPS reject on announce
+# ("client is not on the whitelist") — so the box can download but cannot seed —
+# and whose RPC differs. 4.1.3 is the latest stable the trackers whitelist. We keep
+# the Debian transmission-daemon package (for its systemd unit, AppArmor profile,
+# debian-transmission user and config scaffolding) and overlay the 4.1.3 binaries at
+# Debian's /usr/bin paths, then apt-mark hold so apt can't revert them. Binaries are
+# copied straight from the build tree (NOT `cmake --install`, which would drop an
+# upstream unit with a nonexistent User=transmission into /usr/local and break boot).
+TR_VER="4.1.3"
+if /usr/bin/transmission-daemon --version 2>&1 | grep -q " ${TR_VER} "; then
+  log "transmission ${TR_VER} already installed"
+else
+  log "building transmission ${TR_VER} from source (Debian ships only 4.1.0-beta2)"
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    build-essential cmake pkg-config libcurl4-openssl-dev libssl-dev \
+    libevent-dev zlib1g-dev libsystemd-dev gettext >/dev/null \
+    || die "transmission build deps install failed"
+  TR_SRC="$(mktemp -d)"
+  curl -fsSL -o "$TR_SRC/t.tar.xz" \
+    "https://github.com/transmission/transmission/releases/download/${TR_VER}/transmission-${TR_VER}.tar.xz" \
+    || die "transmission ${TR_VER} source download failed"
+  tar -xf "$TR_SRC/t.tar.xz" -C "$TR_SRC"
+  ( cd "$TR_SRC/transmission-${TR_VER}" \
+      && cmake -B build -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+           -DENABLE_DAEMON=ON -DENABLE_UTILS=ON -DENABLE_CLI=OFF -DENABLE_GTK=OFF \
+           -DENABLE_QT=OFF -DENABLE_MAC=OFF -DENABLE_TESTS=OFF -DENABLE_WEB=OFF \
+           -DINSTALL_DOC=OFF >/dev/null 2>&1 \
+      && cmake --build build -j"$(nproc)" >/dev/null 2>&1 ) \
+    || die "transmission ${TR_VER} build failed"
+  systemctl stop transmission-daemon 2>/dev/null || true
+  for b in transmission-daemon transmission-remote transmission-create transmission-edit transmission-show; do
+    install -m 0755 "$TR_SRC/transmission-${TR_VER}/build/daemon/$b" "/usr/bin/$b" 2>/dev/null \
+      || install -m 0755 "$TR_SRC/transmission-${TR_VER}/build/utils/$b" "/usr/bin/$b" 2>/dev/null \
+      || warn "could not install $b"
+  done
+  rm -rf "$TR_SRC"
+  apt-mark hold transmission-daemon transmission-common transmission-cli >/dev/null 2>&1 || true
+  systemctl daemon-reload
+  log "installed $(/usr/bin/transmission-daemon --version 2>&1 | head -1)"
+fi
+
+# =============================================================================
 log "Stage 2 — non-root sudo login user (optional)"
 # =============================================================================
 # Driven by env so no personal key lives in the repo:

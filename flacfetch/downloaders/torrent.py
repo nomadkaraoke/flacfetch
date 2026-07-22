@@ -160,8 +160,15 @@ class TorrentDownloader(Downloader):
         try:
             # Add torrent to Transmission in PAUSED state first
             # This prevents it from starting download before we set file priorities
+            # Read the .torrent and pass the raw bytes so transmission-rpc sends it
+            # as base64 `metainfo`. Passing the file *path* string makes the library
+            # send it as `filename` for the daemon to read locally, which transmission
+            # 4.x rejects with "unrecognized info" (it worked on 3.x). Bytes/metainfo
+            # is accepted by both.
+            with open(release.download_url, "rb") as _tf:
+                _torrent_metainfo = _tf.read()
             torrent = self.client.add_torrent(
-                release.download_url,
+                _torrent_metainfo,
                 download_dir=download_dir,
                 paused=True  # Critical: add in paused state
             )
