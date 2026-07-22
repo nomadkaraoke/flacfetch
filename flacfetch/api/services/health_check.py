@@ -442,11 +442,19 @@ class DeepHealthService:
         """Test Spotify connection (runs in thread pool)."""
         try:
             import spotipy
+            from spotipy.cache_handler import MemoryCacheHandler
             from spotipy.oauth2 import SpotifyClientCredentials
 
+            # Use an in-memory cache so this client_credentials token never
+            # touches the shared on-disk cache (/opt/flacfetch/.cache). That
+            # file holds the seeded Spotify Premium OAuth token (refresh_token
+            # + streaming scope) used by librespot capture and the credential
+            # keeper; without a dedicated handler spotipy would clobber it with
+            # a short-lived client_credentials token.
             auth_manager = SpotifyClientCredentials(
                 client_id=client_id,
                 client_secret=client_secret,
+                cache_handler=MemoryCacheHandler(),
             )
             sp = spotipy.Spotify(auth_manager=auth_manager)
 
