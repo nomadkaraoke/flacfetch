@@ -272,6 +272,81 @@ class TestDeepHealthService:
                         assert call_count > first_count  # New calls made
 
 
+class TestSpotifyCacheIsolation:
+    """Regression tests: the deep Spotify check must never touch the shared
+    on-disk .cache that holds the seeded Premium OAuth token."""
+
+    def test_client_credentials_uses_memory_cache_handler(self):
+        """_test_spotify_connection must pass an in-memory cache handler so
+        spotipy never writes a client_credentials token to the shared .cache."""
+        pytest.importorskip("spotipy")  # optional [spotify] extra; skip if absent
+        from spotipy.cache_handler import MemoryCacheHandler
+
+        from flacfetch.api.services.health_check import DeepHealthService
+
+        service = DeepHealthService()
+
+        captured = {}
+
+        def fake_client_credentials(*args, **kwargs):
+            captured["kwargs"] = kwargs
+            return MagicMock()
+
+        fake_sp = MagicMock()
+        fake_sp.search.return_value = {"tracks": {"items": [{"id": "x"}]}}
+
+        with patch(
+            "spotipy.oauth2.SpotifyClientCredentials",
+            side_effect=fake_client_credentials,
+        ):
+            with patch("spotipy.Spotify", return_value=fake_sp):
+                result = service._test_spotify_connection("cid", "secret")
+
+        assert result["success"] is True
+        assert "cache_handler" in captured["kwargs"], (
+            "SpotifyClientCredentials must be given a dedicated cache_handler"
+        )
+        assert isinstance(captured["kwargs"]["cache_handler"], MemoryCacheHandler)
+
+    def test_saving_a_token_does_not_write_cache_file(self, tmp_path, monkeypatch):
+        """The auth manager the check builds must cache tokens in memory: even
+        when spotipy persists a fetched token, no .cache file lands in cwd."""
+        pytest.importorskip("spotipy")  # optional [spotify] extra; skip if absent
+        from flacfetch.api.services.health_check import DeepHealthService
+
+        # Run from an isolated cwd; spotipy's default file handler would write
+        # ./.cache here if the fix regressed.
+        monkeypatch.chdir(tmp_path)
+
+        service = DeepHealthService()
+
+        captured = {}
+        fake_sp = MagicMock()
+        fake_sp.search.return_value = {"tracks": {"items": [{"id": "x"}]}}
+
+        def capture_spotify(*args, **kwargs):
+            captured["auth_manager"] = kwargs.get("auth_manager")
+            return fake_sp
+
+        with patch("spotipy.Spotify", side_effect=capture_spotify):
+            result = service._test_spotify_connection("cid", "secret")
+
+        assert result["success"] is True
+        auth_manager = captured["auth_manager"]
+        assert auth_manager is not None
+
+        # Simulate spotipy persisting a freshly-fetched client_credentials token
+        # via the configured cache handler. With the fix this stays in memory.
+        auth_manager.cache_handler.save_token_to_cache(
+            {"access_token": "tok", "expires_at": 9999999999}
+        )
+
+        assert not (tmp_path / ".cache").exists(), (
+            "deep Spotify check persisted a token to a .cache file in cwd — it "
+            "would clobber the shared Premium token"
+        )
+
+
 class TestDeepHealthEndpoint:
     """Tests for /health/deep endpoint."""
 
