@@ -452,6 +452,12 @@ if id "$FF_SERVICE_USER" >/dev/null 2>&1; then
     chown "$FF_SERVICE_USER:$FF_SERVICE_USER" "$SA_KEY" || die "chown $SA_KEY failed"
     chmod 600 "$SA_KEY"
   fi
+  # $ETC_DIR is created 700/root in Stage 6, which blocks the non-root service
+  # user from even traversing into it to open the (readable) SA key — GCS
+  # uploads then fail with "gcs-sa.json was not found". Grant the service group
+  # execute-only (traverse, no read/list); flacfetch.env + runtime.env keep
+  # their own 600/root perms and are read by the provisioner / systemd as root.
+  chgrp "$FF_SERVICE_USER" "$ETC_DIR" && chmod 710 "$ETC_DIR" || die "chmod $ETC_DIR failed"
 
   # Shared download tree: transmission (debian-transmission) downloads torrents
   # here and flacfetch reads them AND writes its own YouTube/Spotify outputs.
