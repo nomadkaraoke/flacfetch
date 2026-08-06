@@ -152,6 +152,113 @@ class TestSelectiveDownload:
                 os.unlink(torrent_path)
 
 
+class TestKeepSeedingCopySemantics:
+    """Regression tests for how the completed file is placed into the output dir.
+
+    The flacfetch service runs as a non-root user that is only a *group member*
+    of the transmission-owned downloads. `shutil.copy2` runs `copystat()`, which
+    `utime()`/`chmod()`s the destination — and for single-file torrents the
+    destination is the transmission-owned download itself, so a non-owner hits
+    EPERM ("Operation not permitted"). We must copy CONTENT ONLY, and skip the
+    copy entirely when source and target are the same file.
+    """
+
+    def _run_seeding_download(self, download_dir, file_name, output_path,
+                              output_filename=None, keep_seeding=True):
+        with patch('flacfetch.downloaders.torrent.transmission_rpc') as mock_rpc:
+            from flacfetch.downloaders.torrent import TorrentDownloader
+
+            mock_client = Mock()
+            mock_rpc.Client.return_value = mock_client
+
+            with tempfile.NamedTemporaryFile(suffix='.torrent', delete=False) as f:
+                f.write(b'd8:announce20:http://tracker/annce4:infod4:name4:teste')
+                torrent_path = f.name
+
+            try:
+                mock_release = Mock()
+                mock_release.download_url = torrent_path
+                mock_release.title = "Test Single"
+                mock_release.target_file = file_name
+
+                mock_file = Mock()
+                mock_file.name = file_name
+                mock_file.id = 0
+                mock_file.selected = True
+
+                mock_torrent = Mock()
+                mock_torrent.id = 1
+                mock_torrent.name = "Test Single"
+                mock_torrent.status = "seeding"
+                mock_torrent.progress = 100
+                mock_torrent.get_files.return_value = [mock_file]
+
+                mock_client.add_torrent.return_value = mock_torrent
+                mock_client.get_torrent.return_value = mock_torrent
+
+                with patch.dict(os.environ,
+                                {'FLACFETCH_DOWNLOAD_DIR': download_dir}):
+                    downloader = TorrentDownloader(keep_seeding=keep_seeding)
+                    downloader.client = mock_client
+                    downloader._ensure_daemon_running = Mock(return_value=True)
+                    return downloader.download(
+                        mock_release, output_path,
+                        output_filename=output_filename,
+                    )
+            finally:
+                os.unlink(torrent_path)
+
+    def test_keep_seeding_uses_copyfile_not_copy2(self):
+        """A distinct target must be populated via copyfile (content only), never
+        copy2 — copy2's copystat() EPERMs on transmission-owned files."""
+        with tempfile.TemporaryDirectory() as download_dir, \
+                tempfile.TemporaryDirectory() as out_dir:
+            # source lives in a subfolder (album-style) so target != source
+            sub = os.path.join(download_dir, "album")
+            os.makedirs(sub)
+            src_rel = "album/04 - dog.flac"
+            with open(os.path.join(download_dir, src_rel), 'wb') as fh:
+                fh.write(b'FLACDATA')
+
+            with patch('flacfetch.downloaders.torrent.shutil.copy2') as m_copy2, \
+                    patch('flacfetch.downloaders.torrent.shutil.copyfile',
+                          wraps=__import__('shutil').copyfile) as m_copyfile:
+                result = self._run_seeding_download(
+                    download_dir, src_rel, out_dir,
+                    output_filename="piri - dog",
+                )
+
+            assert not m_copy2.called, "copy2 must not be used (copystat EPERMs)"
+            assert m_copyfile.called, "copyfile should place the file"
+            assert os.path.exists(result)
+            with open(result, 'rb') as fh:
+                assert fh.read() == b'FLACDATA'
+
+    def test_single_file_same_path_skips_copy(self):
+        """Single-file torrent already at the output path: no copy at all, return
+        the source path (it's in place and still seeding)."""
+        with tempfile.TemporaryDirectory() as download_dir:
+            file_name = "04 - dog.flac"
+            src = os.path.join(download_dir, file_name)
+            with open(src, 'wb') as fh:
+                fh.write(b'FLACDATA')
+
+            with patch('flacfetch.downloaders.torrent.shutil.copy2') as m_copy2, \
+                    patch('flacfetch.downloaders.torrent.shutil.copyfile') as m_copyfile, \
+                    patch('flacfetch.downloaders.torrent.shutil.move') as m_move:
+                # output dir == download dir, no rename → target resolves to source
+                result = self._run_seeding_download(
+                    download_dir, file_name, download_dir,
+                    output_filename=None,
+                )
+
+            assert not m_copy2.called
+            assert not m_copyfile.called
+            assert not m_move.called
+            assert os.path.realpath(result) == os.path.realpath(src)
+            assert os.path.exists(result)
+
+
 class TestAddTorrentMetainfo:
     """Regression tests for how the torrent is handed to transmission."""
 
