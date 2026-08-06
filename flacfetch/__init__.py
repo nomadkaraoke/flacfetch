@@ -1,6 +1,6 @@
 """flacfetch - Search and download high-quality audio from multiple sources."""
 
-__version__ = "0.19.6"
+__version__ = "0.21.2"
 __author__ = "Andrew Beveridge"
 __email__ = "andrew@beveridge.uk"
 

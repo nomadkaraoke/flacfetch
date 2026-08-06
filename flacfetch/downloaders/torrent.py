@@ -276,10 +276,31 @@ class TorrentDownloader(Downloader):
 
                         target_file_path = Path(abs_output_path) / final_filename
 
-                        if self.keep_seeding:
-                            # Copy file instead of move (keep original for seeding)
+                        # Single-file torrents land directly in the output dir, so
+                        # source and target can be the same file (the torrent's own
+                        # download). Nothing to copy/move — it's already in place and
+                        # transmission keeps seeding it.
+                        same_file = (
+                            target_file_path.exists()
+                            and source_path.resolve() == target_file_path.resolve()
+                        )
+
+                        if same_file:
+                            logger.info(
+                                f"Downloaded file already at target path, "
+                                f"skipping copy: {target_file_path}"
+                            )
+                            downloaded_file_path = str(source_path)
+                        elif self.keep_seeding:
+                            # Copy CONTENT ONLY (copyfile, not copy2): copy2 runs
+                            # copystat(), which utime()/chmod()s the destination. When
+                            # the download is owned by the transmission daemon and we
+                            # run as a non-root, non-owner service user, that fails with
+                            # EPERM ("Operation not permitted"). copyfile touches no
+                            # ownership-restricted metadata, so the copy succeeds and the
+                            # torrent keeps seeding.
                             logger.info(f"Copying file to: {target_file_path}")
-                            shutil.copy2(str(source_path), str(target_file_path))
+                            shutil.copyfile(str(source_path), str(target_file_path))
                             downloaded_file_path = str(target_file_path)
                             logger.info("File copied successfully. Torrent continues seeding.")
                         else:
