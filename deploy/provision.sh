@@ -567,6 +567,60 @@ Persistent=true
 WantedBy=timers.target
 YTDLP_TIMER
 
+# Transmission maintenance restart (prevents long-uptime degradation).
+# Transmission-daemon degrades after many days of uptime with hundreds of
+# seeding torrents: it keeps connecting to peers but transfers 0 B/s on ALL
+# downloads (torrents show State "Unknown"), silently breaking every RED/OPS
+# download until restarted. Observed 2026-08-07 after a 16-day uptime / 247
+# torrents (~11h download outage). This checks daily and restarts ONLY when
+# uptime exceeds a threshold AND nothing is actively downloading, so it never
+# interrupts a live download.
+cat > "$APP_DIR/transmission-maintenance.sh" <<'TR_MAINT_SCRIPT'
+#!/bin/bash
+# Restart transmission-daemon if it has been up too long, but only while idle.
+set -e
+exec >> /var/log/transmission-maintenance.log 2>&1
+echo "=== $(date -u +%FT%TZ) transmission-maintenance check ==="
+MAX_UPTIME_DAYS=5
+enter_ts=$(systemctl show transmission-daemon -p ActiveEnterTimestampMonotonic --value 2>/dev/null || echo 0)
+now_mono=$(awk '{print int($1*1000000)}' /proc/uptime 2>/dev/null || echo 0)
+uptime_sec=$(( (now_mono - enter_ts) / 1000000 ))
+uptime_days=$(( uptime_sec / 86400 ))
+echo "transmission uptime: ${uptime_days}d (${uptime_sec}s)"
+if [ "$uptime_days" -lt "$MAX_UPTIME_DAYS" ]; then
+  echo "under ${MAX_UPTIME_DAYS}d threshold — no restart"
+  exit 0
+fi
+# Skip if a download is actively in progress (avoid interrupting a live fetch).
+if transmission-remote localhost:9091 -l 2>/dev/null | grep -qE '[[:space:]]Downloading([[:space:]]|$)'; then
+  echo "a download is active — deferring restart to next run"
+  exit 0
+fi
+echo "uptime >= ${MAX_UPTIME_DAYS}d and idle — restarting transmission-daemon"
+systemctl restart transmission-daemon
+echo "restart issued"
+TR_MAINT_SCRIPT
+chmod +x "$APP_DIR/transmission-maintenance.sh"
+cat > /etc/systemd/system/transmission-maintenance.service <<'TR_MAINT_SERVICE'
+[Unit]
+Description=Restart transmission-daemon if up too long (prevents 0-B/s download degradation)
+After=network.target transmission-daemon.service
+[Service]
+Type=oneshot
+ExecStart=/opt/flacfetch/transmission-maintenance.sh
+User=root
+TR_MAINT_SERVICE
+cat > /etc/systemd/system/transmission-maintenance.timer <<'TR_MAINT_TIMER'
+[Unit]
+Description=Daily transmission maintenance-restart check
+[Timer]
+OnCalendar=*-*-* 05:30:00 UTC
+RandomizedDelaySec=900
+Persistent=true
+[Install]
+WantedBy=timers.target
+TR_MAINT_TIMER
+
 # Credential health check (daily 19:00 UTC)
 cat > "$APP_DIR/check-credentials.sh" <<'CRED_CHECK_SCRIPT'
 #!/bin/bash
@@ -657,6 +711,7 @@ fi
 systemctl daemon-reload
 systemctl enable --now xvfb >/dev/null 2>&1 || true
 systemctl enable --now ytdlp-update.timer >/dev/null 2>&1 || true
+systemctl enable --now transmission-maintenance.timer >/dev/null 2>&1 || true
 systemctl enable flacfetch >/dev/null 2>&1 || true
 if [ -f "$ENV_FILE" ]; then
   systemctl restart flacfetch
