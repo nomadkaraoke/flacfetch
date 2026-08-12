@@ -164,6 +164,12 @@ async def refresh_librespot_credentials(page) -> bool:
     """
     creds_dir = get_librespot_credentials_dir()
     Path(creds_dir).mkdir(parents=True, exist_ok=True)
+    # credentials.json holds reusable Spotify auth -- keep it private to the
+    # (single) service user rather than relying on librespot's umask.
+    try:
+        os.chmod(creds_dir, 0o700)
+    except OSError:
+        pass
     creds_file = Path(creds_dir) / "credentials.json"
     # Temp dir on the SAME filesystem as creds_dir so os.replace is atomic.
     tmp_dir = os.path.join(creds_dir, ".oauth-tmp")
@@ -199,6 +205,10 @@ async def refresh_librespot_credentials(page) -> bool:
             return False
 
         os.replace(tmp_creds, creds_file)  # atomic swap into the live location
+        try:
+            os.chmod(creds_file, 0o600)
+        except OSError:
+            pass
         logger.info(f"librespot credentials written to {creds_file}")
         return True
     finally:

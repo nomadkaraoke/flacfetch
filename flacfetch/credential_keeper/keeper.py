@@ -26,6 +26,12 @@ SPOTIFY_REFRESH_INTERVAL = int(os.environ.get("KEEPER_SPOTIFY_INTERVAL", 12 * 36
 # librespot stored credentials are long-lived (no ~1h access-token expiry), so
 # this only needs to run occasionally to re-mint if they are ever invalidated.
 LIBRESPOT_REFRESH_INTERVAL = int(os.environ.get("KEEPER_LIBRESPOT_INTERVAL", 24 * 3600))  # 24 hours
+# When credentials are missing we want to self-heal quickly, but not retry the
+# (browser-driven, rate-limit-prone) OAuth flow every loop iteration. Back off
+# to this interval between attempts while credentials are still absent.
+LIBRESPOT_MISSING_RETRY_INTERVAL = int(
+    os.environ.get("KEEPER_LIBRESPOT_RETRY_INTERVAL", 15 * 60)  # 15 minutes
+)
 
 # Whether to send Pushbullet notifications on successful refreshes
 NOTIFY_ON_SUCCESS = os.environ.get("KEEPER_NOTIFY_ON_SUCCESS", "false").lower() in ("true", "1", "yes")
@@ -202,13 +208,18 @@ async def run_keeper():
                 last_spotify_refresh = now
                 _save_status(status)
 
-            # librespot stored-credential refresh. Also runs whenever the
-            # credentials file is missing (e.g. first setup / after a rebuild),
-            # regardless of the interval, so the download path self-heals.
+            # librespot stored-credential refresh. Also runs when the credentials
+            # file is missing (e.g. first setup / after a rebuild) so the download
+            # path self-heals -- but throttled to LIBRESPOT_MISSING_RETRY_INTERVAL
+            # so a persistently-failing OAuth flow doesn't retry every loop.
             creds_missing = not os.path.isfile(
                 os.path.join(get_librespot_credentials_dir(), "credentials.json")
             )
-            if creds_missing or now - last_librespot_refresh >= LIBRESPOT_REFRESH_INTERVAL:
+            librespot_due = now - last_librespot_refresh >= (
+                LIBRESPOT_MISSING_RETRY_INTERVAL if creds_missing
+                else LIBRESPOT_REFRESH_INTERVAL
+            )
+            if librespot_due:
                 logger.info("--- librespot credential refresh ---")
 
                 if not await ensure_google_logged_in(page):
