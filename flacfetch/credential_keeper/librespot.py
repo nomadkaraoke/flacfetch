@@ -40,13 +40,18 @@ def _find_librespot() -> str | None:
     return None
 
 
-def _spawn_librespot_oauth(creds_dir: str, log_path: str) -> subprocess.Popen:
-    """Start ``librespot --enable-oauth`` writing credentials into creds_dir."""
+def _spawn_librespot_oauth(cache_dir: str, log_path: str) -> subprocess.Popen:
+    """Start ``librespot --enable-oauth`` writing credentials into cache_dir.
+
+    cache_dir must be empty of a ``credentials.json`` -- if librespot finds a
+    cached credential it skips the OAuth flow entirely (and never prints the
+    "Browse to:" URL), so callers always point this at a fresh temp directory.
+    """
     librespot = _find_librespot()
     if not librespot:
         raise FileNotFoundError("librespot binary not found")
 
-    Path(creds_dir).mkdir(parents=True, exist_ok=True)
+    Path(cache_dir).mkdir(parents=True, exist_ok=True)
     log_file = open(log_path, "w")  # noqa: SIM115 (closed when proc ends)
     return subprocess.Popen(
         [
@@ -57,7 +62,7 @@ def _spawn_librespot_oauth(creds_dir: str, log_path: str) -> subprocess.Popen:
             "--backend", "pipe",
             "--disable-discovery",
             "--disable-audio-cache",
-            "-c", creds_dir,
+            "-c", cache_dir,
         ],
         stdout=log_file,
         stderr=subprocess.STDOUT,
@@ -148,16 +153,26 @@ def _stop(proc: subprocess.Popen) -> None:
 async def refresh_librespot_credentials(page) -> bool:
     """Mint librespot stored credentials via its native OAuth flow.
 
+    Always mints into a fresh temp directory (so librespot performs the OAuth
+    flow instead of reusing an existing credential) and then atomically swaps
+    the new ``credentials.json`` into place. This keeps any currently-live
+    credentials valid until the new one is fully written -- a concurrent
+    download never sees a missing credentials file.
+
     The browser must already be logged into Google (the SSO identity for the
-    Spotify account). Returns True if ``credentials.json`` was written.
+    Spotify account). Returns True if new credentials were installed.
     """
     creds_dir = get_librespot_credentials_dir()
+    Path(creds_dir).mkdir(parents=True, exist_ok=True)
     creds_file = Path(creds_dir) / "credentials.json"
+    # Temp dir on the SAME filesystem as creds_dir so os.replace is atomic.
+    tmp_dir = os.path.join(creds_dir, ".oauth-tmp")
+    shutil.rmtree(tmp_dir, ignore_errors=True)
     log_path = os.path.join(creds_dir, "oauth.log")
 
     proc = None
     try:
-        proc = _spawn_librespot_oauth(creds_dir, log_path)
+        proc = _spawn_librespot_oauth(tmp_dir, log_path)
     except FileNotFoundError as e:
         logger.error(f"Cannot refresh librespot credentials: {e}")
         return False
@@ -173,16 +188,19 @@ async def refresh_librespot_credentials(page) -> bool:
             return False
 
         # Give librespot time to exchange the code and write credentials.
+        tmp_creds = Path(tmp_dir) / "credentials.json"
         for _ in range(12):
-            if creds_file.exists():
+            if tmp_creds.exists():
                 break
             await asyncio.sleep(1)
 
-        if creds_file.exists():
-            logger.info(f"librespot credentials written to {creds_file}")
-            return True
+        if not tmp_creds.exists():
+            logger.error("librespot OAuth completed but no credentials.json written")
+            return False
 
-        logger.error("librespot OAuth completed but no credentials.json written")
-        return False
+        os.replace(tmp_creds, creds_file)  # atomic swap into the live location
+        logger.info(f"librespot credentials written to {creds_file}")
+        return True
     finally:
         _stop(proc)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
