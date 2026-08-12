@@ -12,6 +12,12 @@ import os
 SPOTIFY_CACHE_PATH = "/opt/flacfetch/.cache"
 YOUTUBE_COOKIES_PATH = "/opt/flacfetch/youtube_cookies.txt"
 
+# librespot stored credentials (reusable Spotify Connect credentials).
+# Kept on the persistent data disk so they survive redeploys/re-provisions and
+# are shared between the download service and the credential keeper. librespot
+# reads/writes ``credentials.json`` inside this directory when passed ``-c``.
+SERVER_LIBRESPOT_CREDENTIALS_DIR = "/mnt/flacfetch-data/browser-profiles/librespot"
+
 
 # =============================================================================
 # Local paths (used when running CLI on user's machine)
@@ -19,6 +25,7 @@ YOUTUBE_COOKIES_PATH = "/opt/flacfetch/youtube_cookies.txt"
 
 LOCAL_SPOTIFY_CACHE_PATH = os.path.expanduser("~/.cache-spotipy")
 LOCAL_YOUTUBE_COOKIES_PATH = os.path.expanduser("~/.flacfetch/youtube_cookies.txt")
+LOCAL_LIBRESPOT_CREDENTIALS_DIR = os.path.expanduser("~/.flacfetch/librespot")
 
 
 # =============================================================================
@@ -54,3 +61,23 @@ def get_youtube_cookies_path(local: bool = False) -> str:
     if local:
         return LOCAL_YOUTUBE_COOKIES_PATH
     return os.environ.get("YOUTUBE_COOKIES_FILE", YOUTUBE_COOKIES_PATH)
+
+
+def get_librespot_credentials_dir(local: bool = False) -> str:
+    """Get the directory holding librespot's stored Spotify credentials.
+
+    librespot reads/writes ``credentials.json`` inside this directory. These
+    reusable credentials are minted by librespot's own OAuth client, which is
+    the only client Spotify accepts for Spotify Connect (spirc) device login --
+    third-party access tokens are rejected there with ``INVALID_CREDENTIALS``.
+
+    Args:
+        local: If True, return the local machine path (~/.flacfetch/librespot).
+               If False, return the server path or env var override.
+
+    Returns:
+        Absolute path to the librespot credentials cache directory.
+    """
+    if local:
+        return LOCAL_LIBRESPOT_CREDENTIALS_DIR
+    return os.environ.get("LIBRESPOT_CREDENTIALS_DIR", SERVER_LIBRESPOT_CREDENTIALS_DIR)

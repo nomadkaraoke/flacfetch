@@ -349,3 +349,40 @@ class TestKeeperStatusEndpoint:
             result = await get_keeper_status(api_key="test")
 
         assert result["status"] == "error"
+
+
+# =============================================================================
+# Tests for librespot credential keeper helpers
+# =============================================================================
+
+
+class TestLibrespotKeeper:
+    """Tests for the browser-free helpers in credential_keeper.librespot."""
+
+    def test_read_browse_url_parses_line(self, tmp_path):
+        from flacfetch.credential_keeper.librespot import _read_browse_url
+
+        log = tmp_path / "oauth.log"
+        log.write_text(
+            "librespot 0.8.0\n"
+            "Browse to: https://accounts.spotify.com/authorize?client_id=abc\n"
+            "OAuth server listening on 127.0.0.1:5588\n"
+        )
+        url = _read_browse_url(str(log), timeout=1)
+        assert url == "https://accounts.spotify.com/authorize?client_id=abc"
+
+    def test_read_browse_url_times_out_without_line(self, tmp_path):
+        from flacfetch.credential_keeper.librespot import _read_browse_url
+
+        log = tmp_path / "oauth.log"
+        log.write_text("no url here\n")
+        assert _read_browse_url(str(log), timeout=1) is None
+
+    @pytest.mark.asyncio
+    async def test_refresh_returns_false_without_librespot(self, tmp_path):
+        from flacfetch.credential_keeper import librespot as ls
+
+        with patch.object(ls, "get_librespot_credentials_dir", return_value=str(tmp_path)), \
+             patch.object(ls, "_find_librespot", return_value=None):
+            result = await ls.refresh_librespot_credentials(page=MagicMock())
+        assert result is False
