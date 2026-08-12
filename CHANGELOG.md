@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0] - 2026-08-12
+
+### Fixed
+- Spotify downloads failing with "Device 'flacfetch-capture' not found in
+  Spotify". Spotify began rejecting Spotify-Connect (spirc) device login when
+  the access token is minted by our third-party `SPOTIPY_CLIENT_ID`: librespot
+  authenticates the AP session but the dealer/connect-state login is denied with
+  `INVALID_CREDENTIALS`, so the capture device never registers. librespot now
+  authenticates with its own OAuth client via long-lived stored credentials,
+  which is the only client Spotify accepts for Connect. Web API auth (searches)
+  was never affected.
+
+### Added
+- `credential_keeper.librespot`: mints librespot stored credentials by driving
+  librespot's native `--enable-oauth` through the persistent Google-logged-in
+  browser. The keeper runs it every 24h and whenever credentials are missing, so
+  the download path self-heals.
+- `get_librespot_credentials_dir()` config helper (persistent path on the data
+  disk, overridable via `LIBRESPOT_CREDENTIALS_DIR`).
+
+### Changed
+- The Spotify downloader prefers librespot stored credentials (`-c <dir>`) and
+  only falls back to the (now Spotify-rejected) access-token login when they are
+  absent. The device-not-found error now includes the librespot log tail and
+  points at the credential keeper when spirc reports `INVALID_CREDENTIALS`.
+
 ## [0.21.1] - 2026-06-14
 
 ### Fixed
