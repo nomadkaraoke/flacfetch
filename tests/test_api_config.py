@@ -20,6 +20,7 @@ from flacfetch.api.routes.config import (
     _write_spotify_token_file,
 )
 from flacfetch.core.config import (
+    get_librespot_credentials_dir,
     get_spotify_cache_path,
     get_youtube_cookies_path,
 )
@@ -147,6 +148,26 @@ class TestGetCookiesFilePath:
         with patch.dict(os.environ, {"YOUTUBE_COOKIES_FILE": "/custom/path.txt"}):
             result = _get_cookies_file_path()
             assert result == "/custom/path.txt"
+
+
+class TestLibrespotCredentialsDir:
+    """Tests for get_librespot_credentials_dir."""
+
+    def test_default_path(self):
+        with patch.dict(os.environ, {}, clear=True):
+            assert (
+                get_librespot_credentials_dir()
+                == "/mnt/flacfetch-data/browser-profiles/librespot"
+            )
+
+    def test_env_var_override(self):
+        with patch.dict(os.environ, {"LIBRESPOT_CREDENTIALS_DIR": "/custom/creds"}):
+            assert get_librespot_credentials_dir() == "/custom/creds"
+
+    def test_local_path_ignores_env(self):
+        with patch.dict(os.environ, {"LIBRESPOT_CREDENTIALS_DIR": "/custom/creds"}):
+            result = get_librespot_credentials_dir(local=True)
+            assert result.endswith("/.flacfetch/librespot")
 
 
 class TestCookiesModels:

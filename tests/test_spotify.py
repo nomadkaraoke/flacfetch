@@ -493,6 +493,93 @@ class TestLibrespotDetection:
             assert is_librespot_available() is False
 
 
+class TestLibrespotCredentialSelection:
+    """librespot login: prefer stored credentials, fall back to access token."""
+
+    def _make_release(self):
+        return Release(
+            title="Test",
+            artist="Test",
+            quality=Quality(AudioFormat.FLAC),
+            source_name="Spotify",
+            download_url="spotify:track:4PTG3Z6ehGkBFwjybzWkR8",
+            duration_seconds=200,  # avoid a Web API duration lookup
+        )
+
+    def test_download_uses_stored_credentials_when_present(self, tmp_path):
+        """When credentials.json exists, librespot gets -c <dir> and no token."""
+        creds_dir = tmp_path / "librespot"
+        creds_dir.mkdir()
+        (creds_dir / "credentials.json").write_text("{}")
+
+        provider = MagicMock()
+        downloader = SpotifyDownloader(provider=provider)
+        downloader._librespot_path = "/fake/librespot"
+
+        with patch(
+            "flacfetch.downloaders.spotify.get_librespot_credentials_dir",
+            return_value=str(creds_dir),
+        ), patch("flacfetch.downloaders.spotify.subprocess.Popen") as mock_popen, patch.object(
+            downloader, "_wait_for_device", return_value=None
+        ):
+            with pytest.raises(SpotifyDownloadError, match="not found in Spotify"):
+                downloader.download(self._make_release(), str(tmp_path / "out"))
+
+        cmd = mock_popen.call_args.args[0]
+        env = mock_popen.call_args.kwargs["env"]
+        assert "-c" in cmd
+        assert str(creds_dir) in cmd
+        assert "--disable-audio-cache" in cmd
+        assert "LIBRESPOT_ACCESS_TOKEN" not in env
+        # Stored creds mean we never mint a third-party access token.
+        provider.get_access_token.assert_not_called()
+
+    def test_download_falls_back_to_access_token_without_credentials(self, tmp_path):
+        """With no stored credentials, librespot gets the access token via env."""
+        creds_dir = tmp_path / "librespot"  # does not exist
+
+        provider = MagicMock()
+        provider.get_access_token.return_value = "tok-123"
+        downloader = SpotifyDownloader(provider=provider)
+        downloader._librespot_path = "/fake/librespot"
+
+        with patch(
+            "flacfetch.downloaders.spotify.get_librespot_credentials_dir",
+            return_value=str(creds_dir),
+        ), patch("flacfetch.downloaders.spotify.subprocess.Popen") as mock_popen, patch.object(
+            downloader, "_wait_for_device", return_value=None
+        ):
+            with pytest.raises(SpotifyDownloadError, match="not found in Spotify"):
+                downloader.download(self._make_release(), str(tmp_path / "out"))
+
+        cmd = mock_popen.call_args.args[0]
+        env = mock_popen.call_args.kwargs["env"]
+        assert "-c" not in cmd
+        assert env.get("LIBRESPOT_ACCESS_TOKEN") == "tok-123"
+
+    def test_device_not_found_message_detects_invalid_credentials(self, tmp_path):
+        """spirc INVALID_CREDENTIALS produces an actionable, keeper-pointing message."""
+        log = tmp_path / "x.librespot.log"
+        log.write_text(
+            "Authenticated as 'x' !\n"
+            "could not initialize spirc: Invalid state "
+            "{ Login request was denied: INVALID_CREDENTIALS }\n"
+        )
+        downloader = SpotifyDownloader(provider=MagicMock())
+        msg = downloader._device_not_found_message(log)
+        assert "INVALID_CREDENTIALS" in msg
+        assert "credential keeper" in msg
+
+    def test_device_not_found_message_includes_log_tail(self, tmp_path):
+        """A non-credential failure still surfaces the librespot log tail."""
+        log = tmp_path / "x.librespot.log"
+        log.write_text("some unexpected librespot failure\n")
+        downloader = SpotifyDownloader(provider=MagicMock())
+        msg = downloader._device_not_found_message(log)
+        assert "librespot log:" in msg
+        assert "unexpected librespot failure" in msg
+
+
 class TestSpotifyAuthFailFast:
     """Test that Spotify auth fails fast without cached token (for headless servers)."""
 

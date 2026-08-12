@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
+from ..core.config import get_librespot_credentials_dir
 from ..core.interfaces import Downloader
 from ..core.log import get_logger
 from ..core.models import Release
@@ -188,36 +189,59 @@ class SpotifyDownloader(Downloader):
         flac_path = Path(output_path) / f"{base_name}.flac"
         log_path = Path(output_path) / f"{base_name}.librespot.log"
 
-        # Get OAuth token
+        # The Web API client is always required to control playback on the
+        # librespot device (start/pause). Authenticate it up-front.
         try:
-            access_token = self._get_access_token()
             sp = self._get_spotify_client()
         except Exception as e:
             raise SpotifyDownloadError(f"Authentication failed: {e}") from e
 
         duration_secs = self._resolve_duration_secs(sp, track_id, release)
 
-        # Start librespot with OAuth token
+        # Build the librespot invocation. Preferred: stored reusable credentials
+        # minted by librespot's own OAuth client (the only client Spotify accepts
+        # for Spotify Connect / spirc device login). Fall back to a third-party
+        # access token only if no stored credentials exist -- Spotify now rejects
+        # that path at spirc with INVALID_CREDENTIALS, so it is best-effort.
         logger.debug(f"Starting librespot: {self._librespot_path}")
-
-        # Use environment variable for OAuth token (safer than command-line arg
-        # which is visible in process listings)
+        librespot_cmd = [
+            self._librespot_path,
+            "-n", LIBRESPOT_DEVICE_NAME,
+            "--backend", "pipe",
+            "--bitrate", "320",
+            "--disable-discovery",
+            # Volume settings for full-quality recording:
+            "--initial-volume", "100",  # Start at max volume
+            "--volume-ctrl", "fixed",  # No dynamic volume adjustments
+            # Note: volume normalisation is disabled by default, no flag needed
+        ]
         librespot_env = os.environ.copy()
-        librespot_env["LIBRESPOT_ACCESS_TOKEN"] = access_token
+
+        creds_dir = get_librespot_credentials_dir()
+        if os.path.isfile(os.path.join(creds_dir, "credentials.json")):
+            # Stored-credential login. Disable the audio cache so librespot does
+            # not fill the disk with cached streams (we only want credentials).
+            librespot_cmd += ["-c", creds_dir, "--disable-audio-cache"]
+            logger.debug(f"Using librespot stored credentials from {creds_dir}")
+        else:
+            try:
+                access_token = self._get_access_token()
+            except Exception as e:
+                raise SpotifyDownloadError(f"Authentication failed: {e}") from e
+            # Use an env var for the token (safer than a command-line arg, which
+            # is visible in process listings).
+            librespot_env["LIBRESPOT_ACCESS_TOKEN"] = access_token
+            logger.warning(
+                "No librespot stored credentials at %s; falling back to "
+                "access-token login. Spotify Connect (spirc) may reject this "
+                "with INVALID_CREDENTIALS. Run the credential keeper to mint "
+                "stored credentials.",
+                creds_dir,
+            )
 
         with open(pcm_path, "wb") as pcm_file, open(log_path, "w") as log_file:
             librespot_proc = subprocess.Popen(
-                [
-                    self._librespot_path,
-                    "-n", LIBRESPOT_DEVICE_NAME,
-                    "--backend", "pipe",
-                    "--bitrate", "320",
-                    "--disable-discovery",
-                    # Volume settings for full-quality recording:
-                    "--initial-volume", "100",  # Start at max volume
-                    "--volume-ctrl", "fixed",  # No dynamic volume adjustments
-                    # Note: volume normalisation is disabled by default, no flag needed
-                ],
+                librespot_cmd,
                 stdout=pcm_file,
                 stderr=log_file,
                 env=librespot_env,
@@ -227,9 +251,7 @@ class SpotifyDownloader(Downloader):
                 # Wait for device to appear in Spotify
                 device = self._wait_for_device(sp, timeout=15)
                 if not device:
-                    raise SpotifyDownloadError(
-                        f"Device '{LIBRESPOT_DEVICE_NAME}' not found in Spotify"
-                    )
+                    raise SpotifyDownloadError(self._device_not_found_message(log_path))
 
                 logger.debug(f"Device ready: {device['id']}")
 
@@ -284,6 +306,33 @@ class SpotifyDownloader(Downloader):
 
         logger.info(f"Download complete: {flac_path}")
         return str(flac_path)
+
+    def _device_not_found_message(self, log_path: Path) -> str:
+        """Build a diagnostic message when the librespot device never appears.
+
+        Reads the librespot log to distinguish the common failure modes so the
+        error surfaced to callers (and karaoke-gen) is actionable rather than a
+        bare "device not found".
+        """
+        tail = ""
+        try:
+            if log_path.exists():
+                tail = log_path.read_text()[-500:]
+        except OSError:
+            pass
+
+        base = f"Device '{LIBRESPOT_DEVICE_NAME}' not found in Spotify"
+        if "INVALID_CREDENTIALS" in tail:
+            return (
+                f"{base}: librespot could not register as a Spotify Connect "
+                "device (spirc login denied: INVALID_CREDENTIALS). The stored "
+                "librespot credentials are missing or stale -- the credential "
+                "keeper needs to re-run librespot's OAuth flow. "
+                f"librespot log: {tail}"
+            )
+        if tail:
+            return f"{base}. librespot log: {tail}"
+        return base
 
     def _wait_for_device(self, sp: "spotipy.Spotify", timeout: int = 15) -> Optional[dict]:
         """Wait for librespot device to appear in Spotify devices list."""

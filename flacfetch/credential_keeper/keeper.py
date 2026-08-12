@@ -11,8 +11,10 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..core.config import get_librespot_credentials_dir
 from .browser import launch_browser
 from .google_login import ensure_google_logged_in
+from .librespot import refresh_librespot_credentials
 from .spotify import refresh_spotify_token
 from .youtube import refresh_youtube_cookies
 
@@ -21,6 +23,9 @@ logger = logging.getLogger(__name__)
 # Refresh intervals (in seconds)
 YOUTUBE_REFRESH_INTERVAL = int(os.environ.get("KEEPER_YOUTUBE_INTERVAL", 8 * 3600))  # 8 hours
 SPOTIFY_REFRESH_INTERVAL = int(os.environ.get("KEEPER_SPOTIFY_INTERVAL", 12 * 3600))  # 12 hours
+# librespot stored credentials are long-lived (no ~1h access-token expiry), so
+# this only needs to run occasionally to re-mint if they are ever invalidated.
+LIBRESPOT_REFRESH_INTERVAL = int(os.environ.get("KEEPER_LIBRESPOT_INTERVAL", 24 * 3600))  # 24 hours
 
 # Whether to send Pushbullet notifications on successful refreshes
 NOTIFY_ON_SUCCESS = os.environ.get("KEEPER_NOTIFY_ON_SUCCESS", "false").lower() in ("true", "1", "yes")
@@ -122,6 +127,7 @@ async def run_keeper():
         # Initialize to trigger immediately on first loop iteration
         last_youtube_refresh = float("-inf")
         last_spotify_refresh = float("-inf")
+        last_librespot_refresh = float("-inf")
 
         while True:
             now = asyncio.get_event_loop().time()
@@ -194,6 +200,43 @@ async def run_keeper():
                         )
 
                 last_spotify_refresh = now
+                _save_status(status)
+
+            # librespot stored-credential refresh. Also runs whenever the
+            # credentials file is missing (e.g. first setup / after a rebuild),
+            # regardless of the interval, so the download path self-heals.
+            creds_missing = not os.path.isfile(
+                os.path.join(get_librespot_credentials_dir(), "credentials.json")
+            )
+            if creds_missing or now - last_librespot_refresh >= LIBRESPOT_REFRESH_INTERVAL:
+                logger.info("--- librespot credential refresh ---")
+
+                if not await ensure_google_logged_in(page):
+                    logger.error("Google session lost, could not re-login")
+                    status.setdefault("librespot", {}).update({
+                        "last_refresh": datetime.now(timezone.utc).isoformat(),
+                        "last_refresh_status": "error",
+                        "error": "Google session lost",
+                    })
+                else:
+                    success = await refresh_librespot_credentials(page)
+                    status.setdefault("librespot", {}).update({
+                        "last_refresh": datetime.now(timezone.utc).isoformat(),
+                        "last_refresh_status": "ok" if success else "error",
+                    })
+                    if success:
+                        if NOTIFY_ON_SUCCESS:
+                            await _send_notification(
+                                "✅ librespot Credentials Refreshed",
+                                "librespot stored credentials minted successfully.",
+                            )
+                    else:
+                        await _send_notification(
+                            "❌ librespot Credential Refresh Failed",
+                            "Could not complete librespot OAuth flow.",
+                        )
+
+                last_librespot_refresh = now
                 _save_status(status)
 
             # Sleep before next check (1 minute intervals)
