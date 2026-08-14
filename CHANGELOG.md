@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.0] - 2026-08-14
+
+### Fixed
+- Torrent downloads that stalled (connected to peers but transferring 0 B/s —
+  typically a stale/choking peer set from a private tracker) would spin the
+  monitor loop forever. Each caller retry started another download that never
+  returned, so hung background tasks accumulated until the API stopped
+  responding (observed as gen jobs stuck in `downloading_audio` with the box
+  serving 521s). The monitor loop now:
+  - forces a fresh tracker re-announce after a short stall (default 90s, at most
+    once every 120s) to pull a new peer list — the tracker is the only peer
+    source for private torrents, where DHT/PEX are disabled;
+  - aborts the download after a hard stall ceiling (default 600s of no progress)
+    so the task exits and the caller can retry cleanly;
+  - treats `progress >= 100` as complete (not just status `seeding`), so a
+    selective single-file download that finishes its wanted file can't linger in
+    `downloading`/`idle` forever.
+  Thresholds are overridable via `FLACFETCH_STALL_REANNOUNCE_SECONDS`,
+  `FLACFETCH_STALL_REANNOUNCE_INTERVAL`, and `FLACFETCH_MAX_STALL_SECONDS`.
+  Complements the daily maintenance-restart (#37) by recovering in-flight rather
+  than only on a schedule.
+
 ## [0.22.0] - 2026-08-12
 
 ### Fixed

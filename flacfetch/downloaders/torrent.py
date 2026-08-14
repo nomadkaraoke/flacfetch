@@ -55,6 +55,23 @@ class TorrentDownloader(Downloader):
         self.keep_seeding = keep_seeding
         self.client = None
 
+        # Stall handling for the download monitor loop. A torrent that connects
+        # to peers but transfers nothing (a stale/choking peer set from a private
+        # tracker) used to spin the monitor loop forever, leaking a hung download
+        # task on every caller retry until the API stopped responding. We now
+        # force a fresh tracker announce after a short stall (to pull a new peer
+        # list) and abort the download after a hard stall ceiling so the task
+        # exits and the caller can retry cleanly.
+        self.stall_reannounce_seconds = float(
+            os.environ.get("FLACFETCH_STALL_REANNOUNCE_SECONDS", "90")
+        )
+        self.stall_reannounce_interval = float(
+            os.environ.get("FLACFETCH_STALL_REANNOUNCE_INTERVAL", "120")
+        )
+        self.max_stall_seconds = float(
+            os.environ.get("FLACFETCH_MAX_STALL_SECONDS", "600")
+        )
+
         # Download directory for keep_seeding mode
         self._download_dir = os.environ.get(
             "FLACFETCH_DOWNLOAD_DIR",
@@ -235,9 +252,11 @@ class TorrentDownloader(Downloader):
             # Monitor download progress
             print(f"Downloading {release.title}...")
 
-            last_progress = -1
+            last_progress = -1.0
             stall_counter = 0
-            max_stalls = 60  # 60 seconds of no progress before warning
+            max_stalls = 60  # 60 seconds of no progress before the on-screen warning
+            last_progress_time = time.monotonic()
+            last_reannounce_time = 0.0  # 0 => first re-announce allowed as soon as stalled
 
             while True:
                 # Refresh torrent status
@@ -246,8 +265,12 @@ class TorrentDownloader(Downloader):
                 status = torrent.status
                 progress = torrent.progress
 
-                # Check if complete
-                if status in ['seeding', 'seed_pending']:
+                # Check if complete. A selective (single-file) download reports
+                # percentDone == 100 for the wanted file, which normally flips the
+                # torrent to 'seeding'; treat progress >= 100 as complete too so a
+                # torrent lingering in 'downloading'/'idle' after the wanted file
+                # finishes doesn't spin here forever.
+                if status in ['seeding', 'seed_pending'] or progress >= 100.0:
                     print("\n✓ Download complete")
                     logger.info(f"Torrent finished: {torrent.name}")
 
@@ -324,16 +347,49 @@ class TorrentDownloader(Downloader):
                 upload_rate = getattr(torrent, 'rate_upload', 0) / 1000  # KB/s
                 peers = getattr(torrent, 'peers_connected', 0)
 
-                # Detect stalls
-                if abs(progress - last_progress) < 0.01:  # Less than 0.01% progress
-                    stall_counter += 1
-                else:
+                # Detect stalls by wall-clock time since the last real progress
+                # (robust even if a monitor iteration takes longer than the 1s tick).
+                now = time.monotonic()
+                if abs(progress - last_progress) >= 0.01:
                     stall_counter = 0
                     last_progress = progress
+                    last_progress_time = now
+                else:
+                    stall_counter += 1
+
+                stalled_for = now - last_progress_time
 
                 stall_warning = ""
                 if stall_counter > max_stalls:
                     stall_warning = " [STALLED - no progress]"
+
+                # While stalled, periodically force a fresh tracker announce. The
+                # usual cause is a stale/choking peer set from a private tracker;
+                # a re-announce pulls a new peer list (DHT/PEX are off for private
+                # torrents, so the tracker is the only source of fresh peers).
+                if (
+                    stalled_for >= self.stall_reannounce_seconds
+                    and (now - last_reannounce_time) >= self.stall_reannounce_interval
+                ):
+                    last_reannounce_time = now
+                    try:
+                        self.client.reannounce_torrent(torrent.id)
+                        logger.warning(
+                            f"Download stalled {int(stalled_for)}s (peers: {peers}) — "
+                            f"forcing tracker re-announce for '{torrent.name}'"
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"Re-announce failed: {e}")
+
+                # Hard ceiling: if nothing transfers for this long, abort so the
+                # download task exits instead of looping forever. The unbounded
+                # loop previously leaked a hung background task on every caller
+                # retry until the API stopped responding.
+                if stalled_for >= self.max_stall_seconds:
+                    raise RuntimeError(
+                        f"Torrent download stalled for {int(stalled_for)}s with no "
+                        f"progress at {progress:.2f}% (peers: {peers}); aborting"
+                    )
 
                 print(
                     f'\r{progress:.2f}% complete '

@@ -1,6 +1,7 @@
 """
 Tests for TorrentDownloader with keep_seeding mode.
 """
+import itertools
 import os
 import tempfile
 from unittest.mock import Mock, patch
@@ -308,5 +309,129 @@ class TestAddTorrentMetainfo:
                 )
                 assert first_arg == torrent_bytes
                 assert first_arg != torrent_path
+            finally:
+                os.unlink(torrent_path)
+
+
+class _FakeTransmissionError(Exception):
+    """Stand-in for transmission_rpc.error.TransmissionError when the whole
+    transmission_rpc module is mocked — the downloader has an
+    `except transmission_rpc.error.TransmissionError` clause, and Python can only
+    catch real exception classes, not Mock attributes."""
+
+
+class TestStallHandling:
+    """The monitor loop must recover from (re-announce) or bail out of a stalled
+    download instead of spinning forever — the unbounded loop previously leaked a
+    hung background task on every caller retry until the API stopped responding.
+    """
+
+    @staticmethod
+    def _write_torrent():
+        with tempfile.NamedTemporaryFile(suffix='.torrent', delete=False) as f:
+            f.write(b'd8:announce20:http://tracker/annce4:infod4:name4:teste')
+            return f.name
+
+    def test_stall_reannounces_then_aborts(self):
+        """A torrent stuck at constant progress gets a forced tracker re-announce
+        and is aborted once the hard stall ceiling is crossed."""
+        with patch('flacfetch.downloaders.torrent.transmission_rpc') as mock_rpc, \
+                patch('flacfetch.downloaders.torrent.time') as mock_time:
+            from flacfetch.downloaders.torrent import TorrentDownloader
+
+            mock_client = Mock()
+            mock_rpc.Client.return_value = mock_client
+            mock_rpc.error.TransmissionError = _FakeTransmissionError
+            # Advance the monotonic clock 100s per call so the default thresholds
+            # (re-announce at 90s, abort at 600s) are crossed deterministically,
+            # and never actually sleep.
+            mock_time.monotonic.side_effect = itertools.count(0, 100)
+            mock_time.sleep = Mock()
+
+            stuck = Mock()
+            stuck.id = 1
+            stuck.name = "Stuck Album"
+            stuck.status = "downloading"
+            stuck.progress = 43.0  # never changes
+            stuck.rate_download = 0
+            stuck.rate_upload = 0
+            stuck.peers_connected = 50
+            mock_client.add_torrent.return_value = stuck
+            mock_client.get_torrent.return_value = stuck
+
+            torrent_path = self._write_torrent()
+            try:
+                mock_release = Mock()
+                mock_release.download_url = torrent_path
+                mock_release.title = "Stuck Album"
+                mock_release.target_file = None  # skip selective-download branch
+
+                downloader = TorrentDownloader()  # keep_seeding defaults False
+                downloader.client = mock_client
+                downloader._ensure_daemon_running = Mock(return_value=True)
+
+                with pytest.raises(RuntimeError, match="stalled"):
+                    downloader.download(mock_release, tempfile.gettempdir())
+
+                assert mock_client.reannounce_torrent.called, (
+                    "a stalled download should force a tracker re-announce"
+                )
+                # Non-keep-seeding: the aborted torrent is cleaned up in finally.
+                assert mock_client.remove_torrent.called
+            finally:
+                os.unlink(torrent_path)
+
+    def test_progress_does_not_trigger_stall_logic(self):
+        """A download that keeps making progress must never be re-announced or
+        aborted — it should complete normally."""
+        with patch('flacfetch.downloaders.torrent.transmission_rpc') as mock_rpc, \
+                patch('flacfetch.downloaders.torrent.time') as mock_time:
+            from flacfetch.downloaders.torrent import TorrentDownloader
+
+            mock_client = Mock()
+            mock_rpc.Client.return_value = mock_client
+            mock_rpc.error.TransmissionError = _FakeTransmissionError
+            mock_time.monotonic.side_effect = itertools.count(0, 10)
+            mock_time.sleep = Mock()
+
+            def make(status, progress):
+                t = Mock()
+                t.id = 1
+                t.name = "Healthy"
+                t.status = status
+                t.progress = progress
+                t.rate_download = 500_000
+                t.rate_upload = 0
+                t.peers_connected = 20
+                t.get_files.return_value = []
+                return t
+
+            # progress climbs, then flips to seeding → completes. Extra seeding
+            # entry covers the completion branch's re-fetch of the torrent.
+            mock_client.get_torrent.side_effect = [
+                make("downloading", 20.0),
+                make("downloading", 60.0),
+                make("downloading", 95.0),
+                make("seeding", 100.0),
+                make("seeding", 100.0),
+            ]
+            mock_client.add_torrent.return_value = make("downloading", 0.0)
+
+            torrent_path = self._write_torrent()
+            try:
+                mock_release = Mock()
+                mock_release.download_url = torrent_path
+                mock_release.title = "Healthy"
+                mock_release.target_file = None
+
+                downloader = TorrentDownloader()
+                downloader.client = mock_client
+                downloader._ensure_daemon_running = Mock(return_value=True)
+
+                downloader.download(mock_release, tempfile.gettempdir())
+
+                assert not mock_client.reannounce_torrent.called, (
+                    "a progressing download must not be re-announced or aborted"
+                )
             finally:
                 os.unlink(torrent_path)
