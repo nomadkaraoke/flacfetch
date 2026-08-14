@@ -1,3 +1,4 @@
+import math
 import os
 import shutil
 import subprocess
@@ -62,21 +63,54 @@ class TorrentDownloader(Downloader):
         # force a fresh tracker announce after a short stall (to pull a new peer
         # list) and abort the download after a hard stall ceiling so the task
         # exits and the caller can retry cleanly.
-        self.stall_reannounce_seconds = float(
-            os.environ.get("FLACFETCH_STALL_REANNOUNCE_SECONDS", "90")
+        #
+        # Values come from the environment but must be sane: a nan/inf/zero/
+        # negative threshold could silently disable the safety net (nan never
+        # compares true) or abort on the very first monitor tick (<= 0 ceiling).
+        self.stall_reannounce_seconds = self._positive_float_env(
+            "FLACFETCH_STALL_REANNOUNCE_SECONDS", 90.0
         )
-        self.stall_reannounce_interval = float(
-            os.environ.get("FLACFETCH_STALL_REANNOUNCE_INTERVAL", "120")
+        self.stall_reannounce_interval = self._positive_float_env(
+            "FLACFETCH_STALL_REANNOUNCE_INTERVAL", 120.0
         )
-        self.max_stall_seconds = float(
-            os.environ.get("FLACFETCH_MAX_STALL_SECONDS", "600")
+        self.max_stall_seconds = self._positive_float_env(
+            "FLACFETCH_MAX_STALL_SECONDS", 600.0
         )
+        # The hard ceiling must leave room for at least one re-announce attempt.
+        if self.max_stall_seconds < self.stall_reannounce_seconds:
+            logger.warning(
+                f"FLACFETCH_MAX_STALL_SECONDS ({self.max_stall_seconds}) is below "
+                f"the re-announce threshold ({self.stall_reannounce_seconds}); "
+                f"raising it to the re-announce threshold"
+            )
+            self.max_stall_seconds = self.stall_reannounce_seconds
 
         # Download directory for keep_seeding mode
         self._download_dir = os.environ.get(
             "FLACFETCH_DOWNLOAD_DIR",
             "/var/lib/transmission-daemon/downloads"
         )
+
+    @staticmethod
+    def _positive_float_env(name: str, default: float) -> float:
+        """Read a strictly-positive, finite float from the environment.
+
+        Falls back to ``default`` (and warns) for missing, unparseable, or
+        non-finite/<= 0 values so a misconfiguration can't disable the stall
+        safety net or make it abort immediately.
+        """
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            logger.warning(f"Invalid {name}={raw!r}; using default {default}")
+            return default
+        if not math.isfinite(val) or val <= 0:
+            logger.warning(f"Invalid {name}={raw!r} (must be > 0); using default {default}")
+            return default
+        return val
 
     def _ensure_daemon_running(self) -> bool:
         """Check if transmission-daemon is running, attempt to start if not."""
@@ -173,6 +207,7 @@ class TorrentDownloader(Downloader):
         target_file_path = None
         downloaded_file_path = None
         torrent = None
+        download_succeeded = False
 
         try:
             # Add torrent to Transmission in PAUSED state first
@@ -335,6 +370,7 @@ class TorrentDownloader(Downloader):
                     else:
                         logger.warning("Could not find downloaded file")
 
+                    download_succeeded = True
                     break
 
                 # Check for errors
@@ -347,12 +383,16 @@ class TorrentDownloader(Downloader):
                 upload_rate = getattr(torrent, 'rate_upload', 0) / 1000  # KB/s
                 peers = getattr(torrent, 'peers_connected', 0)
 
-                # Detect stalls by wall-clock time since the last real progress
-                # (robust even if a monitor iteration takes longer than the 1s tick).
+                # Detect stalls by wall-clock time since the last real transfer
+                # activity (robust even if a monitor iteration takes longer than
+                # the 1s tick). A live download counts as active even when its
+                # percentage barely moves this tick — reset on *either* a progress
+                # bump or a non-zero download rate so a large file trickling in
+                # slowly isn't mistaken for a stall and aborted.
                 now = time.monotonic()
-                if abs(progress - last_progress) >= 0.01:
+                if progress > last_progress or download_rate > 0:
                     stall_counter = 0
-                    last_progress = progress
+                    last_progress = max(progress, last_progress)
                     last_progress_time = now
                 else:
                     stall_counter += 1
@@ -416,13 +456,18 @@ class TorrentDownloader(Downloader):
             logger.error(f"Download failed: {e}")
             raise
         finally:
-            # Clean up based on mode
-            if self.keep_seeding:
+            # Clean up based on mode + outcome. Keep the torrent seeding only
+            # after a SUCCESSFUL keep_seeding download. On any failure (including
+            # a hard-stall abort) remove it and its data — otherwise the daemon
+            # keeps the stalled torrent and the next caller retry re-attaches to
+            # the same stuck state (same hash => transmission dedupes the add)
+            # instead of starting cleanly with a fresh announce.
+            if self.keep_seeding and download_succeeded:
                 # In keep_seeding mode, don't remove torrent - let it seed
                 if torrent:
                     logger.info(f"Torrent {torrent.id} ({torrent.name}) will continue seeding")
             else:
-                # Original behavior: remove torrent and clean up temp directory
+                # Remove torrent and clean up any temp directory
                 try:
                     if torrent:
                         logger.debug(f"Removing torrent {torrent.id} from Transmission")
