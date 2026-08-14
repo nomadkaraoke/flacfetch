@@ -76,14 +76,19 @@ class TorrentDownloader(Downloader):
         self.max_stall_seconds = self._positive_float_env(
             "FLACFETCH_MAX_STALL_SECONDS", 600.0
         )
-        # The hard ceiling must leave room for at least one re-announce attempt.
-        if self.max_stall_seconds < self.stall_reannounce_seconds:
+        # The hard ceiling must sit strictly above the re-announce threshold, with
+        # enough margin for a forced re-announce to actually pull fresh peers and
+        # resume — otherwise the abort fires on the same tick as the re-announce
+        # and it never gets a chance to help.
+        min_ceiling = self.stall_reannounce_seconds + self.stall_reannounce_interval
+        if self.max_stall_seconds < min_ceiling:
             logger.warning(
-                f"FLACFETCH_MAX_STALL_SECONDS ({self.max_stall_seconds}) is below "
-                f"the re-announce threshold ({self.stall_reannounce_seconds}); "
-                f"raising it to the re-announce threshold"
+                f"FLACFETCH_MAX_STALL_SECONDS ({self.max_stall_seconds}) leaves no "
+                f"room for a re-announce to take effect (threshold "
+                f"{self.stall_reannounce_seconds} + interval "
+                f"{self.stall_reannounce_interval}); raising it to {min_ceiling}"
             )
-            self.max_stall_seconds = self.stall_reannounce_seconds
+            self.max_stall_seconds = min_ceiling
 
         # Download directory for keep_seeding mode
         self._download_dir = os.environ.get(
@@ -291,7 +296,7 @@ class TorrentDownloader(Downloader):
             stall_counter = 0
             max_stalls = 60  # 60 seconds of no progress before the on-screen warning
             last_progress_time = time.monotonic()
-            last_reannounce_time = 0.0  # 0 => first re-announce allowed as soon as stalled
+            last_reannounce_time = None  # None => first re-announce allowed as soon as stalled
 
             while True:
                 # Refresh torrent status
@@ -407,9 +412,9 @@ class TorrentDownloader(Downloader):
                 # usual cause is a stale/choking peer set from a private tracker;
                 # a re-announce pulls a new peer list (DHT/PEX are off for private
                 # torrents, so the tracker is the only source of fresh peers).
-                if (
-                    stalled_for >= self.stall_reannounce_seconds
-                    and (now - last_reannounce_time) >= self.stall_reannounce_interval
+                if stalled_for >= self.stall_reannounce_seconds and (
+                    last_reannounce_time is None
+                    or (now - last_reannounce_time) >= self.stall_reannounce_interval
                 ):
                     last_reannounce_time = now
                     try:

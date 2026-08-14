@@ -12,6 +12,45 @@ import pytest
 pytest.importorskip("transmission_rpc")
 
 
+class TestStallConfig:
+    """The stall thresholds come from the environment and must be sanitised so a
+    misconfiguration can't disable the safety net or make it abort immediately."""
+
+    def test_defaults(self):
+        with patch('flacfetch.downloaders.torrent.transmission_rpc'):
+            from flacfetch.downloaders.torrent import TorrentDownloader
+            d = TorrentDownloader()
+            assert d.stall_reannounce_seconds == 90.0
+            assert d.stall_reannounce_interval == 120.0
+            assert d.max_stall_seconds == 600.0
+
+    @pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "0", "-5", "abc", ""])
+    def test_invalid_values_fall_back_to_default(self, bad):
+        with patch('flacfetch.downloaders.torrent.transmission_rpc'), \
+                patch.dict(os.environ, {
+                    "FLACFETCH_STALL_REANNOUNCE_SECONDS": bad,
+                    "FLACFETCH_MAX_STALL_SECONDS": bad,
+                }):
+            from flacfetch.downloaders.torrent import TorrentDownloader
+            d = TorrentDownloader()
+            assert d.stall_reannounce_seconds == 90.0
+            assert d.max_stall_seconds == 600.0  # default, and default > threshold
+
+    def test_ceiling_raised_when_below_reannounce_room(self):
+        """A ceiling that leaves no room for a re-announce to take effect is
+        raised to threshold + interval so the re-announce can actually run."""
+        with patch('flacfetch.downloaders.torrent.transmission_rpc'), \
+                patch.dict(os.environ, {
+                    "FLACFETCH_STALL_REANNOUNCE_SECONDS": "90",
+                    "FLACFETCH_STALL_REANNOUNCE_INTERVAL": "120",
+                    "FLACFETCH_MAX_STALL_SECONDS": "100",  # < 90 + 120
+                }):
+            from flacfetch.downloaders.torrent import TorrentDownloader
+            d = TorrentDownloader()
+            assert d.max_stall_seconds == 210.0  # 90 + 120
+            assert d.max_stall_seconds > d.stall_reannounce_seconds
+
+
 class TestTorrentDownloaderInit:
     """Tests for TorrentDownloader initialization."""
 
