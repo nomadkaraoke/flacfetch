@@ -12,43 +12,55 @@ import pytest
 pytest.importorskip("transmission_rpc")
 
 
+_STALL_ENV_KEYS = (
+    "FLACFETCH_STALL_REANNOUNCE_SECONDS",
+    "FLACFETCH_STALL_REANNOUNCE_INTERVAL",
+    "FLACFETCH_MAX_STALL_SECONDS",
+)
+
+
 class TestStallConfig:
     """The stall thresholds come from the environment and must be sanitised so a
     misconfiguration can't disable the safety net or make it abort immediately."""
 
-    def test_defaults(self):
-        with patch('flacfetch.downloaders.torrent.transmission_rpc'):
+    @staticmethod
+    def _construct(**overrides):
+        """Build a TorrentDownloader with a clean stall-env baseline: every
+        FLACFETCH_STALL_* var is cleared, then only `overrides` are applied — so
+        ambient values in a dev/CI shell can't skew the assertions."""
+        with patch('flacfetch.downloaders.torrent.transmission_rpc'), \
+                patch.dict(os.environ, overrides, clear=False):
             from flacfetch.downloaders.torrent import TorrentDownloader
-            d = TorrentDownloader()
-            assert d.stall_reannounce_seconds == 90.0
-            assert d.stall_reannounce_interval == 120.0
-            assert d.max_stall_seconds == 600.0
+            for key in _STALL_ENV_KEYS:
+                if key not in overrides:
+                    os.environ.pop(key, None)  # reverted when patch.dict exits
+            return TorrentDownloader()
+
+    def test_defaults(self):
+        d = self._construct()
+        assert d.stall_reannounce_seconds == 90.0
+        assert d.stall_reannounce_interval == 120.0
+        assert d.max_stall_seconds == 600.0
 
     @pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "0", "-5", "abc", ""])
     def test_invalid_values_fall_back_to_default(self, bad):
-        with patch('flacfetch.downloaders.torrent.transmission_rpc'), \
-                patch.dict(os.environ, {
-                    "FLACFETCH_STALL_REANNOUNCE_SECONDS": bad,
-                    "FLACFETCH_MAX_STALL_SECONDS": bad,
-                }):
-            from flacfetch.downloaders.torrent import TorrentDownloader
-            d = TorrentDownloader()
-            assert d.stall_reannounce_seconds == 90.0
-            assert d.max_stall_seconds == 600.0  # default, and default > threshold
+        d = self._construct(
+            FLACFETCH_STALL_REANNOUNCE_SECONDS=bad,
+            FLACFETCH_MAX_STALL_SECONDS=bad,
+        )
+        assert d.stall_reannounce_seconds == 90.0
+        assert d.max_stall_seconds == 600.0  # default, and default > threshold
 
     def test_ceiling_raised_when_below_reannounce_room(self):
         """A ceiling that leaves no room for a re-announce to take effect is
         raised to threshold + interval so the re-announce can actually run."""
-        with patch('flacfetch.downloaders.torrent.transmission_rpc'), \
-                patch.dict(os.environ, {
-                    "FLACFETCH_STALL_REANNOUNCE_SECONDS": "90",
-                    "FLACFETCH_STALL_REANNOUNCE_INTERVAL": "120",
-                    "FLACFETCH_MAX_STALL_SECONDS": "100",  # < 90 + 120
-                }):
-            from flacfetch.downloaders.torrent import TorrentDownloader
-            d = TorrentDownloader()
-            assert d.max_stall_seconds == 210.0  # 90 + 120
-            assert d.max_stall_seconds > d.stall_reannounce_seconds
+        d = self._construct(
+            FLACFETCH_STALL_REANNOUNCE_SECONDS="90",
+            FLACFETCH_STALL_REANNOUNCE_INTERVAL="120",
+            FLACFETCH_MAX_STALL_SECONDS="100",  # < 90 + 120
+        )
+        assert d.max_stall_seconds == 210.0  # 90 + 120
+        assert d.max_stall_seconds > d.stall_reannounce_seconds
 
 
 class TestTorrentDownloaderInit:
@@ -517,7 +529,7 @@ class TestStallHandling:
                 finally:
                     os.unlink(torrent_path)
 
-    def test_progress_does_not_trigger_stall_logic(self):
+    def test_progress_does_not_trigger_stall_logic(self, tmp_path):
         """A download that keeps making progress must never be re-announced or
         aborted — it should complete normally."""
         with patch('flacfetch.downloaders.torrent.transmission_rpc') as mock_rpc, \
@@ -564,7 +576,7 @@ class TestStallHandling:
                 downloader.client = mock_client
                 downloader._ensure_daemon_running = Mock(return_value=True)
 
-                downloader.download(mock_release, tempfile.gettempdir())
+                downloader.download(mock_release, str(tmp_path))
 
                 assert not mock_client.reannounce_torrent.called, (
                     "a progressing download must not be re-announced or aborted"
