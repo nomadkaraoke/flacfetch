@@ -237,6 +237,11 @@ class TestKeepSeedingCopySemantics:
                 mock_file.name = file_name
                 mock_file.id = 0
                 mock_file.selected = True
+                # Fully-downloaded target file: completion is now decided per-file
+                # (our target file's bytes are all present) rather than by whole-
+                # torrent progress, so give the mock realistic size/completed.
+                mock_file.size = 8
+                mock_file.completed = 8
 
                 mock_torrent = Mock()
                 mock_torrent.id = 1
