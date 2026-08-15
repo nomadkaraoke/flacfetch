@@ -34,6 +34,10 @@ server's keep-seeding mode a *successful* torrent is never removed at all.
 import threading
 from typing import Callable, Iterable, Optional, Set, Tuple
 
+from ..core.log import get_logger
+
+logger = get_logger("TorrentCoordinator")
+
 
 class _Entry:
     __slots__ = ("refcount", "file_refs", "wants_all", "any_success")
@@ -173,7 +177,18 @@ class SharedTorrentRegistry:
                     remove_fn(any_success)
                 self._entries.pop(info_hash, None)
             elif apply_fn is not None:
-                apply_fn(entry.selection())
+                # Re-applying the reduced selection is BEST-EFFORT: the leaving
+                # job's own download is already finished, and worst case the
+                # daemon keeps a few now-unwanted files. Never let a transient
+                # change_torrent failure here propagate — leave() runs from the
+                # caller's `finally`, so a raise would turn a completed download
+                # into an error (and mask any original exception).
+                try:
+                    apply_fn(entry.selection())
+                except Exception as e:
+                    logger.warning(
+                        f"Best-effort selection re-apply failed for {info_hash}: {e}"
+                    )
             return max(remaining, 0), any_success
 
 

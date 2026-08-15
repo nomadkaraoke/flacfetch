@@ -86,6 +86,25 @@ class TestApplyFailureRollback:
         _, selection = reg.join("h", [2])
         assert selection == {0, 2}
 
+    def test_apply_fn_raising_in_leave_is_swallowed(self):
+        """leave() runs from the caller's finally after the download already
+        finished, so a transient change_torrent failure during the best-effort
+        selection re-apply must NOT propagate and turn a success into an error."""
+        reg = SharedTorrentRegistry()
+        reg.join("h", [0])
+        reg.join("h", [1])
+
+        def boom(_selection):
+            raise RuntimeError("daemon hiccup")
+
+        # A sibling remains, so leave() attempts the re-apply — and must swallow.
+        remaining, any_success = reg.leave("h", [0], success=True, apply_fn=boom)
+        assert remaining == 1
+        assert any_success is True
+        # The refcount still decremented correctly despite the swallowed error.
+        remaining, _ = reg.leave("h", [1], success=False)
+        assert remaining == 0
+
 
 class TestWantsAll:
     def test_whole_torrent_join_yields_want_all_selection(self):
