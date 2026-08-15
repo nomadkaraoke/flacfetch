@@ -365,17 +365,26 @@ class TorrentDownloader(Downloader):
                     print("\n✓ Download complete")
                     logger.info(f"Torrent finished: {torrent.name}")
 
-                    # Get the files info
-                    torrent = self.client.get_torrent(torrent.id)
-                    files = torrent.get_files()
-
-                    # Find the downloaded file
+                    # Locate the finished file on disk. Completion can be reported
+                    # (whole-torrent 'seeding', driven by a sibling finishing the
+                    # shared selection) a beat before OUR file's bytes are flushed,
+                    # so retry briefly for the path to materialise rather than
+                    # returning an empty path (which would break the caller's
+                    # upload). Normal case: found on the first attempt, no delay.
                     source_path = None
-                    if release.target_file and files:
-                        for file_obj in files:
-                            if file_obj.selected and release.target_file in file_obj.name:
-                                source_path = Path(download_dir) / file_obj.name
+                    if release.target_file:
+                        for _attempt in range(10):
+                            torrent = self.client.get_torrent(torrent.id)
+                            files = torrent.get_files()
+                            for file_obj in files or []:
+                                if file_obj.selected and release.target_file in file_obj.name:
+                                    candidate = Path(download_dir) / file_obj.name
+                                    if candidate.exists():
+                                        source_path = candidate
+                                        break
+                            if source_path:
                                 break
+                            time.sleep(0.5)
 
                     if source_path and source_path.exists():
                         # Determine output filename
