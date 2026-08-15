@@ -89,6 +89,7 @@ class SharedTorrentRegistry:
             if entry is None:
                 entry = _Entry()
                 self._entries[info_hash] = entry
+            prev_wanted = set(entry.wanted)  # snapshot to roll back on failure
             entry.refcount += 1
             if wants_all:
                 entry.wants_all += 1
@@ -98,34 +99,57 @@ class SharedTorrentRegistry:
                 try:
                     apply_fn(selection)
                 except Exception:
+                    # Fully roll back this join so a failed selection RPC leaves
+                    # no trace: neither a leaked reference (torrent never cleaned
+                    # up) nor stray wanted ids (a later joiner downloading files
+                    # this job never actually joined for).
                     entry.refcount -= 1
                     if wants_all:
                         entry.wants_all -= 1
+                    entry.wanted = prev_wanted
                     if entry.refcount <= 0:
                         self._entries.pop(info_hash, None)
                     raise
             return entry.refcount, selection
 
-    def leave(self, info_hash: str, success: bool) -> Tuple[int, bool]:
+    def leave(
+        self, info_hash: str, success: bool, wants_all: bool = False
+    ) -> Tuple[int, bool, Optional[Set[int]]]:
         """Mark a job done with this torrent.
 
-        Returns ``(remaining_refcount, any_success)`` where ``any_success`` is
-        True if *any* job that shared this torrent succeeded. When the returned
-        refcount is 0 the entry has been discarded and the caller owns cleanup
-        (remove the torrent, or leave it seeding if it succeeded).
+        ``wants_all`` must match what was passed to :meth:`join` so the
+        whole-torrent counter is released.
+
+        Returns ``(remaining_refcount, any_success, reselect)``:
+        - ``any_success`` is True if *any* job that shared this torrent
+          succeeded.
+        - ``reselect`` is the merged wanted-set the daemon should drop back to
+          when the LAST whole-torrent job leaves but selective jobs remain
+          (so the torrent stops downloading files nobody wants), else ``None``.
+
+        When the returned refcount is 0 the entry has been discarded and the
+        caller owns cleanup (remove the torrent, or leave it seeding if it
+        succeeded).
         """
         with self._lock:
             entry = self._entries.get(info_hash)
             if entry is None:
-                return 0, success
+                return 0, success, None
             if success:
                 entry.any_success = True
             entry.refcount -= 1
+            if wants_all and entry.wants_all > 0:
+                entry.wants_all -= 1
             remaining = entry.refcount
             any_success = entry.any_success
+            reselect = None
             if remaining <= 0:
                 self._entries.pop(info_hash, None)
-            return max(remaining, 0), any_success
+            elif wants_all and entry.wants_all == 0 and entry.wanted:
+                # Last whole-torrent job left; selective siblings remain. The
+                # daemon can drop back to their merged file selection.
+                reselect = set(entry.wanted)
+            return max(remaining, 0), any_success, reselect
 
 
 # One registry shared by every TorrentDownloader instance in the process (RED,

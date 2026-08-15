@@ -221,6 +221,7 @@ class TorrentDownloader(Downloader):
         info_hash = None
         target_ids = []  # file ids THIS job wants (empty => whole torrent)
         joined = False   # True once we've registered with the shared registry
+        wants_all = False  # True when this job wants the whole torrent
 
         try:
             # Add torrent to Transmission in PAUSED state first
@@ -538,7 +539,17 @@ class TorrentDownloader(Downloader):
             # deleted out from under it, which is what previously caused
             # "Torrent not found in result" failures for a whole album batch.
             if joined and info_hash:
-                remaining, any_success = SHARED_TORRENT_REGISTRY.leave(info_hash, download_succeeded)
+                remaining, any_success, reselect = SHARED_TORRENT_REGISTRY.leave(
+                    info_hash, download_succeeded, wants_all=wants_all
+                )
+                # If we were the last whole-torrent job and selective siblings
+                # remain, drop the daemon back to their merged selection so it
+                # stops downloading files nobody wants.
+                if reselect is not None and torrent is not None:
+                    try:
+                        _apply_selection(reselect)
+                    except Exception as e:
+                        logger.warning(f"Failed to re-restrict shared torrent selection: {e}")
             else:
                 remaining, any_success = 0, download_succeeded
 

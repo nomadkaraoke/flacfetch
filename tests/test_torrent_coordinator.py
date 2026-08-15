@@ -58,7 +58,7 @@ class TestApplyFailureRollback:
 
         # Entry was fully rolled back: a subsequent leave sees nothing, and a
         # fresh join starts clean at refcount 1.
-        remaining, _ = reg.leave("h", success=False)
+        remaining, _, _ = reg.leave("h", success=False)
         assert remaining == 0
         refcount, _ = reg.join("h", [1])
         assert refcount == 1
@@ -74,8 +74,24 @@ class TestApplyFailureRollback:
             reg.join("h", [1], apply_fn=boom)
 
         # The failed joiner rolled back; the healthy sibling is still the only ref.
-        remaining, _ = reg.leave("h", success=True)
+        remaining, _, _ = reg.leave("h", success=True)
         assert remaining == 0
+
+    def test_apply_failure_does_not_leak_wanted_ids(self):
+        """A failed join must not leave its wanted ids in the union — otherwise a
+        later joiner downloads files for a job that never actually joined."""
+        reg = SharedTorrentRegistry()
+        reg.join("h", [0])  # healthy sibling wants {0}
+
+        def boom(_selection):
+            raise RuntimeError("nope")
+
+        with pytest.raises(RuntimeError):
+            reg.join("h", [1], apply_fn=boom)
+
+        # {1} must not linger; the next selective joiner sees only {0, 2}.
+        _, union = reg.join("h", [2])
+        assert union == {0, 2}
 
 
 class TestWantsAll:
@@ -110,6 +126,35 @@ class TestWantsAll:
         assert sel2 is None
         assert applied == [None]
 
+    def test_wants_all_released_on_leave_reselects_union(self):
+        """When the last whole-torrent job leaves but a selective sibling remains,
+        leave() reports the union to drop back to and clears want-all so future
+        joiners restrict again."""
+        reg = SharedTorrentRegistry()
+        reg.join("h", [3])                 # selective sibling
+        reg.join("h", [], wants_all=True)  # whole-torrent job
+
+        remaining, _, reselect = reg.leave("h", success=True, wants_all=True)
+        assert remaining == 1
+        assert reselect == {3}  # daemon should drop back to the selective union
+
+        # want-all cleared: a later selective joiner restricts to the union again.
+        _, selection = reg.join("h", [4])
+        assert selection == {3, 4}
+
+    def test_no_reselect_while_another_whole_torrent_job_remains(self):
+        reg = SharedTorrentRegistry()
+        reg.join("h", [3])
+        reg.join("h", [], wants_all=True)
+        reg.join("h", [], wants_all=True)
+
+        # One whole-torrent job leaves, another still wants everything.
+        remaining, _, reselect = reg.leave("h", success=True, wants_all=True)
+        assert remaining == 2
+        assert reselect is None
+        _, selection = reg.join("h", [4])
+        assert selection is None
+
 
 class TestReferenceCounting:
     def test_torrent_kept_until_last_leaves(self):
@@ -117,10 +162,10 @@ class TestReferenceCounting:
         reg.join("h", [0])
         reg.join("h", [1])
 
-        remaining, _ = reg.leave("h", success=False)
+        remaining, _, _ = reg.leave("h", success=False)
         assert remaining == 1  # one sibling still active — caller must NOT remove
 
-        remaining, _ = reg.leave("h", success=False)
+        remaining, _, _ = reg.leave("h", success=False)
         assert remaining == 0  # last one out — caller owns cleanup
 
     def test_any_success_true_if_any_sharer_succeeded(self):
@@ -129,24 +174,24 @@ class TestReferenceCounting:
         reg.join("h", [1])
 
         # First job fails, second succeeds.
-        remaining, any_success = reg.leave("h", success=False)
+        remaining, any_success, _ = reg.leave("h", success=False)
         assert remaining == 1
         assert any_success is False
 
-        remaining, any_success = reg.leave("h", success=True)
+        remaining, any_success, _ = reg.leave("h", success=True)
         assert remaining == 0
         assert any_success is True  # torrent holds good data -> keep seeding
 
     def test_all_failed_reports_no_success(self):
         reg = SharedTorrentRegistry()
         reg.join("h", [0])
-        remaining, any_success = reg.leave("h", success=False)
+        remaining, any_success, _ = reg.leave("h", success=False)
         assert remaining == 0
         assert any_success is False
 
     def test_leave_unknown_hash_is_safe(self):
         reg = SharedTorrentRegistry()
-        remaining, any_success = reg.leave("never-joined", success=True)
+        remaining, any_success, _ = reg.leave("never-joined", success=True)
         assert remaining == 0
         assert any_success is True
 
