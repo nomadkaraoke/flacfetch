@@ -366,56 +366,47 @@ class TorrentDownloader(Downloader):
                 status = torrent.status
                 progress = torrent.progress
 
-                # Check if complete. For a selective download we're done as soon
-                # as OUR target file(s) have fully downloaded — independent of
-                # sibling downloads sharing the same torrent, whose files may
-                # still be in flight. Fall back to whole-torrent completion
-                # (seeding / percentDone == 100) when we have no specific target.
-                if (
-                    self._target_files_complete(torrent, target_ids)
-                    or status in ['seeding', 'seed_pending']
-                    or progress >= 100.0
-                ):
+                # Complete when THIS job's target file(s) are fully downloaded AND
+                # present on disk — independent of sibling downloads sharing the
+                # torrent, whose files may still be in flight. Requiring the file
+                # on disk (not merely byte-complete) avoids declaring done during
+                # the brief window before transmission renames 'X.part' -> 'X'.
+                # Fall back to whole-torrent completion (seeding / 100%) when we
+                # have no specific target file.
+                located = self._locate_completed_target(
+                    torrent, download_dir, release, target_ids
+                )
+                if located or status in ['seeding', 'seed_pending'] or progress >= 100.0:
                     print("\n✓ Download complete")
                     logger.info(f"Torrent finished: {torrent.name}")
 
-                    # Locate the finished file on disk. Completion can be reported
-                    # (whole-torrent 'seeding', driven by a sibling finishing the
-                    # shared selection) a beat before OUR file's bytes are flushed,
-                    # so retry briefly for the path to materialise rather than
+                    # Entered via whole-torrent completion before our file settled
+                    # on disk? Retry briefly for the rename/flush rather than
                     # returning an empty path (which would break the caller's
-                    # upload). Normal case: found on the first attempt, no delay.
-                    source_path = None
-                    if release.target_file:
-                        for _attempt in range(10):
-                            torrent = self.client.get_torrent(torrent.id)
-                            files = torrent.get_files()
-                            # Resolve the file under the directory transmission
-                            # actually used. When a duplicate add deduped onto a
-                            # sibling's torrent, our local `download_dir` may hold
-                            # no data, so trust the torrent's own download_dir.
-                            td = getattr(torrent, "download_dir", None)
-                            effective_dir = td if isinstance(td, str) and td else download_dir
-                            for file_obj in files or []:
-                                if file_obj.selected and release.target_file in file_obj.name:
-                                    candidate = Path(effective_dir) / file_obj.name
-                                    if candidate.exists():
-                                        source_path = candidate
-                                        break
-                            if source_path:
+                    # upload). Normal case: already located, no delay.
+                    if located is None and release.target_file:
+                        for _attempt in range(20):
+                            located = self._locate_completed_target(
+                                self.client.get_torrent(torrent.id),
+                                download_dir, release, target_ids,
+                            )
+                            if located:
                                 break
                             time.sleep(0.5)
 
+                    source_path, logical_name = located if located else (None, None)
+
                     if source_path and source_path.exists():
-                        # Determine output filename
+                        # Determine output filename from the logical (final) name,
+                        # so a '.part' source still yields the right extension.
                         if output_filename:
-                            original_ext = source_path.suffix
+                            original_ext = Path(logical_name).suffix
                             if not output_filename.endswith(original_ext):
                                 final_filename = output_filename + original_ext
                             else:
                                 final_filename = output_filename
                         else:
-                            final_filename = source_path.name
+                            final_filename = logical_name
 
                         target_file_path = Path(abs_output_path) / final_filename
 
@@ -601,22 +592,42 @@ class TorrentDownloader(Downloader):
         return downloaded_file_path or ""
 
     @staticmethod
-    def _target_files_complete(torrent, target_ids) -> bool:
-        """Return True iff every file in ``target_ids`` has fully downloaded.
+    def _locate_completed_target(torrent, download_dir, release, target_ids):
+        """Locate this job's completed target file on disk.
 
-        Used so a selective download finishes as soon as ITS file(s) are done,
-        independent of sibling downloads that share the same torrent. Returns
-        False when ``target_ids`` is empty (caller falls back to whole-torrent
-        completion) or when any target file is missing or still incomplete.
+        Returns ``(source_path, logical_name)`` when every file in
+        ``target_ids`` is byte-complete AND the target file is present on disk,
+        otherwise ``None``. Transmission names an incomplete file ``X.part`` and
+        renames it to ``X`` on completion, and that rename can lag the byte
+        count, so accept whichever of the two names exists — the content is
+        complete once ``bytesCompleted == size``. ``logical_name`` is always the
+        final name (no ``.part``) so the caller derives the right extension.
+
+        Returns ``None`` when there is no target file (caller falls back to
+        whole-torrent completion), the bytes aren't all present, or the file
+        isn't on disk yet.
         """
-        if not target_ids:
-            return False
+        if not target_ids or not release.target_file:
+            return None
         try:
-            by_id = {f.id: f for f in torrent.get_files()}
+            files = torrent.get_files()
         except Exception:
-            return False
+            return None
+        if not files:
+            return None
+        by_id = {f.id: f for f in files}
         for fid in target_ids:
             f = by_id.get(fid)
             if f is None or f.size <= 0 or f.completed < f.size:
-                return False
-        return True
+                return None
+        td = getattr(torrent, "download_dir", None)
+        effective_dir = td if isinstance(td, str) and td else download_dir
+        for f in files:
+            if f.id in target_ids and release.target_file in f.name:
+                final = Path(effective_dir) / f.name
+                if final.exists():
+                    return final, f.name
+                part = Path(effective_dir) / (f.name + ".part")
+                if part.exists():
+                    return part, f.name
+        return None
