@@ -533,72 +533,65 @@ class TorrentDownloader(Downloader):
             logger.error(f"Download failed: {e}")
             raise
         finally:
-            # Release our hold on the shared torrent and decide cleanup. Only the
-            # LAST active download for this info-hash may remove the torrent — a
-            # sibling still downloading must never have the torrent (and its data)
-            # deleted out from under it, which is what previously caused
-            # "Torrent not found in result" failures for a whole album batch.
-            if joined and info_hash:
-                remaining, any_success, reselect = SHARED_TORRENT_REGISTRY.leave(
-                    info_hash, download_succeeded, wants_all=wants_all
-                )
-                # If we were the last whole-torrent job and selective siblings
-                # remain, drop the daemon back to their merged selection so it
-                # stops downloading files nobody wants.
-                if reselect is not None and torrent is not None:
-                    try:
-                        _apply_selection(reselect)
-                    except Exception as e:
-                        logger.warning(f"Failed to re-restrict shared torrent selection: {e}")
-            else:
-                remaining, any_success = 0, download_succeeded
-
-            # Clean up based on refcount + mode + outcome. Keep the torrent
-            # seeding when it holds good data (any sharer succeeded) in
-            # keep_seeding mode. On total failure (including a hard-stall abort)
-            # remove it and its data — otherwise the daemon keeps the stalled
-            # torrent and the next caller retry re-attaches to the same stuck
-            # state (same hash => transmission dedupes the add) instead of
-            # starting cleanly with a fresh announce.
-            if remaining > 0:
-                # Other downloads still sharing this torrent — leave it alone.
-                logger.info(
-                    f"Torrent {info_hash} still in use by {remaining} other "
-                    f"download(s); leaving it in place"
-                )
-                # In non-keep_seeding mode a duplicate add deduped onto a
-                # sibling's directory, leaving OUR private temp dir empty. Clean
-                # it if (and only if) it's empty — never touch a dir holding live
-                # data a sibling is using.
-                try:
-                    if (
-                        use_temp
-                        and os.path.isdir(download_dir)
-                        and not os.listdir(download_dir)
-                    ):
-                        logger.debug(f"Cleaning up empty temp directory: {download_dir}")
-                        shutil.rmtree(download_dir, ignore_errors=True)
-                except Exception as e:
-                    logger.warning(f"Failed to clean up temp directory: {e}")
-            elif self.keep_seeding and any_success:
-                # In keep_seeding mode, don't remove torrent - let it seed
-                if torrent:
-                    logger.info(f"Torrent {torrent.id} ({torrent.name}) will continue seeding")
-            else:
-                # Remove torrent and clean up any temp directory
+            # Final cleanup for the LAST job sharing this torrent: keep it seeding
+            # when it holds good data (any sharer succeeded) in keep_seeding mode,
+            # otherwise remove it and its data — on total failure (incl. a
+            # hard-stall abort) the next retry must re-add fresh rather than
+            # re-attach to the same stuck state (transmission dedupes by hash).
+            # Runs UNDER the registry lock (see below) so a concurrent join can't
+            # attach to a torrent being torn down.
+            def _cleanup_last(any_success):
+                if self.keep_seeding and any_success:
+                    if torrent:
+                        logger.info(f"Torrent {torrent.id} ({torrent.name}) will continue seeding")
+                    return
                 try:
                     if torrent:
                         logger.debug(f"Removing torrent {torrent.id} from Transmission")
                         self.client.remove_torrent(torrent.id, delete_data=True)
                 except Exception as e:
                     logger.warning(f"Failed to remove torrent: {e}")
-
                 try:
                     if use_temp and os.path.exists(download_dir):
                         logger.debug(f"Cleaning up temporary directory: {download_dir}")
                         shutil.rmtree(download_dir, ignore_errors=True)
                 except Exception as e:
                     logger.warning(f"Failed to clean up temp directory: {e}")
+
+            # Release our hold on the shared torrent. leave() runs the selection
+            # re-apply (when siblings remain) and the removal (when we're last)
+            # under the registry lock, atomic with the reference-count change.
+            if joined and info_hash:
+                remaining, _any = SHARED_TORRENT_REGISTRY.leave(
+                    info_hash,
+                    target_ids,
+                    download_succeeded,
+                    wants_all=wants_all,
+                    apply_fn=_apply_selection if torrent is not None else None,
+                    remove_fn=_cleanup_last,
+                )
+                if remaining > 0:
+                    logger.info(
+                        f"Torrent {info_hash} still in use by {remaining} other "
+                        f"download(s); leaving it in place"
+                    )
+                    # In non-keep_seeding mode a duplicate add deduped onto a
+                    # sibling's directory, leaving OUR private temp dir empty.
+                    # Clean it only if empty — never touch live data a sibling
+                    # is using.
+                    try:
+                        if (
+                            use_temp
+                            and os.path.isdir(download_dir)
+                            and not os.listdir(download_dir)
+                        ):
+                            logger.debug(f"Cleaning up empty temp directory: {download_dir}")
+                            shutil.rmtree(download_dir, ignore_errors=True)
+                    except Exception as e:
+                        logger.warning(f"Failed to clean up temp directory: {e}")
+            else:
+                # Never joined the registry (e.g. no info-hash) — clean up directly.
+                _cleanup_last(download_succeeded)
 
         return downloaded_file_path or ""
 
