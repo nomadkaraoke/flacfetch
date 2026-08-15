@@ -11,6 +11,7 @@ from typing import Optional
 from ..core.interfaces import Downloader
 from ..core.log import get_logger
 from ..core.models import Release
+from .torrent_coordinator import SHARED_TORRENT_REGISTRY
 
 logger = get_logger("TorrentDownloader")
 
@@ -213,6 +214,14 @@ class TorrentDownloader(Downloader):
         downloaded_file_path = None
         torrent = None
         download_succeeded = False
+        # Shared-torrent coordination state (see torrent_coordinator.py). Set once
+        # the torrent is added and we know its info-hash; used to merge file
+        # selection with concurrent downloads of the same torrent and to
+        # reference-count cleanup so we never delete a torrent a sibling is using.
+        info_hash = None
+        target_ids = []  # file ids THIS job wants (empty => whole torrent)
+        joined = False   # True once we've registered with the shared registry
+        wants_all = False  # True when this job wants the whole torrent
 
         try:
             # Add torrent to Transmission in PAUSED state first
@@ -232,60 +241,98 @@ class TorrentDownloader(Downloader):
 
             logger.info(f"Torrent added (paused): {torrent.name} (ID: {torrent.id})")
 
-            # Handle selective file download
+            # Re-fetch once to reliably read the info-hash. It's how we coordinate
+            # with any concurrent download of the SAME torrent (Transmission
+            # dedupes an add by info-hash, so several tracks from one album share
+            # a single torrent instance).
+            torrent = self.client.get_torrent(torrent.id)
+            info_hash = getattr(torrent, "hashString", None) or getattr(torrent, "info_hash", None)
+
+            # Work out which file(s) THIS job wants and the full file list. We
+            # fetch the file list even for a whole-torrent download so we can
+            # re-assert "want everything" if a selective sibling tries to
+            # restrict the shared torrent. get_files() can be a bare Mock in unit
+            # tests / empty before metadata parses, so guard the iteration.
+            all_ids = []
             if release.target_file:
                 logger.info(f"Target file specified: {release.target_file}")
 
-                # Wait for metadata to be parsed (files list will be empty until torrent is parsed)
+                # Wait for metadata to be parsed (files list is empty until parsed)
                 logger.debug("Waiting for torrent metadata to be parsed...")
                 max_wait = 10  # seconds
                 waited = 0
-                files = []
-                while waited < max_wait:
-                    torrent = self.client.get_torrent(torrent.id)
-                    files = torrent.get_files()
-                    if len(files) > 0:
-                        logger.debug(f"Metadata parsed: {len(files)} files found")
-                        break
+                all_files = torrent.get_files()
+                while len(all_files) == 0 and waited < max_wait:
                     time.sleep(0.5)
                     waited += 0.5
+                    torrent = self.client.get_torrent(torrent.id)
+                    all_files = torrent.get_files()
 
-                if len(files) == 0:
+                if len(all_files) == 0:
                     logger.warning("Timeout waiting for torrent metadata. Downloading entire torrent.")
                 else:
-                    # Find target file in the list
-                    target_indices = []
-                    target_file_name = None
-
-                    for file_obj in files:
-                        file_name = file_obj.name
-                        file_id = file_obj.id
-                        if release.target_file in file_name:
-                            logger.info(f"Found target file: {file_name} (id {file_id})")
-                            target_indices.append(file_id)
-                            if not target_file_name:
-                                target_file_name = file_name  # Remember the first match
-
-                    if target_indices:
-                        # Set unwanted files
-                        all_indices = [f.id for f in files]
-                        unwanted_indices = [i for i in all_indices if i not in target_indices]
-
-                        if unwanted_indices:
-                            logger.info(f"Setting file priorities: want {len(target_indices)}, unwant {len(unwanted_indices)}")
-                            self.client.change_torrent(
-                                torrent.id,
-                                files_unwanted=unwanted_indices,
-                                files_wanted=target_indices
-                            )
-                            logger.info(f"File priorities set: downloading only {len(target_indices)} file(s)")
-                    else:
+                    logger.debug(f"Metadata parsed: {len(all_files)} files found")
+                    all_ids = [f.id for f in all_files]
+                    for file_obj in all_files:
+                        if release.target_file in file_obj.name:
+                            logger.info(f"Found target file: {file_obj.name} (id {file_obj.id})")
+                            target_ids.append(file_obj.id)
+                    if not target_ids:
                         logger.warning(
                             f"Target file '{release.target_file}' not found in torrent. "
                             f"Downloading entire torrent."
                         )
+            else:
+                try:
+                    all_ids = [f.id for f in torrent.get_files()]
+                except Exception:  # unparsed metadata / mock get_files
+                    all_ids = []
 
-            # Now start the torrent
+            # A job with no isolated target file wants the WHOLE torrent.
+            wants_all = not target_ids
+
+            # Apply the file selection MERGED with any sibling downloads of this
+            # torrent: the daemon is told to want the union of every active job's
+            # files (or EVERYTHING when any sibling wants the whole torrent).
+            # Done under the registry lock so concurrent joiners can't overwrite
+            # each other and starve all-but-one of their target file. ``selection
+            # is None`` means "want everything" (no restriction).
+            def _apply_selection(selection):
+                wanted = list(all_ids) if selection is None else list(selection)
+                wanted_set = set(wanted)
+                unwanted = [i for i in all_ids if i not in wanted_set]
+                logger.info(
+                    f"Applying merged file selection for {info_hash}: "
+                    f"want {len(wanted)}, unwant {len(unwanted)}"
+                )
+                self.client.change_torrent(
+                    torrent.id,
+                    files_wanted=wanted,
+                    files_unwanted=unwanted,
+                )
+
+            # Only meaningful once we know the full file list.
+            apply = _apply_selection if all_ids else None
+            if info_hash:
+                # Always register (even for a whole-torrent download) so the
+                # reference count protects the torrent from a sibling's cleanup.
+                refcount, _sel = SHARED_TORRENT_REGISTRY.join(
+                    info_hash,
+                    target_ids,
+                    wants_all=wants_all,
+                    apply_fn=apply,
+                )
+                joined = True
+                logger.info(
+                    f"Joined shared torrent {info_hash} "
+                    f"(active downloads sharing it: {refcount})"
+                )
+            elif apply:
+                # No info-hash to coordinate on (shouldn't happen post-add) —
+                # fall back to a direct selection.
+                _apply_selection(None if wants_all else set(target_ids))
+
+            # Now start the torrent (idempotent if a sibling already started it).
             logger.info("Starting torrent download...")
             self.client.start_torrent(torrent.id)
 
@@ -297,45 +344,70 @@ class TorrentDownloader(Downloader):
             max_stalls = 60  # 60 seconds of no progress before the on-screen warning
             last_progress_time = time.monotonic()
             last_reannounce_time = None  # None => first re-announce allowed as soon as stalled
+            missing_polls = 0  # consecutive polls where the torrent had vanished
 
             while True:
-                # Refresh torrent status
-                torrent = self.client.get_torrent(torrent.id)
+                # Refresh torrent status. A shared torrent should never disappear
+                # while we hold a reference-count on it, but tolerate a transient
+                # miss (e.g. an uncoordinated external removal / daemon restart)
+                # rather than dying with a cryptic KeyError from transmission-rpc.
+                try:
+                    torrent = self.client.get_torrent(torrent.id)
+                    missing_polls = 0
+                except KeyError:
+                    missing_polls += 1
+                    if missing_polls > 5:
+                        raise RuntimeError(
+                            "Torrent disappeared from Transmission mid-download "
+                            "(removed by another process?)"
+                        )
+                    time.sleep(1)
+                    continue
 
                 status = torrent.status
                 progress = torrent.progress
 
-                # Check if complete. A selective (single-file) download reports
-                # percentDone == 100 for the wanted file, which normally flips the
-                # torrent to 'seeding'; treat progress >= 100 as complete too so a
-                # torrent lingering in 'downloading'/'idle' after the wanted file
-                # finishes doesn't spin here forever.
-                if status in ['seeding', 'seed_pending'] or progress >= 100.0:
+                # Complete when THIS job's target file(s) are fully downloaded AND
+                # present on disk — independent of sibling downloads sharing the
+                # torrent, whose files may still be in flight. Requiring the file
+                # on disk (not merely byte-complete) avoids declaring done during
+                # the brief window before transmission renames 'X.part' -> 'X'.
+                # Fall back to whole-torrent completion (seeding / 100%) when we
+                # have no specific target file.
+                located = self._locate_completed_target(
+                    torrent, download_dir, release, target_ids
+                )
+                if located or status in ['seeding', 'seed_pending'] or progress >= 100.0:
                     print("\n✓ Download complete")
                     logger.info(f"Torrent finished: {torrent.name}")
 
-                    # Get the files info
-                    torrent = self.client.get_torrent(torrent.id)
-                    files = torrent.get_files()
-
-                    # Find the downloaded file
-                    source_path = None
-                    if release.target_file and files:
-                        for file_obj in files:
-                            if file_obj.selected and release.target_file in file_obj.name:
-                                source_path = Path(download_dir) / file_obj.name
+                    # Entered via whole-torrent completion before our file settled
+                    # on disk? Retry briefly for the rename/flush rather than
+                    # returning an empty path (which would break the caller's
+                    # upload). Normal case: already located, no delay.
+                    if located is None and release.target_file:
+                        for _attempt in range(20):
+                            located = self._locate_completed_target(
+                                self.client.get_torrent(torrent.id),
+                                download_dir, release, target_ids,
+                            )
+                            if located:
                                 break
+                            time.sleep(0.5)
+
+                    source_path, logical_name = located if located else (None, None)
 
                     if source_path and source_path.exists():
-                        # Determine output filename
+                        # Determine output filename from the logical (final) name,
+                        # so a '.part' source still yields the right extension.
                         if output_filename:
-                            original_ext = source_path.suffix
+                            original_ext = Path(logical_name).suffix
                             if not output_filename.endswith(original_ext):
                                 final_filename = output_filename + original_ext
                             else:
                                 final_filename = output_filename
                         else:
-                            final_filename = source_path.name
+                            final_filename = logical_name
 
                         target_file_path = Path(abs_output_path) / final_filename
 
@@ -461,25 +533,24 @@ class TorrentDownloader(Downloader):
             logger.error(f"Download failed: {e}")
             raise
         finally:
-            # Clean up based on mode + outcome. Keep the torrent seeding only
-            # after a SUCCESSFUL keep_seeding download. On any failure (including
-            # a hard-stall abort) remove it and its data — otherwise the daemon
-            # keeps the stalled torrent and the next caller retry re-attaches to
-            # the same stuck state (same hash => transmission dedupes the add)
-            # instead of starting cleanly with a fresh announce.
-            if self.keep_seeding and download_succeeded:
-                # In keep_seeding mode, don't remove torrent - let it seed
-                if torrent:
-                    logger.info(f"Torrent {torrent.id} ({torrent.name}) will continue seeding")
-            else:
-                # Remove torrent and clean up any temp directory
+            # Final cleanup for the LAST job sharing this torrent: keep it seeding
+            # when it holds good data (any sharer succeeded) in keep_seeding mode,
+            # otherwise remove it and its data — on total failure (incl. a
+            # hard-stall abort) the next retry must re-add fresh rather than
+            # re-attach to the same stuck state (transmission dedupes by hash).
+            # Runs UNDER the registry lock (see below) so a concurrent join can't
+            # attach to a torrent being torn down.
+            def _cleanup_last(any_success):
+                if self.keep_seeding and any_success:
+                    if torrent:
+                        logger.info(f"Torrent {torrent.id} ({torrent.name}) will continue seeding")
+                    return
                 try:
                     if torrent:
                         logger.debug(f"Removing torrent {torrent.id} from Transmission")
                         self.client.remove_torrent(torrent.id, delete_data=True)
                 except Exception as e:
                     logger.warning(f"Failed to remove torrent: {e}")
-
                 try:
                     if use_temp and os.path.exists(download_dir):
                         logger.debug(f"Cleaning up temporary directory: {download_dir}")
@@ -487,4 +558,80 @@ class TorrentDownloader(Downloader):
                 except Exception as e:
                     logger.warning(f"Failed to clean up temp directory: {e}")
 
+            # Release our hold on the shared torrent. leave() runs the selection
+            # re-apply (when siblings remain) and the removal (when we're last)
+            # under the registry lock, atomic with the reference-count change.
+            if joined and info_hash:
+                remaining, _any = SHARED_TORRENT_REGISTRY.leave(
+                    info_hash,
+                    target_ids,
+                    download_succeeded,
+                    wants_all=wants_all,
+                    apply_fn=_apply_selection if torrent is not None else None,
+                    remove_fn=_cleanup_last,
+                )
+                if remaining > 0:
+                    logger.info(
+                        f"Torrent {info_hash} still in use by {remaining} other "
+                        f"download(s); leaving it in place"
+                    )
+                    # In non-keep_seeding mode a duplicate add deduped onto a
+                    # sibling's directory, leaving OUR private temp dir empty.
+                    # Clean it only if empty — never touch live data a sibling
+                    # is using.
+                    try:
+                        if (
+                            use_temp
+                            and os.path.isdir(download_dir)
+                            and not os.listdir(download_dir)
+                        ):
+                            logger.debug(f"Cleaning up empty temp directory: {download_dir}")
+                            shutil.rmtree(download_dir, ignore_errors=True)
+                    except Exception as e:
+                        logger.warning(f"Failed to clean up temp directory: {e}")
+            else:
+                # Never joined the registry (e.g. no info-hash) — clean up directly.
+                _cleanup_last(download_succeeded)
+
         return downloaded_file_path or ""
+
+    @staticmethod
+    def _locate_completed_target(torrent, download_dir, release, target_ids):
+        """Locate this job's completed target file on disk.
+
+        Returns ``(source_path, logical_name)`` when every file in
+        ``target_ids`` is byte-complete AND the target file is present on disk,
+        otherwise ``None``. Transmission names an incomplete file ``X.part`` and
+        renames it to ``X`` on completion, and that rename can lag the byte
+        count, so accept whichever of the two names exists — the content is
+        complete once ``bytesCompleted == size``. ``logical_name`` is always the
+        final name (no ``.part``) so the caller derives the right extension.
+
+        Returns ``None`` when there is no target file (caller falls back to
+        whole-torrent completion), the bytes aren't all present, or the file
+        isn't on disk yet.
+        """
+        if not target_ids or not release.target_file:
+            return None
+        try:
+            files = torrent.get_files()
+        except Exception:
+            return None
+        if not files:
+            return None
+        by_id = {f.id: f for f in files}
+        for fid in target_ids:
+            f = by_id.get(fid)
+            if f is None or f.size <= 0 or f.completed < f.size:
+                return None
+        td = getattr(torrent, "download_dir", None)
+        effective_dir = td if isinstance(td, str) and td else download_dir
+        for f in files:
+            if f.id in target_ids and release.target_file in f.name:
+                final = Path(effective_dir) / f.name
+                if final.exists():
+                    return final, f.name
+                part = Path(effective_dir) / (f.name + ".part")
+                if part.exists():
+                    return part, f.name
+        return None

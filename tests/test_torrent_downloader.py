@@ -237,6 +237,11 @@ class TestKeepSeedingCopySemantics:
                 mock_file.name = file_name
                 mock_file.id = 0
                 mock_file.selected = True
+                # Fully-downloaded target file: completion is now decided per-file
+                # (our target file's bytes are all present) rather than by whole-
+                # torrent progress, so give the mock realistic size/completed.
+                mock_file.size = 8
+                mock_file.completed = 8
 
                 mock_torrent = Mock()
                 mock_torrent.id = 1
@@ -583,3 +588,72 @@ class TestStallHandling:
                 )
             finally:
                 os.unlink(torrent_path)
+
+class TestLocateCompletedTarget:
+    """Per-file completion must require the file to be on disk, and tolerate the
+    brief window where transmission still names a complete file 'X.part' before
+    renaming it to 'X' (the race that produced empty output paths)."""
+
+    @staticmethod
+    def _file(fid, name, size, completed):
+        f = Mock()
+        f.id = fid
+        f.name = name
+        f.size = size
+        f.completed = completed
+        f.selected = True
+        return f
+
+    def _torrent(self, files, download_dir):
+        t = Mock()
+        t.download_dir = download_dir
+        t.get_files.return_value = files
+        return t
+
+    def _release(self, target_file):
+        r = Mock()
+        r.target_file = target_file
+        return r
+
+    def test_none_until_bytes_complete(self, tmp_path):
+        from flacfetch.downloaders.torrent import TorrentDownloader
+        name = "07 - Riot Van.flac"
+        (tmp_path / name).write_bytes(b"x")  # on disk, but bytes not complete
+        t = self._torrent([self._file(3, name, 100, 50)], str(tmp_path))
+        assert TorrentDownloader._locate_completed_target(
+            t, str(tmp_path), self._release(name), [3]) is None
+
+    def test_none_when_not_on_disk_yet(self, tmp_path):
+        from flacfetch.downloaders.torrent import TorrentDownloader
+        name = "07 - Riot Van.flac"  # byte-complete but neither X nor X.part exists
+        t = self._torrent([self._file(3, name, 100, 100)], str(tmp_path))
+        assert TorrentDownloader._locate_completed_target(
+            t, str(tmp_path), self._release(name), [3]) is None
+
+    def test_finds_part_file_before_rename(self, tmp_path):
+        from flacfetch.downloaders.torrent import TorrentDownloader
+        name = "07 - Riot Van.flac"
+        (tmp_path / (name + ".part")).write_bytes(b"FLAC")  # not yet renamed
+        t = self._torrent([self._file(3, name, 4, 4)], str(tmp_path))
+        located = TorrentDownloader._locate_completed_target(
+            t, str(tmp_path), self._release(name), [3])
+        assert located is not None
+        source, logical = located
+        assert source.name.endswith(".part")
+        assert logical == name  # logical name is final (drives extension)
+
+    def test_prefers_final_over_part(self, tmp_path):
+        from flacfetch.downloaders.torrent import TorrentDownloader
+        name = "07 - Riot Van.flac"
+        (tmp_path / name).write_bytes(b"FLAC")
+        (tmp_path / (name + ".part")).write_bytes(b"FLAC")
+        t = self._torrent([self._file(3, name, 4, 4)], str(tmp_path))
+        source, logical = TorrentDownloader._locate_completed_target(
+            t, str(tmp_path), self._release(name), [3])
+        assert not source.name.endswith(".part")
+
+    def test_none_without_target_file(self, tmp_path):
+        from flacfetch.downloaders.torrent import TorrentDownloader
+        t = self._torrent([self._file(3, "x.flac", 4, 4)], str(tmp_path))
+        assert TorrentDownloader._locate_completed_target(
+            t, str(tmp_path), self._release(None), []) is None
