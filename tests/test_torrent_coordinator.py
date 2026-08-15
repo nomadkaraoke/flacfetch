@@ -3,6 +3,8 @@ share one torrent (same info-hash) without clobbering each other's file
 selection or deleting the torrent out from under a sibling."""
 import threading
 
+import pytest
+
 from flacfetch.downloaders.torrent_coordinator import SharedTorrentRegistry
 
 
@@ -40,6 +42,73 @@ class TestFileSelectionMerge:
         refcount, union = reg.join("h", [], apply_fn=None)
         assert refcount == 1
         assert union == set()
+
+
+class TestApplyFailureRollback:
+    def test_apply_fn_raising_rolls_back_refcount(self):
+        """If pushing the selection to the daemon fails, the join must NOT leak a
+        reference (which would stop the torrent ever being cleaned up)."""
+        reg = SharedTorrentRegistry()
+
+        def boom(_selection):
+            raise RuntimeError("change_torrent RPC failed")
+
+        with pytest.raises(RuntimeError, match="change_torrent"):
+            reg.join("h", [0], apply_fn=boom)
+
+        # Entry was fully rolled back: a subsequent leave sees nothing, and a
+        # fresh join starts clean at refcount 1.
+        remaining, _ = reg.leave("h", success=False)
+        assert remaining == 0
+        refcount, _ = reg.join("h", [1])
+        assert refcount == 1
+
+    def test_rollback_preserves_a_healthy_sibling(self):
+        reg = SharedTorrentRegistry()
+        reg.join("h", [0])  # healthy first joiner
+
+        def boom(_selection):
+            raise RuntimeError("nope")
+
+        with pytest.raises(RuntimeError):
+            reg.join("h", [1], apply_fn=boom)
+
+        # The failed joiner rolled back; the healthy sibling is still the only ref.
+        remaining, _ = reg.leave("h", success=True)
+        assert remaining == 0
+
+
+class TestWantsAll:
+    def test_whole_torrent_join_yields_want_all_selection(self):
+        reg = SharedTorrentRegistry()
+        applied = []
+        _, selection = reg.join("h", [], wants_all=True,
+                                apply_fn=lambda s: applied.append(s))
+        assert selection is None  # None => "want everything"
+        assert applied == [None]
+
+    def test_selective_joiner_after_whole_torrent_does_not_restrict(self):
+        """A whole-torrent job needs every file; a later selective joiner must be
+        told to want everything (selection=None), not just its own file."""
+        reg = SharedTorrentRegistry()
+        reg.join("h", [], wants_all=True)
+
+        applied = []
+        _, selection = reg.join("h", [3], apply_fn=lambda s: applied.append(s))
+        assert selection is None
+        assert applied == [None]
+
+    def test_whole_torrent_joiner_overrides_prior_selective_union(self):
+        reg = SharedTorrentRegistry()
+        # A selective joiner restricts to {2} ...
+        _, sel1 = reg.join("h", [2])
+        assert sel1 == {2}
+        # ... then a whole-torrent joiner arrives: selection flips to want-all.
+        applied = []
+        _, sel2 = reg.join("h", [], wants_all=True,
+                           apply_fn=lambda s: applied.append(s))
+        assert sel2 is None
+        assert applied == [None]
 
 
 class TestReferenceCounting:

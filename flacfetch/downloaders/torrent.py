@@ -247,9 +247,11 @@ class TorrentDownloader(Downloader):
             torrent = self.client.get_torrent(torrent.id)
             info_hash = getattr(torrent, "hashString", None) or getattr(torrent, "info_hash", None)
 
-            # Handle selective file download: work out which file(s) THIS job
-            # wants. With no target_file we want the whole torrent (all files),
-            # which is the daemon default — nothing to select.
+            # Work out which file(s) THIS job wants and the full file list. We
+            # fetch the file list even for a whole-torrent download so we can
+            # re-assert "want everything" if a selective sibling tries to
+            # restrict the shared torrent. get_files() can be a bare Mock in unit
+            # tests / empty before metadata parses, so guard the iteration.
             all_ids = []
             if release.target_file:
                 logger.info(f"Target file specified: {release.target_file}")
@@ -279,43 +281,55 @@ class TorrentDownloader(Downloader):
                             f"Target file '{release.target_file}' not found in torrent. "
                             f"Downloading entire torrent."
                         )
+            else:
+                try:
+                    all_ids = [f.id for f in torrent.get_files()]
+                except Exception:  # unparsed metadata / mock get_files
+                    all_ids = []
+
+            # A job with no isolated target file wants the WHOLE torrent.
+            wants_all = not target_ids
 
             # Apply the file selection MERGED with any sibling downloads of this
             # torrent: the daemon is told to want the union of every active job's
-            # files. Done under the registry lock so concurrent joiners can't
-            # overwrite each other and starve all-but-one of their target file.
-            # Only meaningful when we isolated specific file(s) AND know the full
-            # file list; otherwise we leave the daemon default (whole torrent).
-            def _apply_selection(union_ids):
-                unwanted = [i for i in all_ids if i not in union_ids]
+            # files (or EVERYTHING when any sibling wants the whole torrent).
+            # Done under the registry lock so concurrent joiners can't overwrite
+            # each other and starve all-but-one of their target file. ``selection
+            # is None`` means "want everything" (no restriction).
+            def _apply_selection(selection):
+                wanted = list(all_ids) if selection is None else list(selection)
+                wanted_set = set(wanted)
+                unwanted = [i for i in all_ids if i not in wanted_set]
                 logger.info(
                     f"Applying merged file selection for {info_hash}: "
-                    f"want {len(union_ids)}, unwant {len(unwanted)}"
+                    f"want {len(wanted)}, unwant {len(unwanted)}"
                 )
                 self.client.change_torrent(
                     torrent.id,
-                    files_wanted=list(union_ids),
+                    files_wanted=wanted,
                     files_unwanted=unwanted,
                 )
 
-            can_select = bool(target_ids and all_ids)
+            # Only meaningful once we know the full file list.
+            apply = _apply_selection if all_ids else None
             if info_hash:
                 # Always register (even for a whole-torrent download) so the
                 # reference count protects the torrent from a sibling's cleanup.
-                refcount, _union = SHARED_TORRENT_REGISTRY.join(
+                refcount, _sel = SHARED_TORRENT_REGISTRY.join(
                     info_hash,
                     target_ids,
-                    apply_fn=_apply_selection if can_select else None,
+                    wants_all=wants_all,
+                    apply_fn=apply,
                 )
                 joined = True
                 logger.info(
                     f"Joined shared torrent {info_hash} "
                     f"(active downloads sharing it: {refcount})"
                 )
-            elif can_select:
+            elif apply:
                 # No info-hash to coordinate on (shouldn't happen post-add) —
-                # fall back to a direct, un-merged selection.
-                _apply_selection(set(target_ids))
+                # fall back to a direct selection.
+                _apply_selection(None if wants_all else set(target_ids))
 
             # Now start the torrent (idempotent if a sibling already started it).
             logger.info("Starting torrent download...")
@@ -376,9 +390,15 @@ class TorrentDownloader(Downloader):
                         for _attempt in range(10):
                             torrent = self.client.get_torrent(torrent.id)
                             files = torrent.get_files()
+                            # Resolve the file under the directory transmission
+                            # actually used. When a duplicate add deduped onto a
+                            # sibling's torrent, our local `download_dir` may hold
+                            # no data, so trust the torrent's own download_dir.
+                            td = getattr(torrent, "download_dir", None)
+                            effective_dir = td if isinstance(td, str) and td else download_dir
                             for file_obj in files or []:
                                 if file_obj.selected and release.target_file in file_obj.name:
-                                    candidate = Path(download_dir) / file_obj.name
+                                    candidate = Path(effective_dir) / file_obj.name
                                     if candidate.exists():
                                         source_path = candidate
                                         break
@@ -544,6 +564,20 @@ class TorrentDownloader(Downloader):
                     f"Torrent {info_hash} still in use by {remaining} other "
                     f"download(s); leaving it in place"
                 )
+                # In non-keep_seeding mode a duplicate add deduped onto a
+                # sibling's directory, leaving OUR private temp dir empty. Clean
+                # it if (and only if) it's empty — never touch a dir holding live
+                # data a sibling is using.
+                try:
+                    if (
+                        use_temp
+                        and os.path.isdir(download_dir)
+                        and not os.listdir(download_dir)
+                    ):
+                        logger.debug(f"Cleaning up empty temp directory: {download_dir}")
+                        shutil.rmtree(download_dir, ignore_errors=True)
+                except Exception as e:
+                    logger.warning(f"Failed to clean up temp directory: {e}")
             elif self.keep_seeding and any_success:
                 # In keep_seeding mode, don't remove torrent - let it seed
                 if torrent:

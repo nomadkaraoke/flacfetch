@@ -30,7 +30,7 @@ from typing import Callable, Iterable, Optional, Set, Tuple
 
 
 class _Entry:
-    __slots__ = ("refcount", "wanted", "any_success")
+    __slots__ = ("refcount", "wanted", "wants_all", "any_success")
 
     def __init__(self) -> None:
         self.refcount = 0
@@ -39,6 +39,10 @@ class _Entry:
         # last job leaves), so a file that becomes wanted stays wanted and can't
         # be un-wanted by a later joiner while a sibling still needs it.
         self.wanted: Set[int] = set()
+        # Count of active jobs that want the WHOLE torrent (no isolated target).
+        # While this is > 0 the selection must not be restricted at all, or a
+        # selective sibling would un-want the whole-torrent job's files.
+        self.wants_all = 0
         self.any_success = False
 
 
@@ -60,15 +64,25 @@ class SharedTorrentRegistry:
         self,
         info_hash: str,
         wanted_ids: Iterable[int],
-        apply_fn: Optional[Callable[[Set[int]], None]] = None,
-    ) -> Tuple[int, Set[int]]:
+        wants_all: bool = False,
+        apply_fn: Optional[Callable[[Optional[Set[int]]], None]] = None,
+    ) -> Tuple[int, Optional[Set[int]]]:
         """Register a job's interest in ``info_hash``.
 
         Adds ``wanted_ids`` to the shared wanted-set and, while still holding the
-        lock, invokes ``apply_fn(union)`` (if given) so the merged selection is
-        pushed to the daemon atomically with the merge.
+        lock, invokes ``apply_fn(selection)`` (if given) so the merged selection
+        is pushed to the daemon atomically with the merge. ``selection`` is the
+        union of wanted file ids, or ``None`` meaning "want the whole torrent"
+        (when any active job wants everything) — the caller applies that as
+        "no restriction".
 
-        Returns ``(refcount_after_join, union_of_wanted_ids)``.
+        ``wants_all=True`` marks this job as needing the whole torrent.
+
+        If ``apply_fn`` raises, the join is rolled back before the exception
+        propagates, so a failed selection RPC can't leak a permanent reference
+        that would stop the torrent ever being cleaned up.
+
+        Returns ``(refcount_after_join, selection)``.
         """
         with self._lock:
             entry = self._entries.get(info_hash)
@@ -76,11 +90,21 @@ class SharedTorrentRegistry:
                 entry = _Entry()
                 self._entries[info_hash] = entry
             entry.refcount += 1
+            if wants_all:
+                entry.wants_all += 1
             entry.wanted.update(int(i) for i in wanted_ids)
-            union = set(entry.wanted)
+            selection = None if entry.wants_all > 0 else set(entry.wanted)
             if apply_fn is not None:
-                apply_fn(union)
-            return entry.refcount, union
+                try:
+                    apply_fn(selection)
+                except Exception:
+                    entry.refcount -= 1
+                    if wants_all:
+                        entry.wants_all -= 1
+                    if entry.refcount <= 0:
+                        self._entries.pop(info_hash, None)
+                    raise
+            return entry.refcount, selection
 
     def leave(self, info_hash: str, success: bool) -> Tuple[int, bool]:
         """Mark a job done with this torrent.
