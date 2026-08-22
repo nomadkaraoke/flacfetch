@@ -164,6 +164,20 @@ class TestIsolatedCookiefile:
             # Temp copy is removed after the context exits.
             assert not os.path.exists(copy_path)
 
+    def test_falls_back_to_canonical_when_copy_fails(self):
+        """A copy failure must not break the download — fall back to the original."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            canonical = os.path.join(tmpdir, "cookies.txt")
+            with open(canonical, "w") as f:
+                f.write("# cookies\n")
+
+            with patch(
+                "flacfetch.downloaders.youtube.shutil.copyfile",
+                side_effect=OSError("disk full"),
+            ):
+                with isolated_cookiefile(canonical) as cf:
+                    assert cf == canonical
+
     def test_writeback_to_copy_does_not_touch_canonical(self):
         """The core guarantee: simulated yt-dlp write-back hits only the copy."""
         with tempfile.TemporaryDirectory() as tmpdir:

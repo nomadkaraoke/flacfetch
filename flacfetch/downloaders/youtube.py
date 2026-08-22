@@ -154,9 +154,23 @@ def isolated_cookiefile(cookies_file: Optional[str]):
         fd, tmp_path = tempfile.mkstemp(prefix="ytdlp-cookies-", suffix=".txt")
         os.close(fd)
         shutil.copyfile(cookies_file, tmp_path)
+    except OSError as e:
+        # Copy failed (disk full, perms, ...). Fall back to the canonical file so
+        # downloads still work — we lose write-back protection for this one run,
+        # which is strictly better than failing the download outright.
+        logger.warning(f"Could not create temp cookie copy, using canonical file: {e}")
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        yield cookies_file
+        return
+
+    try:
         yield tmp_path
     finally:
-        if tmp_path and os.path.exists(tmp_path):
+        if os.path.exists(tmp_path):
             try:
                 os.unlink(tmp_path)
             except OSError as e:
