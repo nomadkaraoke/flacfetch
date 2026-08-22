@@ -400,7 +400,11 @@ log "Stage 5b — yt-dlp PO Token provider (bgutil, HTTP server)"
 # below) that mints Proof-of-Origin tokens via YouTube's BotGuard challenge. The
 # plugin auto-detects the server on the default port, so no --extractor-args are
 # needed. Node.js is the server runtime (deno alone can't populate node_modules).
-pip install --upgrade "bgutil-ytdlp-pot-provider" --quiet || warn "bgutil PO-token plugin install failed"
+# Pin the plugin to the SERVER version — bgutil requires matching plugin/server
+# versions; bump BGUTIL_POT_VERSION to upgrade both together (re-provision rebuilds
+# the server + re-pins the plugin). update-ytdlp.sh deliberately does NOT bump it.
+pip install --upgrade "bgutil-ytdlp-pot-provider==${BGUTIL_POT_VERSION}" --quiet \
+  || warn "bgutil PO-token plugin install failed"
 if ! command -v node >/dev/null 2>&1; then
   log "installing Node.js (bgutil PO server runtime)"
   apt-get install -y nodejs npm >/dev/null 2>&1 \
@@ -667,9 +671,13 @@ RestartSec=5
 WantedBy=multi-user.target
 XVFB_SERVICE
 
-# yt-dlp PO Token provider — bgutil HTTP server (localhost only).
-# The server binary has no host-bind flag (binds :: then 0.0.0.0), so we confine
-# it to loopback with systemd's IPAddress firewall rather than a host firewall.
+# yt-dlp PO Token provider — bgutil HTTP server.
+# The server binary has no host-bind flag (binds :: then 0.0.0.0), but the host
+# nftables firewall already has `policy drop` on input with no accept rule for
+# $BGUTIL_POT_PORT, so it's unreachable externally while `iif lo accept` keeps it
+# available to local yt-dlp. Do NOT use systemd IPAddressDeny/Allow here: those
+# filter EGRESS too, and the server must reach Google's BotGuard/WAA endpoints to
+# mint tokens (blocking egress makes every mint fail with getaddrinfo EAI_AGAIN).
 if [ -f "$BGUTIL_POT_DIR/server/build/main.js" ]; then
 cat > /etc/systemd/system/bgutil-pot.service <<POT_SERVICE
 [Unit]
@@ -685,9 +693,6 @@ ExecStart=/usr/bin/node $BGUTIL_POT_DIR/server/build/main.js --port $BGUTIL_POT_
 Restart=always
 RestartSec=5
 Environment=NODE_ENV=production
-# Confine to loopback: only local yt-dlp may reach the token server.
-IPAddressDeny=any
-IPAddressAllow=localhost
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
@@ -708,14 +713,12 @@ exec >> /var/log/ytdlp-update.log 2>&1
 echo "yt-dlp update started at $(date)"
 cd /opt/flacfetch && source venv/bin/activate
 OLD=$(python -c "import yt_dlp; print(yt_dlp.version.__version__)" 2>/dev/null || echo unknown)
-POT_OLD=$(pip show bgutil-ytdlp-pot-provider 2>/dev/null | awk '/^Version:/{print $2}')
-pip install --upgrade yt-dlp yt-dlp-ejs bgutil-ytdlp-pot-provider --quiet
+# NOTE: the bgutil PO-token plugin is intentionally NOT upgraded here — it is
+# pinned to the bgutil server version by provision.sh (mismatched plugin/server
+# versions can break POT minting). Bump BGUTIL_POT_VERSION + re-provision instead.
+pip install --upgrade yt-dlp yt-dlp-ejs --quiet
 NEW=$(python -c "import yt_dlp; print(yt_dlp.version.__version__)" 2>/dev/null || echo unknown)
-POT_NEW=$(pip show bgutil-ytdlp-pot-provider 2>/dev/null | awk '/^Version:/{print $2}')
-if [ "$OLD" != "$NEW" ] || [ "$POT_OLD" != "$POT_NEW" ]; then
-  echo "yt-dlp $OLD -> $NEW / pot-plugin $POT_OLD -> $POT_NEW"
-  systemctl restart flacfetch
-fi
+if [ "$OLD" != "$NEW" ]; then echo "yt-dlp $OLD -> $NEW"; systemctl restart flacfetch; fi
 command -v /opt/deno/bin/deno >/dev/null 2>&1 && /opt/deno/bin/deno upgrade --quiet 2>/dev/null || true
 echo "Update complete at $(date)"
 UPDATE_SCRIPT
