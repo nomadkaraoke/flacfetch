@@ -10,6 +10,7 @@ from flacfetch.downloaders.youtube import (
     YoutubeDownloader,
     get_cookies_file,
     get_ytdlp_base_opts,
+    get_ytdlp_cache_dir,
 )
 from flacfetch.providers.youtube import YoutubeProvider
 
@@ -73,6 +74,59 @@ class TestGetYtdlpBaseOpts:
         """Test uses explicitly provided cookies file."""
         result = get_ytdlp_base_opts("/my/custom/cookies.txt")
         assert result == {"cookiefile": "/my/custom/cookies.txt"}
+
+
+class TestGetYtdlpCacheDir:
+    """Tests for the FLACFETCH_YTDLP_CACHE_DIR override.
+
+    On the server, HOME/.cache is the Spotify token *file*, so yt-dlp's default
+    ~/.cache/yt-dlp path raises NotADirectoryError and caching is silently lost.
+    """
+
+    def test_returns_none_when_env_unset(self):
+        """No override configured -> use yt-dlp's default (None)."""
+        with patch.dict(os.environ, {}, clear=True):
+            assert get_ytdlp_cache_dir() is None
+
+    def test_creates_and_returns_dir_when_env_set(self):
+        """Env set -> directory is created and returned."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = os.path.join(tmpdir, "ytdlp-cache")
+            with patch.dict(os.environ, {"FLACFETCH_YTDLP_CACHE_DIR": cache_dir}):
+                result = get_ytdlp_cache_dir()
+                assert result == cache_dir
+                assert os.path.isdir(cache_dir)
+
+    def test_returns_none_when_dir_uncreatable(self):
+        """A bad cache path must not break downloads (caching just disabled)."""
+        with patch.dict(os.environ, {"FLACFETCH_YTDLP_CACHE_DIR": "/some/cache"}):
+            with patch(
+                "flacfetch.downloaders.youtube.os.makedirs",
+                side_effect=OSError("not a directory"),
+            ):
+                assert get_ytdlp_cache_dir() is None
+
+    def test_base_opts_include_cachedir_when_set(self):
+        """get_ytdlp_base_opts wires cachedir through alongside cookies."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = os.path.join(tmpdir, "ytdlp-cache")
+            with patch.dict(os.environ, {"FLACFETCH_YTDLP_CACHE_DIR": cache_dir}):
+                with patch(
+                    "flacfetch.downloaders.youtube.get_cookies_file",
+                    return_value=None,
+                ):
+                    result = get_ytdlp_base_opts()
+                    assert result == {"cachedir": cache_dir}
+
+    def test_base_opts_no_cachedir_when_unset(self):
+        """Without the override, base opts carry no cachedir key."""
+        with patch.dict(os.environ, {}, clear=True):
+            with patch(
+                "flacfetch.downloaders.youtube.get_cookies_file",
+                return_value=None,
+            ):
+                result = get_ytdlp_base_opts()
+                assert "cachedir" not in result
 
 
 class TestYoutubeDownloaderCookies:

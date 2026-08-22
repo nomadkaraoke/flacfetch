@@ -62,6 +62,40 @@ def get_cookies_file() -> Optional[str]:
     return None
 
 
+def get_ytdlp_cache_dir() -> Optional[str]:
+    """
+    Resolve an explicit yt-dlp cache directory, if one is configured.
+
+    yt-dlp defaults its cache to ``$XDG_CACHE_HOME`` / ``~/.cache/yt-dlp``. On the
+    flacfetch server the service runs with ``HOME=/opt/flacfetch`` where
+    ``~/.cache`` is a *file* (the Spotify OAuth token cache), so yt-dlp's default
+    path resolves to ``/opt/flacfetch/.cache/yt-dlp`` and every cache write dies
+    with ``NotADirectoryError``. That silently disables player/signature and
+    PO-token caching, forcing a fresh JS-challenge solve on every request (slower
+    and more bot-detectable).
+
+    Set ``FLACFETCH_YTDLP_CACHE_DIR`` to a real directory to give yt-dlp its own
+    cache location that can't collide. When unset (e.g. library/CLI use on a dev
+    machine with a normal ``~/.cache``), we leave yt-dlp's default untouched.
+
+    Returns:
+        The cache directory (created if needed) or None to use yt-dlp's default.
+    """
+    cache_dir = os.environ.get("FLACFETCH_YTDLP_CACHE_DIR")
+    if not cache_dir:
+        return None
+
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+    except OSError as e:
+        # Don't let a misconfigured cache path break downloads; yt-dlp treats a
+        # missing/False cachedir as "caching disabled" and still works.
+        logger.warning(f"Could not create yt-dlp cache dir {cache_dir!r}: {e}")
+        return None
+
+    return cache_dir
+
+
 def get_ytdlp_base_opts(cookies_file: Optional[str] = None) -> dict:
     """
     Get base yt-dlp options with common settings including cookies if available.
@@ -80,6 +114,12 @@ def get_ytdlp_base_opts(cookies_file: Optional[str] = None) -> dict:
 
     if cookies_file:
         opts["cookiefile"] = cookies_file
+
+    # Route yt-dlp's cache to a dedicated dir when configured, so it doesn't
+    # collide with the Spotify token file at HOME/.cache on the server.
+    cache_dir = get_ytdlp_cache_dir()
+    if cache_dir:
+        opts["cachedir"] = cache_dir
 
     return opts
 
