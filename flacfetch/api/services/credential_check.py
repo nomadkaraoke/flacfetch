@@ -243,7 +243,12 @@ def check_youtube_credentials() -> CredentialCheckResult:
             'skip_download': True,
         }
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        # Use a throwaway cookie copy so this validation check never writes yt-dlp's
+        # rotated (and, on a flagged IP, rejected) cookies back over the canonical
+        # keeper-managed file. See downloaders.youtube.isolated_cookiefile.
+        from ...downloaders.youtube import ytdlp_opts_isolated
+
+        with ytdlp_opts_isolated(ydl_opts) as opts, yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(test_url, download=False)
 
         if info and info.get('title'):

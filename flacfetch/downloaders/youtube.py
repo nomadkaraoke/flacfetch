@@ -1,6 +1,9 @@
 import logging
 import os
+import shutil
+import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Optional
 
@@ -124,6 +127,58 @@ def get_ytdlp_base_opts(cookies_file: Optional[str] = None) -> dict:
     return opts
 
 
+@contextmanager
+def isolated_cookiefile(cookies_file: Optional[str]):
+    """Yield a throwaway copy of the cookie file for a single yt-dlp run.
+
+    yt-dlp saves the (possibly rotated) cookie jar back to ``cookiefile`` after
+    every run. On a flagged datacenter IP YouTube *rejects* the rotation
+    ("The provided YouTube account cookies are no longer valid. They have likely
+    been rotated in the browser as a security measure."), so the cookies yt-dlp
+    saves back are invalid and poison the shared file for the next download —
+    cookies that worked seconds ago start returning "Sign in to confirm you're
+    not a bot" within minutes. (On a trusted IP the rotation is accepted, so the
+    write-back is harmless: this only bites since the move to the datacenter box.)
+
+    Handing each run its own copy keeps the canonical, keeper-managed cookie file
+    pristine (the credential keeper is its only writer) and isolates concurrent
+    downloads from one another. Yields the temp copy path, or the original value
+    when there's nothing to copy (no cookies / file missing).
+    """
+    if not cookies_file or not os.path.exists(cookies_file):
+        yield cookies_file
+        return
+
+    tmp_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(prefix="ytdlp-cookies-", suffix=".txt")
+        os.close(fd)
+        shutil.copyfile(cookies_file, tmp_path)
+        yield tmp_path
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError as e:
+                logger.warning(f"Could not remove temp cookie copy {tmp_path!r}: {e}")
+
+
+@contextmanager
+def ytdlp_opts_isolated(ydl_opts: dict):
+    """Run yt-dlp with a throwaway copy of the cookie file (see isolated_cookiefile).
+
+    Swaps ``cookiefile`` in a shallow copy of ``ydl_opts`` for a per-run temp copy
+    so the canonical keeper-managed cookies are never written back to. A no-op when
+    no ``cookiefile`` is configured.
+    """
+    original = ydl_opts.get("cookiefile")
+    with isolated_cookiefile(original) as cf:
+        if original:
+            yield {**ydl_opts, "cookiefile": cf}
+        else:
+            yield ydl_opts
+
+
 @dataclass
 class YoutubeAvailability:
     """Result of a YouTube video availability check."""
@@ -187,7 +242,7 @@ def check_youtube_availability(
     })
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with ytdlp_opts_isolated(ydl_opts) as opts, yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
             if info:
                 return YoutubeAvailability(
@@ -393,7 +448,7 @@ class YoutubeDownloader(Downloader):
 
         downloaded_file: str | None = None
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            with ytdlp_opts_isolated(ydl_opts) as opts, yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(release.download_url, download=True)
                 # extract_info returns None when match_filter rejected the media.
                 if info is None:

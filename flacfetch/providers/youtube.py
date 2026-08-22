@@ -4,7 +4,7 @@ import yt_dlp  # type: ignore
 
 from ..core.interfaces import Provider
 from ..core.models import AudioFormat, MediaSource, Quality, Release, TrackQuery
-from ..downloaders.youtube import get_ytdlp_base_opts
+from ..downloaders.youtube import get_ytdlp_base_opts, ytdlp_opts_isolated
 
 
 class YoutubeProvider(Provider):
@@ -46,7 +46,7 @@ class YoutubeProvider(Provider):
 
         releases = []
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            with ytdlp_opts_isolated(ydl_opts) as opts, yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(search_query, download=False)
                 if info and 'entries' in info:
                     for entry in info['entries']:

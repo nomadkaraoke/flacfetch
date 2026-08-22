@@ -11,6 +11,8 @@ from flacfetch.downloaders.youtube import (
     get_cookies_file,
     get_ytdlp_base_opts,
     get_ytdlp_cache_dir,
+    isolated_cookiefile,
+    ytdlp_opts_isolated,
 )
 from flacfetch.providers.youtube import YoutubeProvider
 
@@ -129,6 +131,78 @@ class TestGetYtdlpCacheDir:
                 assert "cachedir" not in result
 
 
+class TestIsolatedCookiefile:
+    """Tests for the cookie write-back isolation (protects keeper's cookies).
+
+    yt-dlp saves the rotated cookie jar back to the cookiefile on every run; on a
+    flagged IP those rotations are rejected, poisoning the shared file. Each run
+    must therefore operate on a throwaway copy.
+    """
+
+    def test_none_passes_through(self):
+        with isolated_cookiefile(None) as cf:
+            assert cf is None
+
+    def test_missing_file_passes_through(self):
+        with isolated_cookiefile("/no/such/cookies.txt") as cf:
+            assert cf == "/no/such/cookies.txt"
+
+    def test_yields_distinct_copy_then_cleans_up(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            canonical = os.path.join(tmpdir, "youtube_cookies.txt")
+            with open(canonical, "w") as f:
+                f.write("# Netscape\noriginal-cookie\n")
+
+            copy_path = None
+            with isolated_cookiefile(canonical) as cf:
+                copy_path = cf
+                assert cf != canonical
+                assert os.path.exists(cf)
+                with open(cf) as f:
+                    assert "original-cookie" in f.read()
+
+            # Temp copy is removed after the context exits.
+            assert not os.path.exists(copy_path)
+
+    def test_writeback_to_copy_does_not_touch_canonical(self):
+        """The core guarantee: simulated yt-dlp write-back hits only the copy."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            canonical = os.path.join(tmpdir, "youtube_cookies.txt")
+            with open(canonical, "w") as f:
+                f.write("GOOD-KEEPER-COOKIES\n")
+
+            with isolated_cookiefile(canonical) as cf:
+                # yt-dlp would overwrite the cookiefile with rotated (rejected) data.
+                with open(cf, "w") as f:
+                    f.write("POISONED-ROTATED-COOKIES\n")
+
+            with open(canonical) as f:
+                assert f.read() == "GOOD-KEEPER-COOKIES\n"
+
+
+class TestYtdlpOptsIsolated:
+    """Tests for ytdlp_opts_isolated wrapper."""
+
+    def test_noop_without_cookiefile(self):
+        opts = {"quiet": True}
+        with ytdlp_opts_isolated(opts) as isolated:
+            assert isolated is opts
+
+    def test_swaps_cookiefile_to_copy_and_preserves_original_dict(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            canonical = os.path.join(tmpdir, "cookies.txt")
+            with open(canonical, "w") as f:
+                f.write("# cookies\n")
+
+            opts = {"cookiefile": canonical, "quiet": True}
+            with ytdlp_opts_isolated(opts) as isolated:
+                assert isolated["cookiefile"] != canonical
+                assert os.path.exists(isolated["cookiefile"])
+                assert isolated["quiet"] is True
+                # Original dict is left untouched (shallow copy semantics).
+                assert opts["cookiefile"] == canonical
+
+
 class TestYoutubeDownloaderCookies:
     """Tests for YoutubeDownloader with cookies support."""
 
@@ -171,10 +245,14 @@ class TestYoutubeDownloaderCookies:
 
                 downloader.download(release, tmpdir)
 
-                # Verify yt_dlp was called with cookies
+                # Verify yt_dlp was called with cookies — but an *isolated copy*,
+                # not the canonical file, so its cookie write-back can't poison the
+                # keeper-managed cookies.
                 call_args = mock_yt_dlp.call_args
                 opts = call_args[0][0]
-                assert opts.get("cookiefile") == cookies_path
+                cookiefile_used = opts.get("cookiefile")
+                assert cookiefile_used
+                assert cookiefile_used != cookies_path
 
     def test_download_without_cookies(self):
         """Test download works without cookies."""
