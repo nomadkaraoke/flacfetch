@@ -98,30 +98,87 @@ else
 fi
 
 # =============================================================================
-log "Stage 1b — transmission 4.1.3 (source build)"
+log "Stage 1b — transmission 4.0.6 (source build)"
 # =============================================================================
-# Debian 13 ships only transmission 4.1.0-beta2, which RED/OPS reject on announce
-# ("client is not on the whitelist") — so the box can download but cannot seed —
-# and whose RPC differs. 4.1.3 is the latest stable the trackers whitelist. We keep
-# the Debian transmission-daemon package (for its systemd unit, AppArmor profile,
-# debian-transmission user and config scaffolding) and overlay the 4.1.3 binaries at
-# Debian's /usr/bin paths, then apt-mark hold so apt can't revert them. Binaries are
-# copied straight from the build tree (NOT `cmake --install`, which would drop an
-# upstream unit with a nonexistent User=transmission into /usr/local and break boot).
-TR_VER="4.1.3"
+# We pin transmission 4.0.6 (newest 4.0.x stable), NOT the 4.1.x line, and build
+# it from source. Two constraints drive this:
+#   1. RED/OPS (Gazelle) trackers whitelist specific client versions. Debian 13's
+#      stock transmission is 4.1.0-beta2, REJECTED on announce ("client is not on
+#      the whitelist") — the box could download but never seed. Released tags are
+#      whitelisted; 4.0.6 is explicitly on RED's whitelist (4.0.0–4.0.6).
+#   2. The 4.1.x line (we previously ran 4.1.3) degrades into a GLOBAL 0-B/s state
+#      after a short uptime: the daemon stays connected to peers (Availability
+#      100%) but transfers nothing on ALL torrents until restarted, silently
+#      breaking every RED/OPS download. It regressed badly — observed at 16-day
+#      uptime (2026-08-07) then at ~1.5-day uptime (2026-08-21). 4.1.0 rewrote the
+#      transport layer (preferred-transport / µTP rework) and shipped a stack of
+#      peer/transport regressions (upstream #8748 TCP-peer, #8658 settings-
+#      overwrite, #8999 stall). 4.1.3 is the newest release (no 4.1.4), so there's
+#      no forward fix; #8308 ("no downloading on 4.1.0") was fixed by downgrading
+#      to 4.0.5 — direct precedent. 4.0.6 predates the whole transport rewrite.
+# RPC (torrent-add base64 metainfo), transmission-remote and .resume/.torrent state
+# are identical across 4.x, so flacfetch needs no code change for the rollback.
+# We keep the Debian transmission-daemon package (for its systemd unit, AppArmor
+# profile, debian-transmission user and config scaffolding) and overlay the 4.0.6
+# binaries at Debian's /usr/bin paths, then apt-mark hold so apt can't revert them.
+# Binaries are copied straight from the build tree (NOT `cmake --install`, which
+# would drop an upstream unit with a nonexistent User=transmission into /usr/local
+# and break boot). NOTE (defence-in-depth): this 0-B/s stall class also has reports
+# on 4.0.x (upstream #5357 / discussion #8431), so the settings.json mitigations
+# below (µTP off, tighter peer limits) and the hardened maintenance-restart
+# watchdog remain essential — 4.0.6 reduces the frequency, it is not a guaranteed
+# cure on its own.
+TR_VER="4.0.6"
 if /usr/bin/transmission-daemon --version 2>&1 | grep -q " ${TR_VER} "; then
   log "transmission ${TR_VER} already installed"
 else
-  log "building transmission ${TR_VER} from source (Debian ships only 4.1.0-beta2)"
+  log "building transmission ${TR_VER} from source (Debian ships only 4.1.0-beta2, which trackers reject; and 4.1.x has a 0-B/s degradation bug)"
+  # 4.0.6 does NOT vendor libdeflate/natpmp/miniupnpc (4.1.x did); without the
+  # system -dev packages its CMake falls back to an ExternalProject download that
+  # fails offline ("Could NOT find DEFLATE/NATPMP/MINIUPNPC"). Install them so it
+  # links the system copies.
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     build-essential cmake pkg-config libcurl4-openssl-dev libssl-dev \
-    libevent-dev zlib1g-dev libsystemd-dev gettext >/dev/null \
+    libevent-dev zlib1g-dev libsystemd-dev gettext \
+    libdeflate-dev libnatpmp-dev libminiupnpc-dev >/dev/null \
     || die "transmission build deps install failed"
   TR_SRC="$(mktemp -d)"
   curl -fsSL -o "$TR_SRC/t.tar.xz" \
     "https://github.com/transmission/transmission/releases/download/${TR_VER}/transmission-${TR_VER}.tar.xz" \
     || die "transmission ${TR_VER} source download failed"
   tar -xf "$TR_SRC/t.tar.xz" -C "$TR_SRC"
+  # 4.0.6 predates miniupnpc 2.2.8 (Debian 13's version): its UPNP_GetValidIGD()
+  # call omits the two args added in miniupnpc API v18, so port-forwarding-upnp.cc
+  # fails to compile ("too few arguments"). Apply upstream's compat guard
+  # (transmission commit febfe49ca / PR #6907) before building. `patch --forward`
+  # exits non-zero BOTH on a real failure and on an already-applied patch (e.g. a
+  # future TR_VER that already includes the fix), so only tolerate the latter —
+  # detected by the guard already being present — and fail hard otherwise.
+  UPNP_SRC="$TR_SRC/transmission-${TR_VER}/libtransmission/port-forwarding-upnp.cc"
+  if ! patch --forward -p1 -d "$TR_SRC/transmission-${TR_VER}" <<'UPNP_PATCH'
+--- a/libtransmission/port-forwarding-upnp.cc
++++ b/libtransmission/port-forwarding-upnp.cc
+@@ -276,7 +276,12 @@
+         FreeUPNPUrls(&handle->urls);
+         auto lanaddr = std::array<char, TR_ADDRSTRLEN>{};
+-        if (UPNP_GetValidIGD(devlist, &handle->urls, &handle->data, std::data(lanaddr), std::size(lanaddr) - 1) ==
+-            UPNP_IGD_VALID_CONNECTED)
++        if (
++#if (MINIUPNPC_API_VERSION >= 18)
++            UPNP_GetValidIGD(devlist, &handle->urls, &handle->data, std::data(lanaddr), std::size(lanaddr) - 1, nullptr, 0)
++#else
++            UPNP_GetValidIGD(devlist, &handle->urls, &handle->data, std::data(lanaddr), std::size(lanaddr) - 1)
++#endif
++            == UPNP_IGD_VALID_CONNECTED)
+         {
+             tr_logAddInfo(fmt::format(_("Found Internet Gateway Device '{url}'"), fmt::arg("url", handle->urls.controlURL)));
+             tr_logAddInfo(fmt::format(_("Local Address is '{address}'"), fmt::arg("address", lanaddr.data())));
+UPNP_PATCH
+  then
+    grep -q 'MINIUPNPC_API_VERSION >= 18' "$UPNP_SRC" \
+      || die "transmission miniupnpc compat patch failed to apply (source layout changed?)"
+    log "miniupnpc compat guard already present — skipping patch"
+  fi
   ( cd "$TR_SRC/transmission-${TR_VER}" \
       && cmake -B build -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=RelWithDebInfo \
            -DENABLE_DAEMON=ON -DENABLE_UTILS=ON -DENABLE_CLI=OFF -DENABLE_GTK=OFF \
@@ -134,6 +191,11 @@ else
     install -m 0755 "$TR_SRC/transmission-${TR_VER}/build/daemon/$b" "/usr/bin/$b" 2>/dev/null \
       || install -m 0755 "$TR_SRC/transmission-${TR_VER}/build/utils/$b" "/usr/bin/$b" 2>/dev/null \
       || warn "could not install $b"
+    # Remove any legacy copy left in /usr/local/bin by an old `cmake --install`.
+    # /usr/local/bin precedes /usr/bin in PATH, so a stale binary there silently
+    # shadows the one we just installed for every bare `transmission-*` call
+    # (e.g. the maintenance watchdog), leaving the wrong client version in use.
+    rm -f "/usr/local/bin/$b"
   done
   rm -rf "$TR_SRC"
   apt-mark hold transmission-daemon transmission-common transmission-cli >/dev/null 2>&1 || true
@@ -415,16 +477,42 @@ cat > "$TRANSMISSION_SETTINGS" <<SETTINGS
     "ratio-limit-enabled": false,
     "umask": 2,
     "encryption": 1,
-    "dht-enabled": true,
-    "pex-enabled": true,
-    "utp-enabled": true
+    "cache-size-mb": 16,
+    "peer-limit-global": 200,
+    "peer-limit-per-torrent": 30,
+    "dht-enabled": false,
+    "pex-enabled": false,
+    "lpd-enabled": false,
+    "utp-enabled": false
 }
 SETTINGS
+# Transport/peer mitigations for the 4.x global 0-B/s degradation (see Stage 1b):
+#   - utp-enabled=false is the single highest-value lever. The stall signature
+#     (peers unchoked, "downloading from N", Availability 100%, yet 0 B/s on ALL
+#     torrents, cured only by a restart) points at the µTP/UDP read-loop wedging.
+#     Forcing TCP-only sidesteps the µTP state machine entirely; RED/OPS seeds all
+#     speak TCP, so there's no connectivity loss.
+#   - dht/pex/lpd disabled: RED/OPS torrents are private (these are ignored per
+#     torrent anyway), so turning them off globally just removes idle UDP/multicast
+#     socket churn across the ~270 seeding torrents.
+#   - peer-limit-per-torrent lowered 50→30 to bound total sockets/fds across all
+#     torrents (paired with the raised LimitNOFILE drop-in below).
 mkdir -p "$TRANSMISSION_CONFIG_DIR"
 rm -rf "$TRANSMISSION_CONFIG_DIR/torrents" "$TRANSMISSION_CONFIG_DIR/resume" 2>/dev/null || true
 ln -sf "$TRANSMISSION_DATA/config/torrents" "$TRANSMISSION_CONFIG_DIR/torrents"
 ln -sf "$TRANSMISSION_DATA/config/resume" "$TRANSMISSION_CONFIG_DIR/resume"
 chown -h debian-transmission:debian-transmission "$TRANSMISSION_CONFIG_DIR/torrents" "$TRANSMISSION_CONFIG_DIR/resume" 2>/dev/null || true
+# Raise the daemon's open-file ceiling. Debian's unit ships a soft limit of only
+# 1024 fds — far too low for ~270 seeding torrents plus up to peer-limit-global
+# peer sockets, and fd exhaustion is a documented cause of the many-torrent
+# global 0-B/s stall. A drop-in sets both soft and hard to 131072 (well under the
+# 524288 kernel hard cap) without editing the packaged unit.
+mkdir -p /etc/systemd/system/transmission-daemon.service.d
+cat > /etc/systemd/system/transmission-daemon.service.d/limits.conf <<'TR_LIMITS'
+[Service]
+LimitNOFILE=131072
+TR_LIMITS
+systemctl daemon-reload
 systemctl start transmission-daemon
 for _ in $(seq 1 10); do transmission-remote localhost:9091 -l >/dev/null 2>&1 && { log "transmission up"; break; }; sleep 1; done
 
@@ -567,43 +655,99 @@ Persistent=true
 WantedBy=timers.target
 YTDLP_TIMER
 
-# Transmission maintenance restart (prevents long-uptime degradation).
-# Transmission-daemon degrades after many days of uptime with hundreds of
-# seeding torrents: it keeps connecting to peers but transfers 0 B/s on ALL
-# downloads (torrents show State "Unknown"), silently breaking every RED/OPS
-# download until restarted. Observed 2026-08-07 after a 16-day uptime / 247
-# torrents (~11h download outage). This checks daily and restarts ONLY when
-# uptime exceeds a threshold AND nothing is actively downloading, so it never
-# interrupts a live download.
+# Transmission maintenance / wedge watchdog.
+# Transmission-daemon can degrade into a GLOBAL 0-B/s state: it keeps connecting
+# to peers (Availability 100%) but transfers nothing on ALL torrents until
+# restarted, silently breaking every RED/OPS download. First seen 2026-08-07 at a
+# 16-day uptime on 4.1.x; recurred 2026-08-21 at only ~1.5 days. We pin 4.0.6 +
+# µTP-off to reduce it, but it must also self-heal fast — hence this runs HOURLY.
+#
+# The previous version had two fatal flaws that let a wedged daemon stay broken:
+#   1) a 5-day uptime threshold (degradation hit well before that), and
+#   2) "skip if any torrent is Downloading" — but a WEDGED download sits in state
+#      "Downloading" forever with 0 B/s, so that guard deferred the very restart
+#      that cures it, indefinitely.
+# This version instead treats "torrents want data but the aggregate transfer rate
+# is ~0" as the wedge signal and restarts on it, while NEVER interrupting a real
+# transfer (which shows a non-zero rate in at least one of two samples).
 cat > "$APP_DIR/transmission-maintenance.sh" <<'TR_MAINT_SCRIPT'
 #!/bin/bash
-# Restart transmission-daemon if it has been up too long, but only while idle.
+# Restart transmission-daemon when wedged (0 B/s while data is wanted), or as a
+# preventive recycle past a max uptime while idle. Never interrupts a live fetch.
 set -e
 exec >> /var/log/transmission-maintenance.log 2>&1
 echo "=== $(date -u +%FT%TZ) transmission-maintenance check ==="
-MAX_UPTIME_DAYS=5
+
+MAX_UPTIME_HOURS=48        # preventive recycle when idle past this
+WEDGE_MIN_UPTIME_HOURS=2   # don't diagnose a wedge on a just-restarted daemon
+WEDGE_COOLDOWN_SEC=10800   # >=3h between wedge-triggered restarts (avoid a loop)
+RPC=localhost:9091
+LAST_WEDGE_RESTART=/var/lib/flacfetch/last-wedge-restart
+mkdir -p "$(dirname "$LAST_WEDGE_RESTART")"
+
 enter_ts=$(systemctl show transmission-daemon -p ActiveEnterTimestampMonotonic --value 2>/dev/null || echo 0)
 now_mono=$(awk '{print int($1*1000000)}' /proc/uptime 2>/dev/null || echo 0)
 uptime_sec=$(( (now_mono - enter_ts) / 1000000 ))
-uptime_days=$(( uptime_sec / 86400 ))
-echo "transmission uptime: ${uptime_days}d (${uptime_sec}s)"
-if [ "$uptime_days" -lt "$MAX_UPTIME_DAYS" ]; then
-  echo "under ${MAX_UPTIME_DAYS}d threshold — no restart"
+uptime_hours=$(( uptime_sec / 3600 ))
+echo "transmission uptime: ${uptime_hours}h (${uptime_sec}s)"
+
+# Aggregate current download rate (KB/s) from the `-l` "Sum:" line; -1 if the RPC
+# call failed (don't restart on a failed probe). grep -c exits 1 on no match, so
+# guard the wanting-torrent count with `|| true` under `set -e`.
+# The `-l` "Sum:" line is `Sum: <have> <up-rate> <down-rate>`, so the download
+# rate is the LAST field ($NF).
+agg_down() { transmission-remote "$RPC" -l 2>/dev/null | awk '/^Sum:/{print $NF+0; f=1} END{if(!f) print -1}'; }
+want_count() { transmission-remote "$RPC" -l 2>/dev/null | grep -cE '[[:space:]]Downloading([[:space:]]|$)' || true; }
+
+# Sample twice ~20s apart so a momentary lull in a live transfer isn't mistaken
+# for a wedge.
+d1=$(agg_down); w1=$(want_count)
+sleep 20
+d2=$(agg_down); w2=$(want_count)
+echo "down-rate KB/s: ${d1} then ${d2}; wanting torrents: ${w1} then ${w2}"
+
+# "moving" if either sample is clearly transferring (>1 KB/s, ignoring noise).
+moving=$(awk -v a="${d1:-0}" -v b="${d2:-0}" 'BEGIN{print (a>1 || b>1)?1:0}')
+
+# WEDGE: data is wanted on both samples but nothing transfers -> restart, but
+# not more than once per WEDGE_COOLDOWN_SEC. A wedge the restart can't clear (or a
+# genuinely seederless download) must not spin into an hourly restart loop that
+# interrupts other work. One detection is enough to act — the two in-run samples
+# already filter transient lulls — so we favour fast recovery over requiring
+# consecutive strikes, and rely on the cooldown to bound restart frequency.
+if [ "$uptime_hours" -ge "$WEDGE_MIN_UPTIME_HOURS" ] && [ "${w1:-0}" -ge 1 ] && [ "${w2:-0}" -ge 1 ] && [ "$moving" -eq 0 ]; then
+  last=$(cat "$LAST_WEDGE_RESTART" 2>/dev/null || echo 0)
+  age=$(( $(date +%s) - last ))
+  if [ "$age" -lt "$WEDGE_COOLDOWN_SEC" ]; then
+    echo "wedge suspected but last wedge-restart was ${age}s ago (< ${WEDGE_COOLDOWN_SEC}s cooldown) — deferring"
+    exit 0
+  fi
+  echo "WEDGE detected (torrents want data, aggregate rate ~0) — restarting transmission-daemon"
+  systemctl restart transmission-daemon
+  date +%s > "$LAST_WEDGE_RESTART"
+  echo "restart issued (wedge)"
   exit 0
 fi
-# Skip if a download is actively in progress (avoid interrupting a live fetch).
-if transmission-remote localhost:9091 -l 2>/dev/null | grep -qE '[[:space:]]Downloading([[:space:]]|$)'; then
-  echo "a download is active — deferring restart to next run"
+
+# PREVENTIVE: recycle past MAX_UPTIME, but only while idle so we never interrupt
+# a live transfer.
+if [ "$uptime_hours" -ge "$MAX_UPTIME_HOURS" ]; then
+  if [ "$moving" -eq 1 ]; then
+    echo "past ${MAX_UPTIME_HOURS}h but a transfer is active — deferring"
+    exit 0
+  fi
+  echo "past ${MAX_UPTIME_HOURS}h and idle — preventive restart"
+  systemctl restart transmission-daemon
+  echo "restart issued (preventive)"
   exit 0
 fi
-echo "uptime >= ${MAX_UPTIME_DAYS}d and idle — restarting transmission-daemon"
-systemctl restart transmission-daemon
-echo "restart issued"
+
+echo "healthy (uptime ${uptime_hours}h, moving=${moving}, wanting=${w1}/${w2}) — no restart"
 TR_MAINT_SCRIPT
 chmod +x "$APP_DIR/transmission-maintenance.sh"
 cat > /etc/systemd/system/transmission-maintenance.service <<'TR_MAINT_SERVICE'
 [Unit]
-Description=Restart transmission-daemon if up too long (prevents 0-B/s download degradation)
+Description=transmission wedge-watchdog / maintenance-restart (fixes 0-B/s download degradation)
 After=network.target transmission-daemon.service
 [Service]
 Type=oneshot
@@ -612,10 +756,10 @@ User=root
 TR_MAINT_SERVICE
 cat > /etc/systemd/system/transmission-maintenance.timer <<'TR_MAINT_TIMER'
 [Unit]
-Description=Daily transmission maintenance-restart check
+Description=Hourly transmission wedge-watchdog / maintenance-restart check
 [Timer]
-OnCalendar=*-*-* 05:30:00 UTC
-RandomizedDelaySec=900
+OnCalendar=*-*-* *:00:00 UTC
+RandomizedDelaySec=300
 Persistent=true
 [Install]
 WantedBy=timers.target
