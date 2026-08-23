@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.0] - 2026-08-22
+
+### Fixed
+- YouTube downloads intermittently failing with "Sign in to confirm you're not a
+  bot" after the move to the netcup datacenter box. Root cause: yt-dlp saves the
+  rotated cookie jar back to the shared `cookiefile` after every run; on the
+  flagged datacenter IP YouTube *rejects* the rotation ("cookies no longer valid …
+  rotated in the browser as a security measure"), so the saved-back cookies are
+  invalid and poison the keeper-managed file for the next download. (On the old
+  GCE IP the rotation was accepted, so the write-back was harmless — which is why
+  it worked for months and only broke after migration.) Each yt-dlp run now
+  operates on a throwaway copy of the cookie file (`isolated_cookiefile` /
+  `ytdlp_opts_isolated`), so the canonical file — written only by the credential
+  keeper — stays pristine and concurrent downloads no longer clobber each other.
+  Applied to the download, availability-check, search, credential-check, and
+  deep-health paths.
+- yt-dlp cache was silently disabled on the server: it runs with
+  `HOME=/opt/flacfetch` where `~/.cache` is the Spotify OAuth token *file*, so
+  yt-dlp's default `~/.cache/yt-dlp` path died with `NotADirectoryError` (forcing
+  a fresh JS-challenge solve every request). A new `FLACFETCH_YTDLP_CACHE_DIR`
+  override gives yt-dlp its own collision-free cache directory.
+
+### Added
+- Proof-of-Origin (PO) token provider for YouTube. YouTube now binds a GVS PO
+  token to downloads from datacenter IPs; flacfetch now runs the
+  `bgutil-ytdlp-pot-provider` HTTP server (Node, localhost) plus the matching
+  yt-dlp plugin, provisioned and kept current by `deploy/provision.sh`. The host
+  nftables firewall keeps the token server localhost-only.
+
 ## [0.23.0] - 2026-08-14
 
 ### Fixed

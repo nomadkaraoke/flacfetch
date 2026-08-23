@@ -10,6 +10,9 @@ from flacfetch.downloaders.youtube import (
     YoutubeDownloader,
     get_cookies_file,
     get_ytdlp_base_opts,
+    get_ytdlp_cache_dir,
+    isolated_cookiefile,
+    ytdlp_opts_isolated,
 )
 from flacfetch.providers.youtube import YoutubeProvider
 
@@ -75,6 +78,165 @@ class TestGetYtdlpBaseOpts:
         assert result == {"cookiefile": "/my/custom/cookies.txt"}
 
 
+class TestGetYtdlpCacheDir:
+    """Tests for the FLACFETCH_YTDLP_CACHE_DIR override.
+
+    On the server, HOME/.cache is the Spotify token *file*, so yt-dlp's default
+    ~/.cache/yt-dlp path raises NotADirectoryError and caching is silently lost.
+    """
+
+    def test_returns_none_when_env_unset(self):
+        """No override configured -> use yt-dlp's default (None)."""
+        with patch.dict(os.environ, {}, clear=True):
+            assert get_ytdlp_cache_dir() is None
+
+    def test_creates_and_returns_dir_when_env_set(self):
+        """Env set -> directory is created and returned."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = os.path.join(tmpdir, "ytdlp-cache")
+            with patch.dict(os.environ, {"FLACFETCH_YTDLP_CACHE_DIR": cache_dir}):
+                result = get_ytdlp_cache_dir()
+                assert result == cache_dir
+                assert os.path.isdir(cache_dir)
+
+    def test_returns_none_when_dir_uncreatable(self):
+        """A bad cache path must not break downloads (caching just disabled)."""
+        with patch.dict(os.environ, {"FLACFETCH_YTDLP_CACHE_DIR": "/some/cache"}):
+            with patch(
+                "flacfetch.downloaders.youtube.os.makedirs",
+                side_effect=OSError("not a directory"),
+            ):
+                assert get_ytdlp_cache_dir() is None
+
+    def test_base_opts_include_cachedir_when_set(self):
+        """get_ytdlp_base_opts wires cachedir through alongside cookies."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = os.path.join(tmpdir, "ytdlp-cache")
+            with patch.dict(os.environ, {"FLACFETCH_YTDLP_CACHE_DIR": cache_dir}):
+                with patch(
+                    "flacfetch.downloaders.youtube.get_cookies_file",
+                    return_value=None,
+                ):
+                    result = get_ytdlp_base_opts()
+                    assert result == {"cachedir": cache_dir}
+
+    def test_base_opts_no_cachedir_when_unset(self):
+        """Without the override, base opts carry no cachedir key."""
+        with patch.dict(os.environ, {}, clear=True):
+            with patch(
+                "flacfetch.downloaders.youtube.get_cookies_file",
+                return_value=None,
+            ):
+                result = get_ytdlp_base_opts()
+                assert "cachedir" not in result
+
+
+class TestIsolatedCookiefile:
+    """Tests for the cookie write-back isolation (protects keeper's cookies).
+
+    yt-dlp saves the rotated cookie jar back to the cookiefile on every run; on a
+    flagged IP those rotations are rejected, poisoning the shared file. Each run
+    must therefore operate on a throwaway copy.
+    """
+
+    def test_none_passes_through(self):
+        with isolated_cookiefile(None) as cf:
+            assert cf is None
+
+    def test_missing_file_passes_through(self):
+        with isolated_cookiefile("/no/such/cookies.txt") as cf:
+            assert cf == "/no/such/cookies.txt"
+
+    def test_yields_distinct_copy_then_cleans_up(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            canonical = os.path.join(tmpdir, "youtube_cookies.txt")
+            with open(canonical, "w") as f:
+                f.write("# Netscape\noriginal-cookie\n")
+
+            copy_path = None
+            with isolated_cookiefile(canonical) as cf:
+                copy_path = cf
+                assert cf != canonical
+                assert os.path.exists(cf)
+                with open(cf) as f:
+                    assert "original-cookie" in f.read()
+
+            # Temp copy is removed after the context exits.
+            assert not os.path.exists(copy_path)
+
+    def test_falls_back_to_canonical_when_copy_fails(self):
+        """A copy failure must not break the download — fall back to the original."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            canonical = os.path.join(tmpdir, "cookies.txt")
+            with open(canonical, "w") as f:
+                f.write("# cookies\n")
+
+            with patch(
+                "flacfetch.downloaders.youtube.shutil.copyfile",
+                side_effect=OSError("disk full"),
+            ):
+                with isolated_cookiefile(canonical) as cf:
+                    assert cf == canonical
+
+    def test_writeback_to_copy_does_not_touch_canonical(self):
+        """The core guarantee: simulated yt-dlp write-back hits only the copy."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            canonical = os.path.join(tmpdir, "youtube_cookies.txt")
+            with open(canonical, "w") as f:
+                f.write("GOOD-KEEPER-COOKIES\n")
+
+            with isolated_cookiefile(canonical) as cf:
+                # yt-dlp would overwrite the cookiefile with rotated (rejected) data.
+                with open(cf, "w") as f:
+                    f.write("POISONED-ROTATED-COOKIES\n")
+
+            with open(canonical) as f:
+                assert f.read() == "GOOD-KEEPER-COOKIES\n"
+
+
+class TestYtdlpOptsIsolated:
+    """Tests for ytdlp_opts_isolated wrapper."""
+
+    def test_noop_without_cookiefile_or_cache(self):
+        with patch.dict(os.environ, {}, clear=True):
+            opts = {"quiet": True}
+            with ytdlp_opts_isolated(opts) as isolated:
+                assert isolated is opts
+
+    def test_swaps_cookiefile_to_copy_and_preserves_original_dict(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                canonical = os.path.join(tmpdir, "cookies.txt")
+                with open(canonical, "w") as f:
+                    f.write("# cookies\n")
+
+                opts = {"cookiefile": canonical, "quiet": True}
+                with ytdlp_opts_isolated(opts) as isolated:
+                    assert isolated["cookiefile"] != canonical
+                    assert os.path.exists(isolated["cookiefile"])
+                    assert isolated["quiet"] is True
+                    # Original dict is left untouched (shallow copy semantics).
+                    assert opts["cookiefile"] == canonical
+
+    def test_injects_cachedir_for_inline_opts(self):
+        """Inline callers (credential/health checks) get the cache dir too."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = os.path.join(tmpdir, "ytdlp-cache")
+            with patch.dict(os.environ, {"FLACFETCH_YTDLP_CACHE_DIR": cache_dir}):
+                opts = {"quiet": True}
+                with ytdlp_opts_isolated(opts) as isolated:
+                    assert isolated["cachedir"] == cache_dir
+                    assert "cachedir" not in opts  # original untouched
+
+    def test_does_not_override_existing_cachedir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_cache = os.path.join(tmpdir, "env-cache")
+            with patch.dict(os.environ, {"FLACFETCH_YTDLP_CACHE_DIR": env_cache}):
+                opts = {"cachedir": "/preset/cache"}
+                with ytdlp_opts_isolated(opts) as isolated:
+                    assert isolated["cachedir"] == "/preset/cache"
+
+
 class TestYoutubeDownloaderCookies:
     """Tests for YoutubeDownloader with cookies support."""
 
@@ -117,10 +279,14 @@ class TestYoutubeDownloaderCookies:
 
                 downloader.download(release, tmpdir)
 
-                # Verify yt_dlp was called with cookies
+                # Verify yt_dlp was called with cookies — but an *isolated copy*,
+                # not the canonical file, so its cookie write-back can't poison the
+                # keeper-managed cookies.
                 call_args = mock_yt_dlp.call_args
                 opts = call_args[0][0]
-                assert opts.get("cookiefile") == cookies_path
+                cookiefile_used = opts.get("cookiefile")
+                assert cookiefile_used
+                assert cookiefile_used != cookies_path
 
     def test_download_without_cookies(self):
         """Test download works without cookies."""

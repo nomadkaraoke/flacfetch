@@ -1,6 +1,9 @@
 import logging
 import os
+import shutil
+import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Optional
 
@@ -62,6 +65,40 @@ def get_cookies_file() -> Optional[str]:
     return None
 
 
+def get_ytdlp_cache_dir() -> Optional[str]:
+    """
+    Resolve an explicit yt-dlp cache directory, if one is configured.
+
+    yt-dlp defaults its cache to ``$XDG_CACHE_HOME`` / ``~/.cache/yt-dlp``. On the
+    flacfetch server the service runs with ``HOME=/opt/flacfetch`` where
+    ``~/.cache`` is a *file* (the Spotify OAuth token cache), so yt-dlp's default
+    path resolves to ``/opt/flacfetch/.cache/yt-dlp`` and every cache write dies
+    with ``NotADirectoryError``. That silently disables player/signature and
+    PO-token caching, forcing a fresh JS-challenge solve on every request (slower
+    and more bot-detectable).
+
+    Set ``FLACFETCH_YTDLP_CACHE_DIR`` to a real directory to give yt-dlp its own
+    cache location that can't collide. When unset (e.g. library/CLI use on a dev
+    machine with a normal ``~/.cache``), we leave yt-dlp's default untouched.
+
+    Returns:
+        The cache directory (created if needed) or None to use yt-dlp's default.
+    """
+    cache_dir = os.environ.get("FLACFETCH_YTDLP_CACHE_DIR")
+    if not cache_dir:
+        return None
+
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+    except OSError as e:
+        # Don't let a misconfigured cache path break downloads; yt-dlp treats a
+        # missing/False cachedir as "caching disabled" and still works.
+        logger.warning(f"Could not create yt-dlp cache dir {cache_dir!r}: {e}")
+        return None
+
+    return cache_dir
+
+
 def get_ytdlp_base_opts(cookies_file: Optional[str] = None) -> dict:
     """
     Get base yt-dlp options with common settings including cookies if available.
@@ -81,7 +118,89 @@ def get_ytdlp_base_opts(cookies_file: Optional[str] = None) -> dict:
     if cookies_file:
         opts["cookiefile"] = cookies_file
 
+    # Route yt-dlp's cache to a dedicated dir when configured, so it doesn't
+    # collide with the Spotify token file at HOME/.cache on the server.
+    cache_dir = get_ytdlp_cache_dir()
+    if cache_dir:
+        opts["cachedir"] = cache_dir
+
     return opts
+
+
+@contextmanager
+def isolated_cookiefile(cookies_file: Optional[str]):
+    """Yield a throwaway copy of the cookie file for a single yt-dlp run.
+
+    yt-dlp saves the (possibly rotated) cookie jar back to ``cookiefile`` after
+    every run. On a flagged datacenter IP YouTube *rejects* the rotation
+    ("The provided YouTube account cookies are no longer valid. They have likely
+    been rotated in the browser as a security measure."), so the cookies yt-dlp
+    saves back are invalid and poison the shared file for the next download —
+    cookies that worked seconds ago start returning "Sign in to confirm you're
+    not a bot" within minutes. (On a trusted IP the rotation is accepted, so the
+    write-back is harmless: this only bites since the move to the datacenter box.)
+
+    Handing each run its own copy keeps the canonical, keeper-managed cookie file
+    pristine (the credential keeper is its only writer) and isolates concurrent
+    downloads from one another. Yields the temp copy path, or the original value
+    when there's nothing to copy (no cookies / file missing).
+    """
+    if not cookies_file or not os.path.exists(cookies_file):
+        yield cookies_file
+        return
+
+    tmp_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(prefix="ytdlp-cookies-", suffix=".txt")
+        os.close(fd)
+        shutil.copyfile(cookies_file, tmp_path)
+    except OSError as e:
+        # Copy failed (disk full, perms, ...). Fall back to the canonical file so
+        # downloads still work — we lose write-back protection for this one run,
+        # which is strictly better than failing the download outright.
+        logger.warning(f"Could not create temp cookie copy, using canonical file: {e}")
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        yield cookies_file
+        return
+
+    try:
+        yield tmp_path
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError as e:
+                logger.warning(f"Could not remove temp cookie copy {tmp_path!r}: {e}")
+
+
+@contextmanager
+def ytdlp_opts_isolated(ydl_opts: dict):
+    """Single chokepoint for every yt-dlp invocation: isolate cookies + set cachedir.
+
+    - Swaps ``cookiefile`` for a per-run throwaway copy so the canonical
+      keeper-managed cookies are never written back to (see isolated_cookiefile).
+    - Ensures the dedicated ``cachedir`` is set (see get_ytdlp_cache_dir) so even
+      callers that build ``ydl_opts`` inline (credential / health checks, which
+      don't go through get_ytdlp_base_opts) avoid the HOME/.cache collision.
+
+    Both are applied to a shallow copy; the caller's dict is left untouched. A
+    no-op only when there's no cookiefile and no cache dir override configured.
+    """
+    extra: dict = {}
+
+    cache_dir = get_ytdlp_cache_dir()
+    if cache_dir and not ydl_opts.get("cachedir"):
+        extra["cachedir"] = cache_dir
+
+    original = ydl_opts.get("cookiefile")
+    with isolated_cookiefile(original) as cf:
+        if original:
+            extra["cookiefile"] = cf
+        yield {**ydl_opts, **extra} if extra else ydl_opts
 
 
 @dataclass
@@ -147,7 +266,7 @@ def check_youtube_availability(
     })
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with ytdlp_opts_isolated(ydl_opts) as opts, yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
             if info:
                 return YoutubeAvailability(
@@ -353,7 +472,7 @@ class YoutubeDownloader(Downloader):
 
         downloaded_file: str | None = None
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            with ytdlp_opts_isolated(ydl_opts) as opts, yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(release.download_url, download=True)
                 # extract_info returns None when match_filter rejected the media.
                 if info is None:

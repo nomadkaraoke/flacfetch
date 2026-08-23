@@ -357,8 +357,13 @@ class DeepHealthService:
         """Extract info from YouTube test video (runs in thread pool)."""
         import yt_dlp
 
+        # Use a throwaway cookie copy so this periodic health probe never writes
+        # yt-dlp's rotated (and, on a flagged IP, rejected) cookies back over the
+        # canonical keeper-managed file. See downloaders.youtube.isolated_cookiefile.
+        from ...downloaders.youtube import ytdlp_opts_isolated
+
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            with ytdlp_opts_isolated(ydl_opts) as opts, yt_dlp.YoutubeDL(opts) as ydl:
                 return ydl.extract_info(YOUTUBE_TEST_VIDEO, download=False)
         except Exception as e:
             logger.warning(f"YouTube info extraction failed: {e}")

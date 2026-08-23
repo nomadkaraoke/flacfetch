@@ -68,6 +68,18 @@ BROWSER_PROFILE_DIR="$DATA_MOUNT/browser-profiles"
 PLAYWRIGHT_BROWSERS_PATH="$APP_DIR/ms-playwright"  # shared, service-user-owned (not /root/.cache)
 DENO_INSTALL=/opt/deno
 LIBRESPOT_BIN=/usr/local/bin/librespot
+# yt-dlp Proof-of-Origin token provider (bgutil). YouTube increasingly binds a
+# GVS PO token to downloads from datacenter IPs; without a provider, authenticated
+# (cookie) downloads intermittently fail with "Sign in to confirm you're not a
+# bot". The HTTP-server variant runs on localhost and the matching yt-dlp plugin
+# (installed into the venv) auto-detects it on the default port.
+BGUTIL_POT_DIR=/opt/bgutil-pot
+BGUTIL_POT_VERSION="${BGUTIL_POT_VERSION:-1.3.2}"
+BGUTIL_POT_PORT="${BGUTIL_POT_PORT:-4416}"
+# Dedicated yt-dlp cache dir. HOME/.cache on this box is the Spotify OAuth token
+# *file*, so yt-dlp's default ~/.cache/yt-dlp path dies with NotADirectoryError
+# and silently disables player/signature + PO-token caching. Give it its own dir.
+YTDLP_CACHE_DIR="$APP_DIR/ytdlp-cache"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 log()  { echo -e ">>> $*"; }
@@ -377,6 +389,52 @@ FLACFETCH_VERSION="$(python -c 'import flacfetch; print(flacfetch.__version__)' 
 log "flacfetch version: $FLACFETCH_VERSION"
 python -c 'import yt_dlp_ejs' 2>/dev/null && log "yt-dlp-ejs available" || warn "yt-dlp-ejs not available"
 
+# Dedicated yt-dlp cache dir (see YTDLP_CACHE_DIR note above). Under $APP_DIR so
+# Stage 8b's chown to the service user covers it.
+mkdir -p "$YTDLP_CACHE_DIR"
+
+# =============================================================================
+log "Stage 5b — yt-dlp PO Token provider (bgutil, HTTP server)"
+# =============================================================================
+# The venv plugin (installed here) talks to a local bgutil HTTP server (built
+# below) that mints Proof-of-Origin tokens via YouTube's BotGuard challenge. The
+# plugin auto-detects the server on the default port, so no --extractor-args are
+# needed. Node.js is the server runtime (deno alone can't populate node_modules).
+# Pin the plugin to the SERVER version — bgutil requires matching plugin/server
+# versions; bump BGUTIL_POT_VERSION to upgrade both together (re-provision rebuilds
+# the server + re-pins the plugin). update-ytdlp.sh deliberately does NOT bump it.
+pip install --upgrade "bgutil-ytdlp-pot-provider==${BGUTIL_POT_VERSION}" --quiet \
+  || warn "bgutil PO-token plugin install failed"
+if ! command -v node >/dev/null 2>&1; then
+  log "installing Node.js (bgutil PO server runtime)"
+  apt-get install -y nodejs npm >/dev/null 2>&1 \
+    || warn "nodejs/npm install failed — PO token provider server will be unavailable"
+fi
+if command -v node >/dev/null 2>&1; then
+  if [ ! -d "$BGUTIL_POT_DIR/.git" ]; then
+    git clone --quiet "https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git" "$BGUTIL_POT_DIR" \
+      || warn "bgutil clone failed"
+  fi
+  if [ -d "$BGUTIL_POT_DIR/.git" ]; then
+    git config --global --add safe.directory "$BGUTIL_POT_DIR"
+    # Only (re)build once we've verifiably checked out the pinned version. If the
+    # fetch/checkout fails (e.g. transient network), keep the existing build+plugin
+    # pair rather than compiling an unverified/mismatched revision.
+    if git -C "$BGUTIL_POT_DIR" fetch --tags --quiet \
+       && git -C "$BGUTIL_POT_DIR" checkout --quiet "$BGUTIL_POT_VERSION"; then
+      if ( cd "$BGUTIL_POT_DIR/server" && npm ci --silent && npx --yes tsc ) >/dev/null 2>&1; then
+        log "bgutil PO server built ($BGUTIL_POT_VERSION)"
+      else
+        warn "bgutil PO server build failed (PO token provider will be unavailable)"
+      fi
+    else
+      warn "bgutil fetch/checkout to $BGUTIL_POT_VERSION failed — keeping existing server build"
+    fi
+  fi
+else
+  warn "node unavailable — skipping bgutil PO server build"
+fi
+
 # =============================================================================
 log "Stage 6 — secrets"
 # =============================================================================
@@ -593,6 +651,7 @@ Environment="FLACFETCH_DOWNLOAD_DIR=${DOWNLOAD_DIR}"
 Environment="TRANSMISSION_HOST=localhost"
 Environment="TRANSMISSION_PORT=9091"
 Environment="YOUTUBE_COOKIES_FILE=${YOUTUBE_COOKIES_FILE}"
+Environment="FLACFETCH_YTDLP_CACHE_DIR=${YTDLP_CACHE_DIR}"
 ExecStart=$VENV/bin/flacfetch serve --host 0.0.0.0 --port 8080
 Restart=always
 RestartSec=10
@@ -617,6 +676,40 @@ RestartSec=5
 WantedBy=multi-user.target
 XVFB_SERVICE
 
+# yt-dlp PO Token provider — bgutil HTTP server.
+# The server binary has no host-bind flag (binds :: then 0.0.0.0), but the host
+# nftables firewall already has `policy drop` on input with no accept rule for
+# $BGUTIL_POT_PORT, so it's unreachable externally while `iif lo accept` keeps it
+# available to local yt-dlp. Do NOT use systemd IPAddressDeny/Allow here: those
+# filter EGRESS too, and the server must reach Google's BotGuard/WAA endpoints to
+# mint tokens (blocking egress makes every mint fail with getaddrinfo EAI_AGAIN).
+if [ -f "$BGUTIL_POT_DIR/server/build/main.js" ]; then
+cat > /etc/systemd/system/bgutil-pot.service <<POT_SERVICE
+[Unit]
+Description=bgutil yt-dlp PO Token Provider (HTTP server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$FF_SERVICE_USER
+Group=$FF_SERVICE_USER
+ExecStart=/usr/bin/node $BGUTIL_POT_DIR/server/build/main.js --port $BGUTIL_POT_PORT
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+POT_SERVICE
+else
+  warn "bgutil PO server not built — skipping bgutil-pot.service"
+fi
+
 # yt-dlp auto-update (daily 04:00 UTC)
 cat > "$APP_DIR/update-ytdlp.sh" <<'UPDATE_SCRIPT'
 #!/bin/bash
@@ -625,6 +718,9 @@ exec >> /var/log/ytdlp-update.log 2>&1
 echo "yt-dlp update started at $(date)"
 cd /opt/flacfetch && source venv/bin/activate
 OLD=$(python -c "import yt_dlp; print(yt_dlp.version.__version__)" 2>/dev/null || echo unknown)
+# NOTE: the bgutil PO-token plugin is intentionally NOT upgraded here — it is
+# pinned to the bgutil server version by provision.sh (mismatched plugin/server
+# versions can break POT minting). Bump BGUTIL_POT_VERSION + re-provision instead.
 pip install --upgrade yt-dlp yt-dlp-ejs --quiet
 NEW=$(python -c "import yt_dlp; print(yt_dlp.version.__version__)" 2>/dev/null || echo unknown)
 if [ "$OLD" != "$NEW" ]; then echo "yt-dlp $OLD -> $NEW"; systemctl restart flacfetch; fi
@@ -854,6 +950,10 @@ fi
 # ---- enable + (re)start ----------------------------------------------------
 systemctl daemon-reload
 systemctl enable --now xvfb >/dev/null 2>&1 || true
+if [ -f /etc/systemd/system/bgutil-pot.service ]; then
+  systemctl enable --now bgutil-pot >/dev/null 2>&1 || true
+  for _ in $(seq 1 10); do curl -s "http://127.0.0.1:$BGUTIL_POT_PORT/ping" 2>/dev/null | grep -q version && { log "bgutil PO server healthy"; break; }; sleep 1; done
+fi
 systemctl enable --now ytdlp-update.timer >/dev/null 2>&1 || true
 systemctl enable --now transmission-maintenance.timer >/dev/null 2>&1 || true
 systemctl enable flacfetch >/dev/null 2>&1 || true
