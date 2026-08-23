@@ -417,13 +417,18 @@ if command -v node >/dev/null 2>&1; then
   fi
   if [ -d "$BGUTIL_POT_DIR/.git" ]; then
     git config --global --add safe.directory "$BGUTIL_POT_DIR"
-    git -C "$BGUTIL_POT_DIR" fetch --tags --quiet || warn "bgutil fetch failed"
-    git -C "$BGUTIL_POT_DIR" checkout --quiet "$BGUTIL_POT_VERSION" \
-      || warn "bgutil checkout $BGUTIL_POT_VERSION failed"
-    if ( cd "$BGUTIL_POT_DIR/server" && npm ci --silent && npx --yes tsc ) >/dev/null 2>&1; then
-      log "bgutil PO server built ($BGUTIL_POT_VERSION)"
+    # Only (re)build once we've verifiably checked out the pinned version. If the
+    # fetch/checkout fails (e.g. transient network), keep the existing build+plugin
+    # pair rather than compiling an unverified/mismatched revision.
+    if git -C "$BGUTIL_POT_DIR" fetch --tags --quiet \
+       && git -C "$BGUTIL_POT_DIR" checkout --quiet "$BGUTIL_POT_VERSION"; then
+      if ( cd "$BGUTIL_POT_DIR/server" && npm ci --silent && npx --yes tsc ) >/dev/null 2>&1; then
+        log "bgutil PO server built ($BGUTIL_POT_VERSION)"
+      else
+        warn "bgutil PO server build failed (PO token provider will be unavailable)"
+      fi
     else
-      warn "bgutil PO server build failed (PO token provider will be unavailable)"
+      warn "bgutil fetch/checkout to $BGUTIL_POT_VERSION failed — keeping existing server build"
     fi
   fi
 else

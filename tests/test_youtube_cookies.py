@@ -197,24 +197,44 @@ class TestIsolatedCookiefile:
 class TestYtdlpOptsIsolated:
     """Tests for ytdlp_opts_isolated wrapper."""
 
-    def test_noop_without_cookiefile(self):
-        opts = {"quiet": True}
-        with ytdlp_opts_isolated(opts) as isolated:
-            assert isolated is opts
+    def test_noop_without_cookiefile_or_cache(self):
+        with patch.dict(os.environ, {}, clear=True):
+            opts = {"quiet": True}
+            with ytdlp_opts_isolated(opts) as isolated:
+                assert isolated is opts
 
     def test_swaps_cookiefile_to_copy_and_preserves_original_dict(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            canonical = os.path.join(tmpdir, "cookies.txt")
-            with open(canonical, "w") as f:
-                f.write("# cookies\n")
+        with patch.dict(os.environ, {}, clear=True):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                canonical = os.path.join(tmpdir, "cookies.txt")
+                with open(canonical, "w") as f:
+                    f.write("# cookies\n")
 
-            opts = {"cookiefile": canonical, "quiet": True}
-            with ytdlp_opts_isolated(opts) as isolated:
-                assert isolated["cookiefile"] != canonical
-                assert os.path.exists(isolated["cookiefile"])
-                assert isolated["quiet"] is True
-                # Original dict is left untouched (shallow copy semantics).
-                assert opts["cookiefile"] == canonical
+                opts = {"cookiefile": canonical, "quiet": True}
+                with ytdlp_opts_isolated(opts) as isolated:
+                    assert isolated["cookiefile"] != canonical
+                    assert os.path.exists(isolated["cookiefile"])
+                    assert isolated["quiet"] is True
+                    # Original dict is left untouched (shallow copy semantics).
+                    assert opts["cookiefile"] == canonical
+
+    def test_injects_cachedir_for_inline_opts(self):
+        """Inline callers (credential/health checks) get the cache dir too."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = os.path.join(tmpdir, "ytdlp-cache")
+            with patch.dict(os.environ, {"FLACFETCH_YTDLP_CACHE_DIR": cache_dir}):
+                opts = {"quiet": True}
+                with ytdlp_opts_isolated(opts) as isolated:
+                    assert isolated["cachedir"] == cache_dir
+                    assert "cachedir" not in opts  # original untouched
+
+    def test_does_not_override_existing_cachedir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_cache = os.path.join(tmpdir, "env-cache")
+            with patch.dict(os.environ, {"FLACFETCH_YTDLP_CACHE_DIR": env_cache}):
+                opts = {"cachedir": "/preset/cache"}
+                with ytdlp_opts_isolated(opts) as isolated:
+                    assert isolated["cachedir"] == "/preset/cache"
 
 
 class TestYoutubeDownloaderCookies:

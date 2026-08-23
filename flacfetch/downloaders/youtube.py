@@ -179,18 +179,28 @@ def isolated_cookiefile(cookies_file: Optional[str]):
 
 @contextmanager
 def ytdlp_opts_isolated(ydl_opts: dict):
-    """Run yt-dlp with a throwaway copy of the cookie file (see isolated_cookiefile).
+    """Single chokepoint for every yt-dlp invocation: isolate cookies + set cachedir.
 
-    Swaps ``cookiefile`` in a shallow copy of ``ydl_opts`` for a per-run temp copy
-    so the canonical keeper-managed cookies are never written back to. A no-op when
-    no ``cookiefile`` is configured.
+    - Swaps ``cookiefile`` for a per-run throwaway copy so the canonical
+      keeper-managed cookies are never written back to (see isolated_cookiefile).
+    - Ensures the dedicated ``cachedir`` is set (see get_ytdlp_cache_dir) so even
+      callers that build ``ydl_opts`` inline (credential / health checks, which
+      don't go through get_ytdlp_base_opts) avoid the HOME/.cache collision.
+
+    Both are applied to a shallow copy; the caller's dict is left untouched. A
+    no-op only when there's no cookiefile and no cache dir override configured.
     """
+    extra: dict = {}
+
+    cache_dir = get_ytdlp_cache_dir()
+    if cache_dir and not ydl_opts.get("cachedir"):
+        extra["cachedir"] = cache_dir
+
     original = ydl_opts.get("cookiefile")
     with isolated_cookiefile(original) as cf:
         if original:
-            yield {**ydl_opts, "cookiefile": cf}
-        else:
-            yield ydl_opts
+            extra["cookiefile"] = cf
+        yield {**ydl_opts, **extra} if extra else ydl_opts
 
 
 @dataclass
