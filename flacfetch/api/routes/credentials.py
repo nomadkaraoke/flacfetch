@@ -1,6 +1,7 @@
 """
 Credential health check endpoints for flacfetch HTTP API.
 """
+import asyncio
 import json
 import logging
 import os
@@ -30,7 +31,10 @@ async def check_credentials(
     Returns status for each service and whether human action is needed.
     Optionally sends Pushbullet notification.
     """
-    return run_credential_health_check(
+    # The YouTube check now runs a real yt-dlp extraction — off-load the whole
+    # (synchronous, network-bound) check so it can't stall the event loop.
+    return await asyncio.to_thread(
+        run_credential_health_check,
         notify=notify,
         notify_on_success=notify_on_success,
     )
@@ -57,7 +61,8 @@ async def check_youtube(
     api_key: str = Depends(verify_api_key),
 ):
     """Check YouTube credentials specifically."""
-    result = check_youtube_credentials()
+    # Runs a real yt-dlp extraction — off-load so it can't stall the event loop.
+    result = await asyncio.to_thread(check_youtube_credentials)
     return {
         "service": result.service,
         "status": result.status.value,

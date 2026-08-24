@@ -46,6 +46,11 @@ class TestClassifyProbeError:
     def test_login_required_is_invalid_cookies(self):
         assert classify_probe_error("playability status: LOGIN_REQUIRED") is ProbeOutcome.INVALID_COOKIES
 
+    def test_reworded_bot_challenge_still_invalid(self):
+        """Markers are deliberately loose — a YouTube wording tweak must not
+        downgrade dead cookies to 'transient' and disarm the self-heal."""
+        assert classify_probe_error("Verify you're not a bot to continue") is ProbeOutcome.INVALID_COOKIES
+
     def test_network_error_is_transient(self):
         assert classify_probe_error("Connection reset by peer") is ProbeOutcome.TRANSIENT
 
@@ -266,6 +271,21 @@ class TestRefreshAndValidateYoutube:
         assert ok is True
         assert len(relaunches) == 1
 
+    async def test_relaunch_first_restarts_browser_before_first_attempt(self):
+        """When the periodic probe already proved the session's export dead,
+        re-exporting from that session is a guaranteed no-op — attempt 1 must
+        start from a fresh browser."""
+        from flacfetch.credential_keeper.keeper import refresh_and_validate_youtube
+
+        browser, relaunch, login, refresh, probe, relaunches = self._make()
+        status = {}
+        ok = await refresh_and_validate_youtube(
+            browser, status, max_attempts=3, relaunch_first=True,
+            relaunch=relaunch, ensure_login=login, refresh=refresh, probe=probe,
+        )
+        assert ok is True
+        assert len(relaunches) == 1
+
 
 # =============================================================================
 # check_youtube_credentials (health check via shared probe)
@@ -342,13 +362,14 @@ class TestCheckYoutubeCredentialsProbe:
 
 
 class TestKeeperSuppressionThresholds:
-    def _status_file(self, tmp_path, monkeypatch, service, hours_ago):
+    def _status_file(self, tmp_path, monkeypatch, service, hours_ago, extra=None):
         status = {
             service: {
                 "last_refresh_status": "ok",
                 "last_refresh": (
                     datetime.now(timezone.utc) - timedelta(hours=hours_ago)
                 ).isoformat(),
+                **(extra or {}),
             }
         }
         f = tmp_path / "keeper-status.json"
@@ -367,6 +388,50 @@ class TestKeeperSuppressionThresholds:
         from flacfetch.api.services.credential_check import _is_keeper_actively_managing
 
         self._status_file(tmp_path, monkeypatch, "youtube", hours_ago=3)
+        assert _is_keeper_actively_managing("youtube") is False
+
+    def test_youtube_recent_probe_suppresses_despite_old_refresh(self, tmp_path, monkeypatch):
+        """The keeper only refreshes every 8h but probes every 30 min — a
+        recent successful probe must keep suppression active between refreshes."""
+        from flacfetch.api.services.credential_check import _is_keeper_actively_managing
+
+        self._status_file(
+            tmp_path, monkeypatch, "youtube", hours_ago=5,
+            extra={
+                "last_probe_status": "ok",
+                "last_probe": (
+                    datetime.now(timezone.utc) - timedelta(minutes=20)
+                ).isoformat(),
+            },
+        )
+        assert _is_keeper_actively_managing("youtube") is True
+
+    def test_youtube_stale_probe_and_refresh_do_not_suppress(self, tmp_path, monkeypatch):
+        from flacfetch.api.services.credential_check import _is_keeper_actively_managing
+
+        self._status_file(
+            tmp_path, monkeypatch, "youtube", hours_ago=5,
+            extra={
+                "last_probe_status": "ok",
+                "last_probe": (
+                    datetime.now(timezone.utc) - timedelta(hours=2)
+                ).isoformat(),
+            },
+        )
+        assert _is_keeper_actively_managing("youtube") is False
+
+    def test_youtube_failed_probe_does_not_suppress(self, tmp_path, monkeypatch):
+        from flacfetch.api.services.credential_check import _is_keeper_actively_managing
+
+        self._status_file(
+            tmp_path, monkeypatch, "youtube", hours_ago=5,
+            extra={
+                "last_probe_status": "invalid_cookies",
+                "last_probe": (
+                    datetime.now(timezone.utc) - timedelta(minutes=10)
+                ).isoformat(),
+            },
+        )
         assert _is_keeper_actively_managing("youtube") is False
 
     def test_spotify_keeps_24h_window(self, tmp_path, monkeypatch):

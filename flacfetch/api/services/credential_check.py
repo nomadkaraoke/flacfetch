@@ -36,6 +36,11 @@ _KEEPER_ACTIVE_THRESHOLDS = {
     "youtube": 2 * 3600,
 }
 _KEEPER_ACTIVE_THRESHOLD = 24 * 3600  # default for unknown services
+# A recent successful keeper probe (it validates its YouTube export every
+# ~30 min) is equally strong evidence the keeper is managing things — the
+# refresh timestamp alone only updates every 8h, which would leave the 2h
+# window closed for most of each cycle.
+_KEEPER_PROBE_ACTIVE_THRESHOLD = 1 * 3600
 
 
 class CredentialStatus(str, Enum):
@@ -488,24 +493,36 @@ def _is_keeper_actively_managing(service: str) -> bool:
     service_key = service.lower()  # "youtube" or "spotify"
     service_status = status.get(service_key, {})
 
-    last_refresh_status = service_status.get("last_refresh_status")
-    last_refresh = service_status.get("last_refresh")
-
-    if last_refresh_status != "ok" or not last_refresh:
-        return False
+    def _age_within(timestamp: Optional[str], window: float) -> bool:
+        if not timestamp:
+            return False
+        try:
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(timestamp)).total_seconds()
+        except (ValueError, TypeError):
+            return False
+        return age <= window
 
     threshold = _KEEPER_ACTIVE_THRESHOLDS.get(service_key, _KEEPER_ACTIVE_THRESHOLD)
-    try:
-        last_refresh_time = datetime.fromisoformat(last_refresh)
-        age = (datetime.now(timezone.utc) - last_refresh_time).total_seconds()
-        if age <= threshold:
-            logger.info(
-                f"Keeper is actively managing {service} "
-                f"(last successful refresh {age / 3600:.1f}h ago) — suppressing alert"
-            )
-            return True
-    except (ValueError, TypeError):
-        pass
+    if service_status.get("last_refresh_status") == "ok" and _age_within(
+        service_status.get("last_refresh"), threshold
+    ):
+        logger.info(
+            f"Keeper is actively managing {service} "
+            f"(recent successful refresh) — suppressing alert"
+        )
+        return True
+
+    # The keeper probe-validates its YouTube export every ~30 min between
+    # refreshes; a recent successful probe proves it is managing fine even
+    # when the last full refresh is hours old.
+    if service_key == "youtube" and service_status.get("last_probe_status") == "ok" and _age_within(
+        service_status.get("last_probe"), _KEEPER_PROBE_ACTIVE_THRESHOLD
+    ):
+        logger.info(
+            "Keeper is actively managing youtube "
+            "(recent successful cookie probe) — suppressing alert"
+        )
+        return True
 
     return False
 

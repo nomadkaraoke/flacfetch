@@ -26,10 +26,13 @@ PROBE_VIDEO_URL = os.environ.get(
 )
 
 # Substrings (lowercased) that prove the cookies themselves are dead/rejected,
-# as opposed to a transient network / YouTube hiccup.
+# as opposed to a transient network / YouTube hiccup. Deliberately loose
+# ("not a bot" rather than the full challenge sentence, matching the
+# classification in downloaders.youtube.check_youtube_availability) so a
+# wording tweak by YouTube doesn't silently downgrade dead cookies to
+# "transient" and disarm the self-heal.
 _INVALID_COOKIE_MARKERS = (
-    "sign in to confirm you're not a bot",
-    "sign in to confirm you’re not a bot",  # curly apostrophe variant
+    "not a bot",
     "cookies are no longer valid",
     "login_required",
     "please sign in",
@@ -68,6 +71,9 @@ def probe_cookies_sync(cookies_file: str) -> tuple[ProbeOutcome, str]:
             "no_warnings": True,
             "cookiefile": cookies_file,
             "skip_download": True,
+            # Bound the probe: a hung YouTube connection must not stall the
+            # keeper loop (or, via the health check, an API request).
+            "socket_timeout": 30,
         }
         # The keeper process may not have FLACFETCH_YTDLP_CACHE_DIR set; its
         # HOME/.cache is the Spotify token FILE on the server, so yt-dlp's

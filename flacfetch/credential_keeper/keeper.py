@@ -115,6 +115,7 @@ async def refresh_and_validate_youtube(
     status: dict,
     *,
     max_attempts: int = None,
+    relaunch_first: bool = False,
     relaunch=_relaunch_browser,
     ensure_login=None,
     refresh=None,
@@ -126,10 +127,15 @@ async def refresh_and_validate_youtube(
     YouTube can invalidate the export server-side while the live session stays
     active. If the probe rejects the export, relaunch the browser and retry.
 
+    Set ``relaunch_first`` when the current session's export is already known
+    dead (periodic probe failed) — re-exporting from that session would be a
+    guaranteed no-op, so start from a fresh browser instead.
+
     The refresh/probe/login callables are injectable for tests; production
     callers use the defaults.
     """
-    max_attempts = max_attempts or YOUTUBE_MAX_REFRESH_ATTEMPTS
+    if max_attempts is None:
+        max_attempts = YOUTUBE_MAX_REFRESH_ATTEMPTS
     ensure_login = ensure_login or ensure_google_logged_in
     refresh = refresh or refresh_youtube_cookies
     probe = probe or probe_cookies
@@ -138,7 +144,7 @@ async def refresh_and_validate_youtube(
     failure_reason = "no attempts made"
 
     for attempt in range(1, max_attempts + 1):
-        if attempt > 1:
+        if attempt > 1 or relaunch_first:
             await relaunch(browser)
         page, context = browser["page"], browser["context"]
 
@@ -234,6 +240,7 @@ async def run_keeper():
             # yt-dlp probe — a "logged in" browser is not proof the export
             # still works. A failed probe forces an immediate refresh cycle.
             refresh_due = now - last_youtube_refresh >= YOUTUBE_REFRESH_INTERVAL
+            probe_found_dead = False
             if not refresh_due and now - last_youtube_probe >= YOUTUBE_PROBE_INTERVAL:
                 outcome, msg = await probe_cookies(get_youtube_cookies_path())
                 status.setdefault("youtube", {}).update({
@@ -246,6 +253,7 @@ async def run_keeper():
                 if outcome is ProbeOutcome.INVALID_COOKIES:
                     logger.warning(f"Periodic probe found dead cookies — remediating: {msg}")
                     refresh_due = True
+                    probe_found_dead = True
                 else:
                     logger.info(f"Periodic cookie probe: {msg}")
 
@@ -254,16 +262,24 @@ async def run_keeper():
             if refresh_due:
                 logger.info("--- YouTube cookie refresh ---")
 
-                success = await refresh_and_validate_youtube(browser, status)
+                # If the periodic probe just proved the current session's
+                # export dead, re-exporting from it is a guaranteed no-op —
+                # start from a fresh browser.
+                success = await refresh_and_validate_youtube(
+                    browser, status, relaunch_first=probe_found_dead
+                )
                 status.setdefault("youtube", {}).update({
                     "last_refresh": datetime.now(timezone.utc).isoformat(),
                     "last_refresh_status": "ok" if success else "error",
                 })
                 if success:
                     if NOTIFY_ON_SUCCESS:
+                        probe_ok = status.get("youtube", {}).get("last_probe_status") == "ok"
                         await _send_notification(
                             "✅ YouTube Cookies Refreshed",
-                            "YouTube cookies extracted, uploaded, and probe-validated.",
+                            "YouTube cookies extracted, uploaded, and probe-validated."
+                            if probe_ok
+                            else "YouTube cookies extracted and uploaded (probe inconclusive).",
                         )
                 else:
                     await _send_notification(
