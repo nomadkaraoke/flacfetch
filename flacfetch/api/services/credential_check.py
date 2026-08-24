@@ -270,9 +270,11 @@ def check_youtube_credentials() -> CredentialCheckResult:
             fix_command="systemctl restart credential-keeper (fresh export); if still failing: flacfetch cookies upload",
         )
 
-    # Transient: distinguish rate-limiting (cookies assumed fine) from other errors
+    # Transient: distinguish rate-limiting (cookies assumed fine) from other
+    # errors. Match explicit indicators only — a bare "rate" substring would
+    # also match unrelated words like "generate".
     lowered = msg.lower()
-    if "429" in lowered or "too many requests" in lowered or "rate" in lowered:
+    if "429" in lowered or "too many requests" in lowered:
         return CredentialCheckResult(
             service="YouTube",
             status=CredentialStatus.OK,

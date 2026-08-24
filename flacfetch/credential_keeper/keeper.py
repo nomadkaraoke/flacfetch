@@ -33,6 +33,11 @@ YOUTUBE_PROBE_INTERVAL = int(os.environ.get("KEEPER_YOUTUBE_PROBE_INTERVAL", 30 
 # (a fresh launch is the only known way to get a valid export once YouTube has
 # invalidated the session server-side).
 YOUTUBE_MAX_REFRESH_ATTEMPTS = int(os.environ.get("KEEPER_YOUTUBE_MAX_ATTEMPTS", 3))
+# Cooldown between "self-heal failed" notifications. A persistently-failing
+# export would otherwise page on every 30-min probe cycle (~48 pushes/day).
+YOUTUBE_FAILURE_ALERT_INTERVAL = int(
+    os.environ.get("KEEPER_YOUTUBE_FAILURE_ALERT_INTERVAL", 4 * 3600)  # 4 hours
+)
 SPOTIFY_REFRESH_INTERVAL = int(os.environ.get("KEEPER_SPOTIFY_INTERVAL", 12 * 3600))  # 12 hours
 # librespot stored credentials are long-lived (no ~1h access-token expiry), so
 # this only needs to run occasionally to re-mint if they are ever invalidated.
@@ -230,6 +235,7 @@ async def run_keeper():
         # Initialize to trigger immediately on first loop iteration
         last_youtube_refresh = float("-inf")
         last_youtube_probe = float("-inf")
+        last_youtube_failure_alert = float("-inf")
         last_spotify_refresh = float("-inf")
         last_librespot_refresh = float("-inf")
 
@@ -281,7 +287,10 @@ async def run_keeper():
                             if probe_ok
                             else "YouTube cookies extracted and uploaded (probe inconclusive).",
                         )
-                else:
+                elif now - last_youtube_failure_alert >= YOUTUBE_FAILURE_ALERT_INTERVAL:
+                    # Throttled: a persistently-dead export re-remediates every
+                    # probe cycle; without a cooldown that's ~48 pushes/day.
+                    last_youtube_failure_alert = now
                     await _send_notification(
                         "❌ YouTube Cookies Invalid After Self-Heal",
                         "Cookie export still failing the yt-dlp probe after "

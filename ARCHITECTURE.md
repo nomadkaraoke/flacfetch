@@ -108,7 +108,7 @@ The credential keeper is a browser automation subsystem that runs alongside the 
 
 ### Architecture
 
-```
+```text
 credential-keeper (systemd service)
 ├── keeper.py          - Scheduling loop (YouTube every 8h, Spotify every 12h)
 │                        + probe-driven self-heal (relaunch browser on dead export)
