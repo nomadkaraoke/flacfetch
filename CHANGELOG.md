@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.26.0] - 2026-08-24
+
+### Fixed
+- YouTube search returned zero results for ~30h (Gen "Choose Audio" showed
+  Spotify-only results) while the credential keeper reported healthy refreshes.
+  Root cause: YouTube now invalidates the keeper's exported cookie snapshot
+  *server-side* within hours of a fresh browser launch, while the live browser
+  session stays "logged in" — so the keeper's login check passed and it kept
+  uploading dead cookies every 8h. The browser's login state is not a valid
+  health signal; only a real yt-dlp extraction is.
+
+### Added
+- **Keeper cookie probe + self-heal** (`credential_keeper/probe.py`): the keeper
+  now validates every YouTube cookie export with a real yt-dlp metadata
+  extraction against a stable public video ("Me at the zoo"), and also probes
+  the canonical cookie file every 30 minutes between refreshes
+  (`KEEPER_YOUTUBE_PROBE_INTERVAL`). A probe rejection ("Sign in to confirm
+  you're not a bot" / "cookies no longer valid" / LOGIN_REQUIRED) triggers
+  immediate remediation: relaunch the browser (a fresh launch is the only known
+  way to obtain a valid export once the session is server-side dead), re-login,
+  re-export, re-probe — up to `KEEPER_YOUTUBE_MAX_ATTEMPTS` (default 3) times.
+  A Pushbullet alert now fires only when self-heal fails, i.e. when human
+  action is genuinely needed. Probe results are recorded in
+  `keeper-status.json` (`last_probe`, `last_probe_status`, `last_probe_message`).
+- Credential health check (`api/services/credential_check.py`) now probes a
+  stable **public** video via the shared keeper probe. The old check used a
+  private test video that later became inaccessible, collapsing every run into
+  a soft "ok" that could not detect dead cookies. Bot-wall rejections are now
+  classified as EXPIRED with a fix command.
+- Health-check alert suppression is now per-service: YouTube's
+  "keeper is actively managing" window shrinks from 24h to 2h. With the keeper
+  probing every 30 minutes and self-healing, dead cookies found by the health
+  check mean self-heal is failing — that alert must reach a human (the 24h
+  window suppressed the one alert that would have caught the outage).
+- `credential-keeper` systemd unit (provision.sh) now sets
+  `YOUTUBE_COOKIES_FILE` and `FLACFETCH_YTDLP_CACHE_DIR` so the keeper's probe
+  uses exactly the file and cache production uses.
+
 ## [0.25.0] - 2026-08-22
 
 ### Fixed

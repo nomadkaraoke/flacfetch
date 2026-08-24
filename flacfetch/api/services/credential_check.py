@@ -24,7 +24,23 @@ logger = logging.getLogger(__name__)
 
 # Max age (seconds) for a keeper refresh to be considered "active".
 # If the keeper last refreshed within this window, we trust it to handle things.
-_KEEPER_ACTIVE_THRESHOLD = 24 * 3600  # 24 hours
+#
+# YouTube gets a much shorter window than Spotify: the keeper probe-validates
+# its YouTube export every ~30 min and self-heals with browser restarts, so if
+# the health check finds dead cookies the keeper's self-heal is failing and a
+# human MUST be alerted. (During the 2026-08-24 outage the old 24h window
+# suppressed the one alert that would have caught ~30h of missing YouTube
+# search results.)
+_KEEPER_ACTIVE_THRESHOLDS = {
+    "spotify": 24 * 3600,
+    "youtube": 2 * 3600,
+}
+_KEEPER_ACTIVE_THRESHOLD = 24 * 3600  # default for unknown services
+# A recent successful keeper probe (it validates its YouTube export every
+# ~30 min) is equally strong evidence the keeper is managing things — the
+# refresh timestamp alone only updates every 8h, which would leave the 2h
+# window closed for most of each cycle.
+_KEEPER_PROBE_ACTIVE_THRESHOLD = 1 * 3600
 
 
 class CredentialStatus(str, Enum):
@@ -215,7 +231,12 @@ def check_youtube_credentials() -> CredentialCheckResult:
     """
     Test if YouTube cookies are working.
 
-    Tries to extract info from a video that requires authentication.
+    Probes a stable PUBLIC video with the configured cookies via the shared
+    keeper probe. On the flagged datacenter IP even public videos return
+    LOGIN_REQUIRED without live account cookies, so a successful extraction
+    proves the cookies work end-to-end. (The old check used a private test
+    video that later became inaccessible, which turned every run into a soft
+    "ok" — it could not detect the 2026-08-24 dead-cookies outage.)
     """
     cookies_file = get_youtube_cookies_path()
 
@@ -228,94 +249,45 @@ def check_youtube_credentials() -> CredentialCheckResult:
             needs_human_action=False,  # Not critical
         )
 
-    try:
-        import yt_dlp
+    from ...credential_keeper.probe import ProbeOutcome, probe_cookies_sync
 
-        # Try to extract info from a private video that requires authentication
-        # This video is only accessible with valid cookies
-        test_url = "https://www.youtube.com/watch?v=nFMXRiXnOXI"  # Private test video
+    outcome, msg = probe_cookies_sync(cookies_file)
 
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'cookiefile': cookies_file,
-            'extract_flat': False,
-            'skip_download': True,
-        }
+    if outcome is ProbeOutcome.OK:
+        return CredentialCheckResult(
+            service="YouTube",
+            status=CredentialStatus.OK,
+            message=msg,
+            needs_human_action=False,
+        )
 
-        # Use a throwaway cookie copy so this validation check never writes yt-dlp's
-        # rotated (and, on a flagged IP, rejected) cookies back over the canonical
-        # keeper-managed file. See downloaders.youtube.isolated_cookiefile.
-        from ...downloaders.youtube import ytdlp_opts_isolated
+    if outcome is ProbeOutcome.INVALID_COOKIES:
+        return CredentialCheckResult(
+            service="YouTube",
+            status=CredentialStatus.EXPIRED,
+            message=f"Cookies expired or invalid: {msg}",
+            needs_human_action=True,
+            fix_command="systemctl restart credential-keeper (fresh export); if still failing: flacfetch cookies upload",
+        )
 
-        with ytdlp_opts_isolated(ydl_opts) as opts, yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(test_url, download=False)
+    # Transient: distinguish rate-limiting (cookies assumed fine) from other
+    # errors. Match explicit indicators only — a bare "rate" substring would
+    # also match unrelated words like "generate".
+    lowered = msg.lower()
+    if "429" in lowered or "too many requests" in lowered:
+        return CredentialCheckResult(
+            service="YouTube",
+            status=CredentialStatus.OK,
+            message="Rate limited by YouTube (429) - cookies assumed valid, try again later",
+            needs_human_action=False,
+        )
 
-        if info and info.get('title'):
-            return CredentialCheckResult(
-                service="YouTube",
-                status=CredentialStatus.OK,
-                message=f"Cookies valid - extracted info for: {info.get('title', 'unknown')[:50]}",
-                needs_human_action=False,
-            )
-        else:
-            return CredentialCheckResult(
-                service="YouTube",
-                status=CredentialStatus.ERROR,
-                message="Could not extract video info",
-                needs_human_action=False,
-            )
-
-    except Exception as e:
-        error_str = str(e).lower()
-
-        if "429" in error_str or "too many requests" in error_str or "rate" in error_str:
-            # Rate limited by YouTube - cookies might still be valid
-            return CredentialCheckResult(
-                service="YouTube",
-                status=CredentialStatus.OK,
-                message="Rate limited by YouTube (429) - cookies assumed valid, try again later",
-                needs_human_action=False,
-            )
-        elif "private" in error_str and "sign in" not in error_str and "login" not in error_str:
-            # Video is private but no auth prompt - cookies might be for wrong account
-            # Check if cookies file exists and has content
-            if os.path.exists(cookies_file) and os.path.getsize(cookies_file) > 100:
-                return CredentialCheckResult(
-                    service="YouTube",
-                    status=CredentialStatus.OK,
-                    message="Cookies configured (test video inaccessible - may need different account)",
-                    needs_human_action=False,
-                )
-        elif "sign in" in error_str or "login" in error_str or "cookies" in error_str:
-            return CredentialCheckResult(
-                service="YouTube",
-                status=CredentialStatus.EXPIRED,
-                message=f"Cookies expired or invalid: {e}",
-                needs_human_action=True,
-                fix_command="flacfetch cookies upload",
-            )
-        elif any(p in error_str for p in [
-            "confirm your age", "inappropriate for some users",
-            "age-restricted", "age restricted",
-        ]):
-            # Age-restricted content - cookies might still be valid.
-            # Match specific phrases (not raw 'age' / 'restricted' substrings
-            # which over-match on 'page' / 'message' / 'geo-restricted' / etc.)
-            return CredentialCheckResult(
-                service="YouTube",
-                status=CredentialStatus.OK,
-                message="Cookies present (age-restricted test video)",
-                needs_human_action=False,
-            )
-        else:
-            # Other errors might be transient
-            return CredentialCheckResult(
-                service="YouTube",
-                status=CredentialStatus.ERROR,
-                message=f"Error checking: {e}",
-                needs_human_action=False,
-            )
+    return CredentialCheckResult(
+        service="YouTube",
+        status=CredentialStatus.ERROR,
+        message=f"Error checking: {msg}",
+        needs_human_action=False,
+    )
 
 
 # =============================================================================
@@ -523,23 +495,36 @@ def _is_keeper_actively_managing(service: str) -> bool:
     service_key = service.lower()  # "youtube" or "spotify"
     service_status = status.get(service_key, {})
 
-    last_refresh_status = service_status.get("last_refresh_status")
-    last_refresh = service_status.get("last_refresh")
+    def _age_within(timestamp: Optional[str], window: float) -> bool:
+        if not timestamp:
+            return False
+        try:
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(timestamp)).total_seconds()
+        except (ValueError, TypeError):
+            return False
+        return age <= window
 
-    if last_refresh_status != "ok" or not last_refresh:
-        return False
+    threshold = _KEEPER_ACTIVE_THRESHOLDS.get(service_key, _KEEPER_ACTIVE_THRESHOLD)
+    if service_status.get("last_refresh_status") == "ok" and _age_within(
+        service_status.get("last_refresh"), threshold
+    ):
+        logger.info(
+            f"Keeper is actively managing {service} "
+            f"(recent successful refresh) — suppressing alert"
+        )
+        return True
 
-    try:
-        last_refresh_time = datetime.fromisoformat(last_refresh)
-        age = (datetime.now(timezone.utc) - last_refresh_time).total_seconds()
-        if age <= _KEEPER_ACTIVE_THRESHOLD:
-            logger.info(
-                f"Keeper is actively managing {service} "
-                f"(last successful refresh {age / 3600:.1f}h ago) — suppressing alert"
-            )
-            return True
-    except (ValueError, TypeError):
-        pass
+    # The keeper probe-validates its YouTube export every ~30 min between
+    # refreshes; a recent successful probe proves it is managing fine even
+    # when the last full refresh is hours old.
+    if service_key == "youtube" and service_status.get("last_probe_status") == "ok" and _age_within(
+        service_status.get("last_probe"), _KEEPER_PROBE_ACTIVE_THRESHOLD
+    ):
+        logger.info(
+            "Keeper is actively managing youtube "
+            "(recent successful cookie probe) — suppressing alert"
+        )
+        return True
 
     return False
 

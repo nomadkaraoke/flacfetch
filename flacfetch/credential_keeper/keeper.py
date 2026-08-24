@@ -11,10 +11,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ..core.config import get_librespot_credentials_dir
-from .browser import launch_browser
+from ..core.config import get_librespot_credentials_dir, get_youtube_cookies_path
+from .browser import close_browser, launch_browser
 from .google_login import ensure_google_logged_in
 from .librespot import refresh_librespot_credentials
+from .probe import ProbeOutcome, probe_cookies
 from .spotify import refresh_spotify_token
 from .youtube import refresh_youtube_cookies
 
@@ -22,6 +23,21 @@ logger = logging.getLogger(__name__)
 
 # Refresh intervals (in seconds)
 YOUTUBE_REFRESH_INTERVAL = int(os.environ.get("KEEPER_YOUTUBE_INTERVAL", 8 * 3600))  # 8 hours
+# How often to validate the exported cookies with a real yt-dlp probe between
+# refreshes. YouTube can kill the exported session server-side within hours of
+# a refresh while the live browser session stays "logged in" (2026-08-24
+# incident: search lost all YouTube results for ~30h with a "healthy" keeper),
+# so the probe — not the browser's login state — is the health signal.
+YOUTUBE_PROBE_INTERVAL = int(os.environ.get("KEEPER_YOUTUBE_PROBE_INTERVAL", 30 * 60))  # 30 min
+# Refresh attempts per cycle; attempts after the first relaunch the browser
+# (a fresh launch is the only known way to get a valid export once YouTube has
+# invalidated the session server-side).
+YOUTUBE_MAX_REFRESH_ATTEMPTS = int(os.environ.get("KEEPER_YOUTUBE_MAX_ATTEMPTS", 3))
+# Cooldown between "self-heal failed" notifications. A persistently-failing
+# export would otherwise page on every 30-min probe cycle (~48 pushes/day).
+YOUTUBE_FAILURE_ALERT_INTERVAL = int(
+    os.environ.get("KEEPER_YOUTUBE_FAILURE_ALERT_INTERVAL", 4 * 3600)  # 4 hours
+)
 SPOTIFY_REFRESH_INTERVAL = int(os.environ.get("KEEPER_SPOTIFY_INTERVAL", 12 * 3600))  # 12 hours
 # librespot stored credentials are long-lived (no ~1h access-token expiry), so
 # this only needs to run occasionally to re-mint if they are ever invalidated.
@@ -91,6 +107,92 @@ async def _send_notification(title: str, body: str):
         logger.warning(f"Failed to send notification: {e}")
 
 
+async def _relaunch_browser(browser: dict):
+    """Close and relaunch the browser, updating the refs dict in place."""
+    logger.info("Relaunching browser for a fresh session...")
+    await close_browser(browser["pw"], browser["context"])
+    pw, context, page = await launch_browser()
+    browser.update(pw=pw, context=context, page=page)
+
+
+async def refresh_and_validate_youtube(
+    browser: dict,
+    status: dict,
+    *,
+    max_attempts: int = None,
+    relaunch_first: bool = False,
+    relaunch=_relaunch_browser,
+    ensure_login=None,
+    refresh=None,
+    probe=None,
+) -> bool:
+    """Refresh YouTube cookies and validate the export with a real yt-dlp probe.
+
+    A "logged in" browser session is NOT proof the exported cookies work:
+    YouTube can invalidate the export server-side while the live session stays
+    active. If the probe rejects the export, relaunch the browser and retry.
+
+    Set ``relaunch_first`` when the current session's export is already known
+    dead (periodic probe failed) — re-exporting from that session would be a
+    guaranteed no-op, so start from a fresh browser instead.
+
+    The refresh/probe/login callables are injectable for tests; production
+    callers use the defaults.
+    """
+    if max_attempts is None:
+        max_attempts = YOUTUBE_MAX_REFRESH_ATTEMPTS
+    ensure_login = ensure_login or ensure_google_logged_in
+    refresh = refresh or refresh_youtube_cookies
+    probe = probe or probe_cookies
+
+    yt_status = status.setdefault("youtube", {})
+    failure_reason = "no attempts made"
+
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1 or relaunch_first:
+            await relaunch(browser)
+        page, context = browser["page"], browser["context"]
+
+        if not await ensure_login(page):
+            failure_reason = "Google session lost and re-login failed"
+            logger.error(f"{failure_reason} (attempt {attempt}/{max_attempts})")
+            continue
+
+        if not await refresh(page, context):
+            failure_reason = "Cookie extraction/upload failed"
+            logger.error(f"{failure_reason} (attempt {attempt}/{max_attempts})")
+            continue
+
+        outcome, msg = await probe(get_youtube_cookies_path())
+        yt_status.update({
+            "last_probe": datetime.now(timezone.utc).isoformat(),
+            "last_probe_status": outcome.value,
+            "last_probe_message": msg,
+        })
+
+        if outcome is ProbeOutcome.INVALID_COOKIES:
+            failure_reason = msg
+            logger.warning(
+                f"Exported cookies rejected by probe (attempt {attempt}/{max_attempts}): {msg}"
+            )
+            continue
+
+        if outcome is ProbeOutcome.TRANSIENT:
+            # The export uploaded fine and the failure isn't a cookie rejection —
+            # don't churn the browser over a network blip. The periodic probe
+            # will catch it if the cookies are actually dead.
+            logger.warning(f"Probe inconclusive, accepting refresh: {msg}")
+        else:
+            logger.info(msg)
+        return True
+
+    yt_status["last_failure_reason"] = failure_reason
+    logger.error(
+        f"YouTube cookies still invalid after {max_attempts} attempts: {failure_reason}"
+    )
+    return False
+
+
 async def run_keeper():
     """Main keeper loop. Launches browser and periodically refreshes credentials."""
     _setup_logging()
@@ -104,11 +206,11 @@ async def run_keeper():
         sys.exit(1)
 
     status = _load_status()
-    pw = None
-    context = None
+    browser = {"pw": None, "context": None, "page": None}
 
     try:
         pw, context, page = await launch_browser()
+        browser.update(pw=pw, context=context, page=page)
 
         # Initial Google login check
         if not await ensure_google_logged_in(page):
@@ -132,53 +234,80 @@ async def run_keeper():
 
         # Initialize to trigger immediately on first loop iteration
         last_youtube_refresh = float("-inf")
+        last_youtube_probe = float("-inf")
+        last_youtube_failure_alert = float("-inf")
         last_spotify_refresh = float("-inf")
         last_librespot_refresh = float("-inf")
 
         while True:
             now = asyncio.get_event_loop().time()
 
-            # YouTube cookie refresh
-            if now - last_youtube_refresh >= YOUTUBE_REFRESH_INTERVAL:
+            # Between refreshes, validate the exported cookies with a real
+            # yt-dlp probe — a "logged in" browser is not proof the export
+            # still works. A failed probe forces an immediate refresh cycle.
+            refresh_due = now - last_youtube_refresh >= YOUTUBE_REFRESH_INTERVAL
+            probe_found_dead = False
+            if not refresh_due and now - last_youtube_probe >= YOUTUBE_PROBE_INTERVAL:
+                outcome, msg = await probe_cookies(get_youtube_cookies_path())
+                status.setdefault("youtube", {}).update({
+                    "last_probe": datetime.now(timezone.utc).isoformat(),
+                    "last_probe_status": outcome.value,
+                    "last_probe_message": msg,
+                })
+                last_youtube_probe = now
+                _save_status(status)
+                if outcome is ProbeOutcome.INVALID_COOKIES:
+                    logger.warning(f"Periodic probe found dead cookies — remediating: {msg}")
+                    refresh_due = True
+                    probe_found_dead = True
+                else:
+                    logger.info(f"Periodic cookie probe: {msg}")
+
+            # YouTube cookie refresh (+ probe validation with browser-restart
+            # self-heal — see refresh_and_validate_youtube)
+            if refresh_due:
                 logger.info("--- YouTube cookie refresh ---")
 
-                # Ensure Google session is still active
-                if not await ensure_google_logged_in(page):
-                    logger.error("Google session lost, could not re-login")
-                    status.setdefault("youtube", {}).update({
-                        "last_refresh": datetime.now(timezone.utc).isoformat(),
-                        "last_refresh_status": "error",
-                        "error": "Google session lost",
-                    })
-                    await _send_notification(
-                        "Credential Keeper: Google Login Lost",
-                        "Google session expired and re-login failed.",
-                    )
-                else:
-                    success = await refresh_youtube_cookies(page, context)
-                    status.setdefault("youtube", {}).update({
-                        "last_refresh": datetime.now(timezone.utc).isoformat(),
-                        "last_refresh_status": "ok" if success else "error",
-                    })
-                    if success:
-                        if NOTIFY_ON_SUCCESS:
-                            await _send_notification(
-                                "✅ YouTube Cookies Refreshed",
-                                "YouTube cookies extracted and uploaded successfully.",
-                            )
-                    else:
+                # If the periodic probe just proved the current session's
+                # export dead, re-exporting from it is a guaranteed no-op —
+                # start from a fresh browser.
+                success = await refresh_and_validate_youtube(
+                    browser, status, relaunch_first=probe_found_dead
+                )
+                status.setdefault("youtube", {}).update({
+                    "last_refresh": datetime.now(timezone.utc).isoformat(),
+                    "last_refresh_status": "ok" if success else "error",
+                })
+                if success:
+                    if NOTIFY_ON_SUCCESS:
+                        probe_ok = status.get("youtube", {}).get("last_probe_status") == "ok"
                         await _send_notification(
-                            "❌ YouTube Cookie Refresh Failed",
-                            "Could not extract/upload YouTube cookies.",
+                            "✅ YouTube Cookies Refreshed",
+                            "YouTube cookies extracted, uploaded, and probe-validated."
+                            if probe_ok
+                            else "YouTube cookies extracted and uploaded (probe inconclusive).",
                         )
+                elif now - last_youtube_failure_alert >= YOUTUBE_FAILURE_ALERT_INTERVAL:
+                    # Throttled: a persistently-dead export re-remediates every
+                    # probe cycle; without a cooldown that's ~48 pushes/day.
+                    last_youtube_failure_alert = now
+                    await _send_notification(
+                        "❌ YouTube Cookies Invalid After Self-Heal",
+                        "Cookie export still failing the yt-dlp probe after "
+                        f"{YOUTUBE_MAX_REFRESH_ATTEMPTS} attempts (with browser "
+                        "restarts). Manual intervention needed: "
+                        f"{status.get('youtube', {}).get('last_failure_reason', 'unknown')}",
+                    )
 
                 last_youtube_refresh = now
+                last_youtube_probe = now
                 _save_status(status)
 
             # Spotify token refresh
             if now - last_spotify_refresh >= SPOTIFY_REFRESH_INTERVAL:
                 logger.info("--- Spotify token refresh ---")
 
+                page = browser["page"]
                 if not await ensure_google_logged_in(page):
                     logger.error("Google session lost, could not re-login")
                     status.setdefault("spotify", {}).update({
@@ -222,6 +351,7 @@ async def run_keeper():
             if librespot_due:
                 logger.info("--- librespot credential refresh ---")
 
+                page = browser["page"]
                 if not await ensure_google_logged_in(page):
                     logger.error("Google session lost, could not re-login")
                     status.setdefault("librespot", {}).update({
@@ -258,13 +388,13 @@ async def run_keeper():
         await _send_notification("Credential Keeper Crashed", str(e))
         raise
     finally:
-        if context:
+        if browser["context"]:
             try:
-                await context.close()
+                await browser["context"].close()
             except Exception:
                 pass
-        if pw:
+        if browser["pw"]:
             try:
-                await pw.stop()
+                await browser["pw"].stop()
             except Exception:
                 pass
