@@ -104,20 +104,31 @@ Both RED and OPS inherit from `GazelleProvider`, which provides shared functiona
 
 ## 4. Credential Keeper
 
-The credential keeper is a browser automation subsystem that runs alongside the flacfetch API on the GCE VM. It maintains a persistent Chrome session logged into Google, using it to auto-renew both YouTube cookies and Spotify OAuth tokens.
+The credential keeper is a browser automation subsystem that runs alongside the flacfetch API on the server (netcup box `flacup`). It maintains a persistent Chrome session logged into Google, using it to auto-renew both YouTube cookies and Spotify OAuth tokens.
 
 ### Architecture
 
 ```
 credential-keeper (systemd service)
 ├── keeper.py          - Scheduling loop (YouTube every 8h, Spotify every 12h)
+│                        + probe-driven self-heal (relaunch browser on dead export)
 ├── browser.py         - Patchright browser lifecycle (persistent profile, Xvfb)
 ├── google_login.py    - Google account login/session verification
 ├── youtube.py         - Cookie extraction in Netscape format + upload via API
+├── probe.py           - yt-dlp probe validating exported cookies (public video)
 └── spotify.py         - OAuth flow via "Continue with Google" + token exchange
 ```
 
 ### Key Design Decisions
+
+*   **Probe, don't trust the login state**: YouTube can invalidate the exported
+    cookie snapshot server-side within hours while the live browser session still
+    reports "logged in" (2026-08-24 outage: ~30h of zero YouTube search results
+    with a "healthy" keeper). The keeper therefore validates every export — and
+    the canonical cookie file every 30 minutes (`KEEPER_YOUTUBE_PROBE_INTERVAL`)
+    — with a real yt-dlp extraction of a stable public video. A rejected probe
+    triggers browser relaunch → re-login → re-export → re-probe (up to
+    `KEEPER_YOUTUBE_MAX_ATTEMPTS`); alerts fire only when that self-heal fails.
 
 *   **Patchright over stock Playwright**: Google aggressively detects automation. Patchright removes `navigator.webdriver`, patches the chrome object, and bypasses CDP detection.
 *   **Headed mode via Xvfb**: Many bot detectors probe headless-specific behaviors. Running headed on a virtual display avoids this.
