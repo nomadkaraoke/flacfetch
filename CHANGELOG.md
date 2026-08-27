@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.0] - 2026-08-26
+
+### Added
+- **`flacfetch-remote` accepts a direct URL** — paste a YouTube (or any
+  yt-dlp-supported: SoundCloud, Vimeo, Bandcamp, Facebook, TikTok, …) URL as
+  the sole positional argument, or via the new `-u/--url` flag, to download
+  that exact media and skip the artist/title torrent search entirely.
+  Previously `flacfetch-remote <url>` failed with "Artist name is required".
+  YouTube URLs are dispatched via `source_name='YouTube'` (using the extracted
+  video ID so the server's YouTube cookies/downloader path is used); other
+  URLs go via the generic `source_name='URL'`. Uses the existing server
+  `POST /download-by-id` endpoint — no server change required.
+  New `RemoteClient.download_by_id()` client method.
+
 ## [0.26.0] - 2026-08-24
 
 ### Fixed
