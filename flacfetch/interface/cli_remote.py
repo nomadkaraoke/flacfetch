@@ -37,7 +37,6 @@ except ImportError:
 
 from .cli import Colors, format_release_line, print_categorized_releases, print_releases
 
-
 # Matches an 11-character YouTube video ID in the common URL shapes
 # (watch?v=, youtu.be/, shorts/, embed/, live/).
 _YOUTUBE_ID_RE = re.compile(
