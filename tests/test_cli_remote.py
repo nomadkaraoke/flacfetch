@@ -205,6 +205,9 @@ class TestExtractYoutubeId:
         "https://soundcloud.com/artist/track",
         "https://vimeo.com/12345",
         "https://example.com/not-a-video",
+        # A non-YouTube host that merely embeds a YouTube link in a query param
+        # must NOT be treated as a YouTube download (host is validated first).
+        "https://example.test/?next=https://youtube.com/watch?v=G8sU-HHDk8s",
     ])
     def test_returns_none_for_non_youtube(self, url):
         assert _extract_youtube_id(url) is None

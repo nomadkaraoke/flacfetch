@@ -28,6 +28,7 @@ import re
 import sys
 import time
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 try:
     import httpx
@@ -52,7 +53,15 @@ def _looks_like_url(value: str) -> bool:
 
 
 def _extract_youtube_id(url: str) -> Optional[str]:
-    """Extract an 11-char YouTube video ID from a URL, or None if it isn't one."""
+    """Extract an 11-char YouTube video ID from a URL, or None if it isn't one.
+
+    The host is validated first so that a non-YouTube URL which merely embeds a
+    YouTube link in a query parameter (e.g. an ?next= redirect) is not
+    misclassified as a YouTube download.
+    """
+    host = (urlparse(url).hostname or "").lower()
+    if host != "youtu.be" and host != "youtube.com" and not host.endswith(".youtube.com"):
+        return None
     match = _YOUTUBE_ID_RE.search(url)
     return match.group(1) if match else None
 
