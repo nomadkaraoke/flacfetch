@@ -7,6 +7,11 @@ Usage:
     flacfetch-remote -a "Artist" -t "Title" --auto
     flacfetch-remote "Artist" "Title" -o ~/Music
 
+    # Download a specific URL directly (YouTube or any yt-dlp-supported site),
+    # skipping the artist/title search
+    flacfetch-remote https://www.youtube.com/watch?v=VIDEO_ID
+    flacfetch-remote --url https://soundcloud.com/artist/track
+
     # Credential management
     flacfetch-remote check                     # Check remote server credentials
     flacfetch-remote fix                       # Interactive credential fix (local auth → upload → restart)
@@ -19,9 +24,11 @@ Requires environment variables:
 """
 import argparse
 import os
+import re
 import sys
 import time
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 try:
     import httpx
@@ -29,6 +36,33 @@ except ImportError:
     httpx = None
 
 from .cli import Colors, format_release_line, print_categorized_releases, print_releases
+
+# Matches an 11-character YouTube video ID in the common URL shapes
+# (watch?v=, youtu.be/, shorts/, embed/, live/).
+_YOUTUBE_ID_RE = re.compile(
+    r"(?:youtube\.com/(?:watch\?(?:[^ ]*&)?v=|shorts/|embed/|live/)|youtu\.be/)"
+    r"([A-Za-z0-9_-]{11})"
+)
+
+
+def _looks_like_url(value: str) -> bool:
+    """Return True if the string is an http(s) URL."""
+    value = value.strip().lower()
+    return value.startswith("http://") or value.startswith("https://")
+
+
+def _extract_youtube_id(url: str) -> Optional[str]:
+    """Extract an 11-char YouTube video ID from a URL, or None if it isn't one.
+
+    The host is validated first so that a non-YouTube URL which merely embeds a
+    YouTube link in a query parameter (e.g. an ?next= redirect) is not
+    misclassified as a YouTube download.
+    """
+    host = (urlparse(url).hostname or "").lower()
+    if host != "youtu.be" and host != "youtube.com" and not host.endswith(".youtube.com"):
+        return None
+    match = _YOUTUBE_ID_RE.search(url)
+    return match.group(1) if match else None
 
 
 class RemoteClient:
@@ -102,6 +136,42 @@ class RemoteClient:
 
             resp = client.post(
                 f"{self.base_url}/download",
+                headers=self._headers(),
+                json=payload,
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            return resp.json()["download_id"]
+
+    def download_by_id(
+        self,
+        source_name: str,
+        source_id: str,
+        download_url: Optional[str] = None,
+        output_filename: Optional[str] = None,
+        gcs_path: Optional[str] = None,
+    ) -> str:
+        """
+        Start a direct download by source (no prior search) and return download_id.
+
+        Used for pasting a YouTube (or other yt-dlp-supported) URL directly:
+        source_name='YouTube' with the video ID, or source_name='URL' with the URL.
+        """
+        with httpx.Client() as client:
+            payload: Dict[str, Any] = {
+                "source_name": source_name,
+                "source_id": source_id,
+            }
+            if download_url:
+                payload["download_url"] = download_url
+            if output_filename:
+                payload["output_filename"] = output_filename
+            if gcs_path:
+                payload["upload_to_gcs"] = True
+                payload["gcs_path"] = gcs_path
+
+            resp = client.post(
+                f"{self.base_url}/download-by-id",
                 headers=self._headers(),
                 json=payload,
                 timeout=self.timeout,
@@ -342,6 +412,130 @@ def print_progress(status: Dict[str, Any]) -> None:
 
     # Print on same line (carriage return)
     print(f"\r{Colors.BOLD}Progress:{Colors.RESET} [{bar}] {progress:5.1f}% | {status_str}{extra}   ", end="", flush=True)
+
+
+def _finish_download(client: "RemoteClient", download_id: str, args, track_label: str) -> None:
+    """
+    Wait for a started download to complete, fetch the file locally, and print a
+    summary. Shared by the search flow and the direct-URL flow.
+    """
+    # Wait for download with progress
+    try:
+        final_status = client.wait_for_download(
+            download_id,
+            timeout=600,  # 10 minute timeout
+            poll_interval=2.0,
+            progress_callback=print_progress,
+        )
+        print()  # New line after progress bar
+    except RuntimeError as e:
+        print()  # New line after progress bar
+        print(f"\n{Colors.RED}✗ Download failed: {e}{Colors.RESET}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print()
+        print(f"\n{Colors.YELLOW}Download interrupted.{Colors.RESET}")
+        sys.exit(1)
+
+    # Download file locally (unless --no-local and --gcs-path)
+    local_file = None
+    if not args.no_local or not args.gcs_path:
+        # Determine local output path
+        output_dir = args.output or "."
+        os.makedirs(output_dir, exist_ok=True)
+
+        print(f"\n{Colors.BOLD}Fetching file to local machine...{Colors.RESET}")
+
+        def fetch_progress(downloaded: int, total: int):
+            pct = (downloaded / total * 100) if total > 0 else 0
+            bar_width = 30
+            filled = int(bar_width * pct / 100)
+            bar = "█" * filled + "░" * (bar_width - filled)
+            mb_done = downloaded / (1024 * 1024)
+            mb_total = total / (1024 * 1024)
+            print(f"\r{Colors.BOLD}Fetching:{Colors.RESET} [{bar}] {pct:5.1f}% ({mb_done:.1f}/{mb_total:.1f} MB)   ", end="", flush=True)
+
+        try:
+            local_file = client.fetch_file(
+                download_id=download_id,
+                output_path=output_dir,
+                progress_callback=fetch_progress,
+            )
+            print()  # New line after progress bar
+        except Exception as e:
+            print()
+            print(f"\n{Colors.RED}✗ Failed to fetch file: {e}{Colors.RESET}")
+            print(f"{Colors.DIM}File is available on server at: {final_status.get('output_path')}{Colors.RESET}")
+
+    # Success summary
+    print(f"\n{Colors.GREEN}{'='*60}{Colors.RESET}")
+    print(f"{Colors.GREEN}✓ Download Complete!{Colors.RESET}\n")
+    print(f"{Colors.BOLD}Track:{Colors.RESET}     {track_label}")
+    print(f"{Colors.BOLD}Source:{Colors.RESET}    {final_status.get('provider', 'Unknown')}")
+
+    if local_file:
+        # Show local file path
+        try:
+            rel_path = os.path.relpath(local_file)
+            if len(rel_path) < len(local_file):
+                file_display = rel_path
+            else:
+                file_display = local_file
+        except ValueError:
+            file_display = local_file
+        print(f"{Colors.BOLD}Saved to:{Colors.RESET}  {Colors.CYAN}{file_display}{Colors.RESET}")
+
+    if final_status.get("gcs_path"):
+        print(f"{Colors.BOLD}GCS:{Colors.RESET}       {Colors.CYAN}{final_status['gcs_path']}{Colors.RESET}")
+
+    if final_status.get("status") == "seeding":
+        print(f"{Colors.BOLD}Server:{Colors.RESET}    {Colors.GREEN}Seeding{Colors.RESET} (torrent continues seeding on server)")
+
+    print(f"{Colors.GREEN}{'='*60}{Colors.RESET}\n")
+
+
+def _run_direct_url_download(client: "RemoteClient", url: str, args) -> None:
+    """
+    Download a single URL directly (no artist/title search).
+
+    YouTube URLs are dispatched via source_name='YouTube' (using the video ID so
+    the server's YouTube downloader / cookies path is used); any other
+    yt-dlp-supported URL goes via the generic source_name='URL'.
+    """
+    video_id = _extract_youtube_id(url)
+    if video_id:
+        source_name = "YouTube"
+        source_id = video_id
+    else:
+        source_name = "URL"
+        source_id = url
+
+    print(f"\n{Colors.BOLD}Direct download:{Colors.RESET} {Colors.GREEN}{url}{Colors.RESET}")
+    print(f"{Colors.BOLD}Source:{Colors.RESET}    {Colors.CYAN}{source_name}{Colors.RESET}")
+
+    # Optional custom filename (no auto-rename: artist/title are unknown here)
+    output_filename = args.filename or None
+
+    print(f"\n{Colors.BOLD}Starting download...{Colors.RESET}")
+    if args.verbose:
+        print(f"{Colors.DIM}source_name={source_name}, source_id={source_id}{Colors.RESET}")
+
+    try:
+        download_id = client.download_by_id(
+            source_name=source_name,
+            source_id=source_id,
+            download_url=url,
+            output_filename=output_filename,
+            gcs_path=args.gcs_path,
+        )
+    except Exception as e:
+        print(f"\n{Colors.RED}✗ Failed to start download: {e}{Colors.RESET}")
+        sys.exit(1)
+
+    if args.verbose:
+        print(f"{Colors.DIM}Download ID: {download_id}{Colors.RESET}")
+
+    _finish_download(client, download_id, args, track_label=url)
 
 
 # =============================================================================
@@ -1196,6 +1390,10 @@ Examples:
   flacfetch-remote -a "Artist" -t "Title" --auto
       Auto-select best quality
 
+  flacfetch-remote https://www.youtube.com/watch?v=VIDEO_ID
+      Download a specific URL directly (YouTube or any yt-dlp-supported
+      site), skipping the artist/title search
+
   flacfetch-remote "Artist" "Title" --gcs-path uploads/job123/audio/
       Download and upload to GCS
 
@@ -1228,6 +1426,13 @@ Optional:
         dest="title",
         metavar="NAME",
         help="Track/song title (required)"
+    )
+    search_group.add_argument(
+        "-u", "--url",
+        metavar="URL",
+        help="Download a specific URL directly (YouTube or any yt-dlp-supported "
+             "site), skipping the artist/title search. A bare URL passed as the "
+             "sole positional argument is also detected automatically."
     )
     search_group.add_argument(
         "--auto",
@@ -1321,35 +1526,54 @@ Optional:
         print("  export FLACFETCH_API_KEY=your-api-key")
         sys.exit(1)
 
-    # Parse positional arguments
+    # Detect a direct-URL download (YouTube or any yt-dlp-supported site).
+    # Accepted either via the explicit --url flag, or as a bare URL passed as the
+    # sole positional argument (when no artist/title were given).
+    direct_url = None
+    if args.url:
+        direct_url = args.url.strip()
+    elif (
+        args.query
+        and len(args.query) == 1
+        and not args.artist
+        and not args.title
+        and _looks_like_url(args.query[0])
+    ):
+        direct_url = args.query[0].strip()
+
+    # Parse positional arguments (search flow only)
     artist = args.artist
     title = args.title
 
-    if not (artist and title) and args.query:
-        if len(args.query) == 2:
-            if not artist:
-                artist = args.query[0].strip()
-            if not title:
-                title = args.query[1].strip()
-        elif len(args.query) == 1:
-            if not title:
-                title = args.query[0].strip()
-        elif len(args.query) > 2:
-            if not title:
-                title = " ".join(args.query).strip()
+    if not direct_url:
+        if not (artist and title) and args.query:
+            if len(args.query) == 2:
+                if not artist:
+                    artist = args.query[0].strip()
+                if not title:
+                    title = args.query[1].strip()
+            elif len(args.query) == 1:
+                if not title:
+                    title = args.query[0].strip()
+            elif len(args.query) > 2:
+                if not title:
+                    title = " ".join(args.query).strip()
 
-    # Validate required arguments
-    if not title:
-        print(f"\n{Colors.RED}✗ Error: Track title is required{Colors.RESET}\n")
-        print(f"{Colors.BOLD}Usage examples:{Colors.RESET}")
-        print(f'  {Colors.CYAN}flacfetch-remote "Artist" "Title"{Colors.RESET}')
-        print(f'  {Colors.CYAN}flacfetch-remote -a "Artist" -t "Title"{Colors.RESET}')
-        sys.exit(1)
+        # Validate required arguments
+        if not title:
+            print(f"\n{Colors.RED}✗ Error: Track title is required{Colors.RESET}\n")
+            print(f"{Colors.BOLD}Usage examples:{Colors.RESET}")
+            print(f'  {Colors.CYAN}flacfetch-remote "Artist" "Title"{Colors.RESET}')
+            print(f'  {Colors.CYAN}flacfetch-remote -a "Artist" -t "Title"{Colors.RESET}')
+            print(f'  {Colors.CYAN}flacfetch-remote https://www.youtube.com/watch?v=VIDEO_ID{Colors.RESET}')
+            sys.exit(1)
 
-    if not artist:
-        print(f"\n{Colors.RED}✗ Error: Artist name is required for remote downloads{Colors.RESET}")
-        print("\nRemote mode requires both artist and title for torrent searches.")
-        sys.exit(1)
+        if not artist:
+            print(f"\n{Colors.RED}✗ Error: Artist name is required for remote downloads{Colors.RESET}")
+            print("\nRemote mode requires both artist and title for torrent searches.")
+            print(f"{Colors.DIM}(To download a specific URL instead, pass it directly:"
+                  f" flacfetch-remote <url>){Colors.RESET}")
+            sys.exit(1)
 
     # Create client
     client = RemoteClient(api_url, api_key, timeout=args.timeout)
@@ -1369,6 +1593,12 @@ Optional:
         print(f"\n{Colors.RED}✗ Error: Cannot connect to flacfetch API{Colors.RESET}")
         print(f"{Colors.RED}  {api_url}: {e}{Colors.RESET}")
         sys.exit(1)
+
+    # Direct-URL download: skip search entirely.
+    if direct_url:
+        print(f"{Colors.BOLD}Server:{Colors.RESET}    {Colors.CYAN}{api_url}{Colors.RESET}")
+        _run_direct_url_download(client, direct_url, args)
+        return
 
     # Search
     print(f"\n{Colors.BOLD}Searching:{Colors.RESET} {Colors.GREEN}{artist}{Colors.RESET} - {Colors.GREEN}{title}{Colors.RESET}")
@@ -1595,79 +1825,7 @@ Optional:
     if args.verbose:
         print(f"{Colors.DIM}Download ID: {download_id}{Colors.RESET}")
 
-    # Wait for download with progress
-    try:
-        final_status = client.wait_for_download(
-            download_id,
-            timeout=600,  # 10 minute timeout
-            poll_interval=2.0,
-            progress_callback=print_progress,
-        )
-        print()  # New line after progress bar
-    except RuntimeError as e:
-        print()  # New line after progress bar
-        print(f"\n{Colors.RED}✗ Download failed: {e}{Colors.RESET}")
-        sys.exit(1)
-    except KeyboardInterrupt:
-        print()
-        print(f"\n{Colors.YELLOW}Download interrupted.{Colors.RESET}")
-        sys.exit(1)
-
-    # Download file locally (unless --no-local and --gcs-path)
-    local_file = None
-    if not args.no_local or not args.gcs_path:
-        # Determine local output path
-        output_dir = args.output or "."
-        os.makedirs(output_dir, exist_ok=True)
-
-        print(f"\n{Colors.BOLD}Fetching file to local machine...{Colors.RESET}")
-
-        def fetch_progress(downloaded: int, total: int):
-            pct = (downloaded / total * 100) if total > 0 else 0
-            bar_width = 30
-            filled = int(bar_width * pct / 100)
-            bar = "█" * filled + "░" * (bar_width - filled)
-            mb_done = downloaded / (1024 * 1024)
-            mb_total = total / (1024 * 1024)
-            print(f"\r{Colors.BOLD}Fetching:{Colors.RESET} [{bar}] {pct:5.1f}% ({mb_done:.1f}/{mb_total:.1f} MB)   ", end="", flush=True)
-
-        try:
-            local_file = client.fetch_file(
-                download_id=download_id,
-                output_path=output_dir,
-                progress_callback=fetch_progress,
-            )
-            print()  # New line after progress bar
-        except Exception as e:
-            print()
-            print(f"\n{Colors.RED}✗ Failed to fetch file: {e}{Colors.RESET}")
-            print(f"{Colors.DIM}File is available on server at: {final_status.get('output_path')}{Colors.RESET}")
-
-    # Success summary
-    print(f"\n{Colors.GREEN}{'='*60}{Colors.RESET}")
-    print(f"{Colors.GREEN}✓ Download Complete!{Colors.RESET}\n")
-    print(f"{Colors.BOLD}Track:{Colors.RESET}     {artist} - {title}")
-    print(f"{Colors.BOLD}Source:{Colors.RESET}    {final_status.get('provider', 'Unknown')}")
-
-    if local_file:
-        # Show local file path
-        try:
-            rel_path = os.path.relpath(local_file)
-            if len(rel_path) < len(local_file):
-                file_display = rel_path
-            else:
-                file_display = local_file
-        except ValueError:
-            file_display = local_file
-        print(f"{Colors.BOLD}Saved to:{Colors.RESET}  {Colors.CYAN}{file_display}{Colors.RESET}")
-
-    if final_status.get("gcs_path"):
-        print(f"{Colors.BOLD}GCS:{Colors.RESET}       {Colors.CYAN}{final_status['gcs_path']}{Colors.RESET}")
-
-    if final_status.get("status") == "seeding":
-        print(f"{Colors.BOLD}Server:{Colors.RESET}    {Colors.GREEN}Seeding{Colors.RESET} (torrent continues seeding on server)")
-
-    print(f"{Colors.GREEN}{'='*60}{Colors.RESET}\n")
+    _finish_download(client, download_id, args, track_label=f"{artist} - {title}")
 
 
 if __name__ == "__main__":
