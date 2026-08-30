@@ -224,12 +224,15 @@ class DownloadManager:
             # Add RED provider if configured (requires both key and URL)
             red_key = os.environ.get("RED_API_KEY")
             red_url = os.environ.get("RED_API_URL")
+            red_use_token = os.environ.get("RED_USE_FL_TOKEN", "false").lower() in ("true", "1", "yes")
             if red_key and red_url:
                 try:
                     from flacfetch.downloaders.torrent import TorrentDownloader
                     from flacfetch.providers.red import REDProvider
 
-                    self._fetch_manager.add_provider(REDProvider(api_key=red_key, base_url=red_url))
+                    self._fetch_manager.add_provider(REDProvider(api_key=red_key, base_url=red_url, use_fl_token=red_use_token))
+                    if red_use_token:
+                        logger.info("RED Freeleech token spending ENABLED (RED_USE_FL_TOKEN)")
                     self._fetch_manager.register_downloader(
                         "RED",
                         TorrentDownloader(keep_seeding=self.keep_seeding)
@@ -241,12 +244,15 @@ class DownloadManager:
             # Add OPS provider if configured (requires both key and URL)
             ops_key = os.environ.get("OPS_API_KEY")
             ops_url = os.environ.get("OPS_API_URL")
+            ops_use_token = os.environ.get("OPS_USE_FL_TOKEN", "false").lower() in ("true", "1", "yes")
             if ops_key and ops_url:
                 try:
                     from flacfetch.downloaders.torrent import TorrentDownloader
                     from flacfetch.providers.ops import OPSProvider
 
-                    self._fetch_manager.add_provider(OPSProvider(api_key=ops_key, base_url=ops_url))
+                    self._fetch_manager.add_provider(OPSProvider(api_key=ops_key, base_url=ops_url, use_fl_token=ops_use_token))
+                    if ops_use_token:
+                        logger.info("OPS Freeleech token spending ENABLED (OPS_USE_FL_TOKEN)")
                     self._fetch_manager.register_downloader(
                         "OPS",
                         TorrentDownloader(keep_seeding=self.keep_seeding)

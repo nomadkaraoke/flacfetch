@@ -12,16 +12,18 @@ class OPSProvider(GazelleProvider):
     for security reasons (to avoid hardcoding tracker URLs in source code).
     """
 
-    def __init__(self, api_key: str, base_url: str):
+    def __init__(self, api_key: str, base_url: str, use_fl_token: bool = False):
         """Initialize the OPS provider.
 
         Args:
             api_key: API key for authentication
             base_url: Base URL of the tracker API (e.g., from OPS_API_URL env var)
+            use_fl_token: When True, spend a Freeleech token on eligible downloads
+                (from OPS_USE_FL_TOKEN env var). Default False.
         """
         if not base_url:
             raise ValueError("base_url is required for OPSProvider. Set OPS_API_URL environment variable.")
-        super().__init__(api_key, base_url, cache_subdir="ops")
+        super().__init__(api_key, base_url, cache_subdir="ops", use_fl_token=use_fl_token)
 
     @property
     def name(self) -> str:

@@ -238,8 +238,10 @@ async def debug_providers():
         "env_vars": {
             "RED_API_KEY": bool(os.environ.get("RED_API_KEY")),
             "RED_API_URL": bool(os.environ.get("RED_API_URL")),
+            "RED_USE_FL_TOKEN": os.environ.get("RED_USE_FL_TOKEN", "false").lower() in ("true", "1", "yes"),
             "OPS_API_KEY": bool(os.environ.get("OPS_API_KEY")),
             "OPS_API_URL": bool(os.environ.get("OPS_API_URL")),
+            "OPS_USE_FL_TOKEN": os.environ.get("OPS_USE_FL_TOKEN", "false").lower() in ("true", "1", "yes"),
             "SPOTIPY_CLIENT_ID": bool(os.environ.get("SPOTIPY_CLIENT_ID")),
             "SPOTIPY_CLIENT_SECRET": bool(os.environ.get("SPOTIPY_CLIENT_SECRET")),
         },

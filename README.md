@@ -125,6 +125,31 @@ export OPS_API_URL="your_tracker_url_here"
 flacfetch "..." --ops-key "your_key" --ops-url "your_url"
 ```
 
+**Freeleech Tokens** (Optional)
+
+Gazelle trackers (RED/OPS) let you spend a **Freeleech (FL) token** to download a
+torrent without it counting against your ratio. flacfetch can spend tokens
+automatically on eligible downloads:
+
+```bash
+export RED_USE_FL_TOKEN=true      # or: flacfetch "..." --red-use-token
+export OPS_USE_FL_TOKEN=true      # or: flacfetch "..." --ops-use-token
+```
+
+Behaviour (opt-in, **off by default**):
+- Spends a token only when the tracker reports one is spendable for that torrent
+  (its `canUseToken` flag — which is only true when you currently hold a token,
+  the torrent is ≤ 5 GB, and it isn't already freeleech). This means tokens are
+  used automatically whenever available and it simply stops once you run out.
+- Already-free torrents are never charged a token, and cached `.torrent` files are
+  reused without spending one.
+- If a token spend fails for any reason, flacfetch transparently falls back to a
+  normal (ratio-counted) download — a failed token never blocks a download.
+
+> Note: there is no RED API endpoint that returns your raw token *count*; the
+> per-torrent `canUseToken` flag from search results is the authoritative
+> "is a token spendable here" signal, and is what drives this behaviour.
+
 **Spotify Configuration** (Optional - requires Premium account)
 
 Spotify provides CD-quality audio (44.1kHz/16-bit) captured via librespot and converted to FLAC. This uses the official Spotify Web API for authentication (OAuth) and librespot for audio capture.

@@ -1320,8 +1320,10 @@ Examples:
 Environment Variables:
   RED_API_KEY                  API key for RED (lossless FLAC source)
   RED_API_URL                  Base URL for RED API (required if using RED)
+  RED_USE_FL_TOKEN             Spend a RED Freeleech token on eligible downloads (true/false)
   OPS_API_KEY                  API key for OPS (lossless FLAC source)
   OPS_API_URL                  Base URL for OPS API (required if using OPS)
+  OPS_USE_FL_TOKEN             Spend an OPS Freeleech token on eligible downloads (true/false)
   SPOTIPY_CLIENT_ID            Spotify app client ID
   SPOTIPY_CLIENT_SECRET        Spotify app client secret
   SPOTIPY_REDIRECT_URI         OAuth redirect URI (http://127.0.0.1:8888/callback)
@@ -1419,6 +1421,16 @@ Spotify Setup (requires Premium account):
         help="OPS API base URL (or use OPS_API_URL env var)"
     )
     provider_group.add_argument(
+        "--red-use-token",
+        action="store_true",
+        help="Spend a RED Freeleech token on eligible downloads (or use RED_USE_FL_TOKEN env var)"
+    )
+    provider_group.add_argument(
+        "--ops-use-token",
+        action="store_true",
+        help="Spend an OPS Freeleech token on eligible downloads (or use OPS_USE_FL_TOKEN env var)"
+    )
+    provider_group.add_argument(
         "--no-spotify",
         action="store_true",
         help="Disable Spotify provider even if configured"
@@ -1488,9 +1500,10 @@ Spotify Setup (requires Premium account):
     # Register RED provider
     red_key = args.red_key or os.environ.get("RED_API_KEY")
     red_url = args.red_url or os.environ.get("RED_API_URL")
+    red_use_token = args.red_use_token or os.environ.get("RED_USE_FL_TOKEN", "false").lower() in ("true", "1", "yes")
     if red_key and red_url:
         if artist:
-            rp = REDProvider(api_key=red_key, base_url=red_url)
+            rp = REDProvider(api_key=red_key, base_url=red_url, use_fl_token=red_use_token)
             rp.search_limit = search_limit
             rp.early_termination = use_early_termination
             manager.add_provider(rp)
@@ -1509,9 +1522,10 @@ Spotify Setup (requires Premium account):
     # Register OPS provider
     ops_key = args.ops_key or os.environ.get("OPS_API_KEY")
     ops_url = args.ops_url or os.environ.get("OPS_API_URL")
+    ops_use_token = args.ops_use_token or os.environ.get("OPS_USE_FL_TOKEN", "false").lower() in ("true", "1", "yes")
     if ops_key and ops_url:
         if artist:
-            ops = OPSProvider(api_key=ops_key, base_url=ops_url)
+            ops = OPSProvider(api_key=ops_key, base_url=ops_url, use_fl_token=ops_use_token)
             ops.search_limit = search_limit
             ops.early_termination = use_early_termination
             manager.add_provider(ops)

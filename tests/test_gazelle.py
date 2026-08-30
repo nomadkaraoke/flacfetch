@@ -1,5 +1,7 @@
 """Tests for GazelleProvider base class - Sphinx query sanitization and shared functionality."""
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from flacfetch.core.models import AudioFormat, MediaSource
@@ -472,3 +474,150 @@ class TestParseQuality:
         assert quality.media == MediaSource.OTHER
         assert quality.bit_depth is None
         assert quality.bitrate is None
+
+
+class TestFreeleechTokens:
+    """Test Freeleech (FL) token spending behavior."""
+
+    @pytest.fixture
+    def provider(self):
+        """Token-enabled concrete GazelleProvider."""
+        return ConcreteGazelleProvider(
+            api_key="test",
+            base_url="https://test.example",
+            cache_subdir="test",
+            use_fl_token=True,
+        )
+
+    @pytest.fixture
+    def no_token_provider(self):
+        """Default provider (token spending off)."""
+        return ConcreteGazelleProvider(
+            api_key="test",
+            base_url="https://test.example",
+            cache_subdir="test",
+        )
+
+    def _release(self, **kwargs):
+        from flacfetch.core.models import AudioFormat, Quality, Release
+        defaults = dict(
+            title="Album",
+            artist="Artist",
+            quality=Quality(format=AudioFormat.FLAC),
+            source_name="TEST",
+            download_url="https://test.example/ajax.php?action=download&id=42",
+            source_id="42",
+        )
+        defaults.update(kwargs)
+        return Release(**defaults)
+
+    # ---- default off -------------------------------------------------------
+
+    def test_use_fl_token_defaults_off(self, no_token_provider):
+        assert no_token_provider.use_fl_token is False
+
+    def test_use_fl_token_flag_on(self, provider):
+        assert provider.use_fl_token is True
+
+    # ---- eligibility -------------------------------------------------------
+
+    def test_eligible_when_can_use_token_true(self, provider):
+        assert provider._is_token_eligible(self._release(can_use_token=True)) is True
+
+    def test_ineligible_when_can_use_token_false(self, provider):
+        # Server authoritatively says no token can be spent (e.g. none left).
+        assert provider._is_token_eligible(self._release(can_use_token=False)) is False
+
+    def test_ineligible_when_already_freeleech(self, provider):
+        # canUseToken unknown -> fall back to heuristic.
+        assert provider._is_token_eligible(self._release(is_freeleech=True)) is False
+
+    def test_ineligible_when_over_5gb(self, provider):
+        big = provider.FL_TOKEN_MAX_BYTES + 1
+        assert provider._is_token_eligible(self._release(size_bytes=big)) is False
+
+    def test_eligible_when_small_and_not_free(self, provider):
+        small = 300 * 1024 * 1024
+        assert provider._is_token_eligible(self._release(size_bytes=small)) is True
+
+    def test_can_use_token_overrides_size_heuristic(self, provider):
+        # Explicit server signal wins over the local size guess.
+        r = self._release(can_use_token=True, size_bytes=provider.FL_TOKEN_MAX_BYTES + 1)
+        assert provider._is_token_eligible(r) is True
+
+    # ---- token URL + fallback ---------------------------------------------
+
+    def test_fetch_with_token_appends_usetoken(self, provider):
+        provider._fetch_torrent_from_url = MagicMock(return_value=b"d...torrent")
+        result = provider._fetch_with_optional_token(
+            "https://test.example/ajax.php?action=download&id=42", "42", use_token=True
+        )
+        assert result == b"d...torrent"
+        called_url = provider._fetch_torrent_from_url.call_args[0][0]
+        assert "usetoken=1" in called_url
+
+    def test_fetch_without_token_has_no_usetoken(self, provider):
+        provider._fetch_torrent_from_url = MagicMock(return_value=b"d...torrent")
+        provider._fetch_with_optional_token(
+            "https://test.example/ajax.php?action=download&id=42", "42", use_token=False
+        )
+        called_url = provider._fetch_torrent_from_url.call_args[0][0]
+        assert "usetoken" not in called_url
+
+    def test_token_failure_falls_back_to_normal_download(self, provider):
+        # First call (with token) fails, second (without) succeeds.
+        provider._fetch_torrent_from_url = MagicMock(side_effect=[None, b"d...torrent"])
+        result = provider._fetch_with_optional_token(
+            "https://test.example/ajax.php?action=download&id=42", "42", use_token=True
+        )
+        assert result == b"d...torrent"
+        assert provider._fetch_torrent_from_url.call_count == 2
+        first_url = provider._fetch_torrent_from_url.call_args_list[0][0][0]
+        second_url = provider._fetch_torrent_from_url.call_args_list[1][0][0]
+        assert "usetoken=1" in first_url
+        assert "usetoken" not in second_url
+
+    # ---- fetch_artifact drives eligibility --------------------------------
+
+    def test_fetch_artifact_spends_token_when_eligible(self, provider):
+        provider.cache_dir = None  # skip cache path
+        provider._fetch_torrent_from_url = MagicMock(return_value=b"d...torrent")
+        provider.fetch_artifact(self._release(can_use_token=True))
+        called_url = provider._fetch_torrent_from_url.call_args[0][0]
+        assert "usetoken=1" in called_url
+
+    def test_fetch_artifact_no_token_when_flag_off(self, no_token_provider):
+        no_token_provider.cache_dir = None
+        no_token_provider._fetch_torrent_from_url = MagicMock(return_value=b"d...torrent")
+        no_token_provider.fetch_artifact(self._release(can_use_token=True))
+        called_url = no_token_provider._fetch_torrent_from_url.call_args[0][0]
+        assert "usetoken" not in called_url
+
+    def test_fetch_artifact_no_token_when_ineligible(self, provider):
+        provider.cache_dir = None
+        provider._fetch_torrent_from_url = MagicMock(return_value=b"d...torrent")
+        provider.fetch_artifact(self._release(can_use_token=False))
+        called_url = provider._fetch_torrent_from_url.call_args[0][0]
+        assert "usetoken" not in called_url
+
+    # ---- content validation guards the cache ------------------------------
+
+    def test_json_error_body_not_treated_as_torrent(self, provider):
+        provider.cache_dir = None
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.headers = {"Content-Type": "application/json"}
+        resp.content = b'{"status":"failure","error":"You do not have any freeleech tokens left."}'
+        resp.json.return_value = {"status": "failure", "error": "You do not have any freeleech tokens left."}
+        provider.session.get = MagicMock(return_value=resp)
+        assert provider._fetch_torrent_from_url("https://test.example/ajax.php?action=download&id=42&usetoken=1", "42") is None
+
+    def test_valid_bencoded_torrent_accepted(self, provider):
+        provider.cache_dir = None
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.headers = {"Content-Type": "application/x-bittorrent"}
+        resp.content = b"d8:announce" + b"x" * 2000  # bencoded dict, > 1000 bytes
+        provider.session.get = MagicMock(return_value=resp)
+        result = provider._fetch_torrent_from_url("https://test.example/ajax.php?action=download&id=42", "42")
+        assert result == resp.content

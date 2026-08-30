@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.0] - 2026-08-29
+
+### Added
+- **Freeleech (FL) token spending on RED/OPS** — opt-in via `RED_USE_FL_TOKEN` /
+  `OPS_USE_FL_TOKEN` env vars (or `--red-use-token` / `--ops-use-token` CLI flags),
+  off by default. When enabled, flacfetch spends a Freeleech token on eligible
+  downloads (`ajax.php?action=download&id=<id>&usetoken=1`) so the download
+  doesn't count against ratio.
+  - **Driven by the tracker's `canUseToken` flag** (captured from the `browse`
+    search response, which the code previously discarded). It's true only when
+    the account currently holds a spendable token for that torrent (≤ 5 GB, not
+    already free), so tokens are used automatically whenever available and it
+    stops once they run out. There is no RED API endpoint that returns a raw
+    token *count* — `canUseToken` is the authoritative signal.
+  - Already-free torrents are never charged a token; cached `.torrent` files are
+    reused without spending one.
+  - **Graceful fallback:** a failed token spend transparently retries as a normal
+    (ratio-counted) download, so a token failure never blocks a download.
+  - Hardened `.torrent` fetch to validate the response is bencoded before caching,
+    so a JSON error body (e.g. "no tokens left") is never cached as a bogus torrent.
+
 ## [0.27.0] - 2026-08-26
 
 ### Added
