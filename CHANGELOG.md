@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.1] - 2026-08-30
+
+### Fixed
+- **Freeleech tokens were never spent when the `.torrent` was already cached.**
+  v0.28.0 only sent `usetoken=1` on a `.torrent` cache *miss*, but the local
+  `.torrent` cache is unrelated to freeleech: a token is registered server-side
+  by calling `action=download&id=X&usetoken=1`, and the audio *data* is
+  re-downloaded fresh each time (the cache only stores the tiny `.torrent`
+  file, not the data). In practice every karaoke-gen download is a `.torrent`
+  cache hit via `/download-by-id`, so **zero tokens were ever spent**.
+  - The token is now registered **before** the cache short-circuit, so eligible
+    downloads spend a token even when the `.torrent` is cached; the cached
+    `.torrent` is still reused for the actual data fetch.
+  - **Local 7-day token ledger** (`<id>.tokened` marker files) prevents spending
+    a second token on a torrent that's already personal-freeleech (matches RED's
+    7-day freeleech window), including a lock so concurrent album-batch downloads
+    of the same torrent can't each spend one.
+  - Token spends are paced ≥ 1s apart (RED rejects faster spends); pacing only
+    trails successful spends, so an exhausted-token steady state adds no delay.
+
 ## [0.28.0] - 2026-08-29
 
 ### Added
