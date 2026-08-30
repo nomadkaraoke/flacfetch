@@ -116,6 +116,10 @@ class Release:
     release_type: Optional[str] = None # e.g. "Album", "Single"
     seeders: Optional[int] = None
 
+    # Private-tracker freeleech info (RED/OPS)
+    is_freeleech: bool = False  # Torrent is already free (no ratio hit) -- don't spend a token on it
+    can_use_token: Optional[bool] = None  # Server says a Freeleech token can be spent (has tokens, <=5GB, not already free)
+
     # YouTube / Streaming Metadata
     channel: Optional[str] = None
     view_count: Optional[int] = None
@@ -153,6 +157,8 @@ class Release:
             "catalogue_number": self.catalogue_number,
             "release_type": self.release_type,
             "seeders": self.seeders,
+            "is_freeleech": self.is_freeleech,
+            "can_use_token": self.can_use_token,
             "channel": self.channel,
             "view_count": self.view_count,
             "duration_seconds": self.duration_seconds,
@@ -214,6 +220,8 @@ class Release:
             catalogue_number=data.get("catalogue_number"),
             release_type=data.get("release_type"),
             seeders=data.get("seeders"),
+            is_freeleech=data.get("is_freeleech", False),
+            can_use_token=data.get("can_use_token"),
             channel=data.get("channel"),
             view_count=data.get("view_count"),
             duration_seconds=data.get("duration_seconds"),

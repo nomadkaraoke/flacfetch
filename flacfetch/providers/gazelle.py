@@ -36,19 +36,27 @@ class GazelleProvider(Provider):
     - Torrent artifact fetching with caching
     """
 
-    def __init__(self, api_key: str, base_url: str, cache_subdir: str):
+    # Freeleech (FL) tokens can only be spent on torrents up to 5 GB.
+    # See the RED wiki: a token makes the whole torrent personal-freeleech.
+    FL_TOKEN_MAX_BYTES = 5 * 1024 ** 3
+
+    def __init__(self, api_key: str, base_url: str, cache_subdir: str, use_fl_token: bool = False):
         """Initialize the Gazelle provider.
 
         Args:
             api_key: API key for authentication
             base_url: Base URL of the tracker API
             cache_subdir: Subdirectory name for cache (e.g., "red" or "ops")
+            use_fl_token: When True, spend a Freeleech token on eligible downloads
+                (torrent <= 5 GB and not already freeleech). Falls back to a normal
+                download if the token cannot be spent. Default False (opt-in).
         """
         if not base_url:
             raise ValueError("base_url is required. Set the appropriate environment variable.")
 
         self.api_key = api_key
         self.base_url = base_url.rstrip('/')
+        self.use_fl_token = use_fl_token
         self.session = requests.Session()
         self.session.headers.update({"Authorization": self.api_key})
         self.search_limit = 10
@@ -264,6 +272,21 @@ class GazelleProvider(Provider):
                         resp = self.session.get(redirect_url, timeout=10)
 
                 if resp.status_code == 200:
+                    # The download endpoint returns raw bencoded .torrent bytes on
+                    # success (content-type application/x-bittorrent) but a JSON
+                    # error body on failure (e.g. a token that can't be spent, or
+                    # "already downloaded"). A JSON body is still HTTP 200, so guard
+                    # against caching/returning it as a bogus torrent.
+                    content_type = resp.headers.get("Content-Type", "").lower()
+                    is_torrent = resp.content[:1] == b"d" and "json" not in content_type
+                    if not is_torrent:
+                        try:
+                            err = resp.json()
+                            logger.warning(f"{self.name} download returned an error instead of a torrent: {err.get('error', err)}")
+                        except ValueError:
+                            logger.warning(f"{self.name} download returned non-torrent content ({len(resp.content)} bytes): {resp.content[:100]}")
+                        return None
+
                     logger.debug(f"Artifact fetched successfully ({len(resp.content)} bytes)")
                     if len(resp.content) < 1000:
                         logger.warning(f"Artifact seems too small ({len(resp.content)} bytes). Content sample: {resp.content[:100]}")
@@ -297,11 +320,72 @@ class GazelleProvider(Provider):
 
         return None
 
-    def fetch_artifact_by_id(self, source_id: str) -> Optional[bytes]:
+    def _fetch_with_optional_token(self, base_url: str, torrent_id: Optional[str], use_token: bool) -> Optional[bytes]:
+        """Fetch a torrent, optionally spending a Freeleech token.
+
+        When ``use_token`` is True, first attempt the download with ``usetoken=1``.
+        If that fails for any reason (torrent too large, no tokens left, server
+        error), transparently fall back to a normal (ratio-counted) download so a
+        failed token spend never blocks the download.
+
+        Args:
+            base_url: Download URL without the ``usetoken`` parameter
+            torrent_id: Torrent ID for caching/logging (may be None)
+            use_token: Whether to attempt spending a Freeleech token
+
+        Returns:
+            Torrent file contents as bytes, or None on failure
+        """
+        if use_token:
+            sep = "&" if "?" in base_url else "?"
+            token_url = f"{base_url}{sep}usetoken=1"
+            logger.info(f"{self.name}: attempting Freeleech token download for torrent {torrent_id}")
+            content = self._fetch_torrent_from_url(token_url, torrent_id)
+            if content:
+                logger.info(f"{self.name}: spent a Freeleech token on torrent {torrent_id}")
+                return content
+            logger.warning(f"{self.name}: Freeleech token download failed for torrent {torrent_id}; retrying without token")
+
+        return self._fetch_torrent_from_url(base_url, torrent_id)
+
+    def _is_token_eligible(self, release: Release) -> bool:
+        """Decide whether it's worth spending a Freeleech token on a release.
+
+        Prefers the server's ``canUseToken`` flag (captured from the browse
+        response), which is true only when the account currently holds a
+        spendable token for that torrent -- this is what lets us automatically
+        use tokens whenever any are available and stop once they run out.
+
+        When ``canUseToken`` is unknown (e.g. the direct torrent-ID path), falls
+        back to a local heuristic: skip already-free torrents and torrents over
+        the 5 GB token limit. The attempt-and-fallback in _fetch_with_optional_token
+        remains the final safety net.
+        """
+        if release.can_use_token is not None:
+            if not release.can_use_token:
+                logger.debug(f"{self.name}: server reports no spendable token for this torrent")
+            return release.can_use_token
+
+        if getattr(release, "is_freeleech", False):
+            logger.debug(f"{self.name}: torrent already freeleech; not spending a token")
+            return False
+        if release.size_bytes and release.size_bytes > self.FL_TOKEN_MAX_BYTES:
+            logger.info(
+                f"{self.name}: torrent size {release.size_bytes} bytes exceeds the "
+                f"{self.FL_TOKEN_MAX_BYTES}-byte FL token limit; not spending a token"
+            )
+            return False
+        return True
+
+    def fetch_artifact_by_id(self, source_id: str, use_token: Optional[bool] = None) -> Optional[bytes]:
         """Fetch .torrent file by torrent ID directly.
 
         Args:
             source_id: The torrent ID
+            use_token: Whether to spend a Freeleech token. Defaults to the
+                provider-level ``use_fl_token`` setting when None. No torrent size
+                is known via this path, so eligibility relies on the graceful
+                fallback in ``_fetch_with_optional_token``.
 
         Returns:
             Torrent file contents as bytes, or None on failure
@@ -309,7 +393,11 @@ class GazelleProvider(Provider):
         if not source_id:
             return None
 
-        # Check Cache first
+        if use_token is None:
+            use_token = self.use_fl_token
+
+        # Check Cache first (a cached torrent means we already have it -- never
+        # spend a token to re-fetch something on disk).
         if self.cache_dir:
             cache_path = self.cache_dir / f"{source_id}.torrent"
             if cache_path.exists():
@@ -324,7 +412,7 @@ class GazelleProvider(Provider):
 
         # Construct download URL from torrent ID
         url = f"{self.base_url}/ajax.php?action=download&id={source_id}"
-        return self._fetch_torrent_from_url(url, source_id)
+        return self._fetch_with_optional_token(url, source_id, use_token)
 
     def fetch_artifact(self, release: Release) -> Optional[bytes]:
         """Fetch .torrent file for a release.
@@ -338,6 +426,11 @@ class GazelleProvider(Provider):
         if not release.download_url:
             return None
 
+        # Decide whether to spend a Freeleech token on this specific release.
+        # Unlike fetch_artifact_by_id, we have the torrent size and freeleech
+        # status here, so we can avoid wasting tokens on ineligible torrents.
+        use_token = self.use_fl_token and self._is_token_eligible(release)
+
         # Extract Torrent ID for caching
         torrent_id = None
         try:
@@ -348,10 +441,10 @@ class GazelleProvider(Provider):
 
         # Check Cache first (reuse fetch_artifact_by_id if we have a torrent_id)
         if torrent_id:
-            return self.fetch_artifact_by_id(torrent_id)
+            return self.fetch_artifact_by_id(torrent_id, use_token=use_token)
 
         # Fallback: fetch directly from URL without caching
-        return self._fetch_torrent_from_url(release.download_url)
+        return self._fetch_with_optional_token(release.download_url, None, use_token)
 
     @abstractmethod
     def search(self, query: TrackQuery) -> list[Release]:
@@ -365,16 +458,25 @@ class GazelleProvider(Provider):
         """
         pass
 
-    def _fetch_group_details(self, group_id: int, track_title: str) -> list[Release]:
+    def _fetch_group_details(
+        self,
+        group_id: int,
+        track_title: str,
+        token_eligibility: Optional[dict[int, bool]] = None,
+    ) -> list[Release]:
         """Fetch detailed torrent information for a group.
 
         Args:
             group_id: The group ID to fetch details for
             track_title: The track title to match against files
+            token_eligibility: Optional map of {torrentId: canUseToken} captured
+                from the browse response. The torrentgroup endpoint does not
+                return canUseToken, so we carry it over from the search results.
 
         Returns:
             List of releases matching the track title
         """
+        token_eligibility = token_eligibility or {}
         url = f"{self.base_url}/ajax.php"
         params = {"action": "torrentgroup", "id": group_id}
 
@@ -440,6 +542,20 @@ class GazelleProvider(Provider):
 
                 torrent_id = str(torrent.get("id", ""))
 
+                # Already-free torrents don't need (and shouldn't waste) a token.
+                is_freeleech = bool(
+                    torrent.get("isFreeleech")
+                    or torrent.get("isPersonalFreeleech")
+                    or torrent.get("isNeutralLeech")
+                    or torrent.get("isFreeload")
+                    or torrent.get("freeTorrent")
+                )
+
+                # canUseToken comes from the browse response (torrentgroup omits
+                # it). It's the authoritative "a token can be spent here" signal:
+                # true only when the account currently has a spendable token.
+                can_use_token = token_eligibility.get(torrent.get("id"))
+
                 r = Release(
                     title=group_name,
                     artist=artist,
@@ -453,6 +569,8 @@ class GazelleProvider(Provider):
                     catalogue_number=cat_num,
                     release_type=release_type_str,
                     seeders=torrent.get("seeders", 0),
+                    is_freeleech=is_freeleech,
+                    can_use_token=can_use_token,
                     target_file=target_file,
                     target_file_size=target_size,
                     match_score=match_score,
@@ -511,14 +629,20 @@ class GazelleProvider(Provider):
             browse_results = data.get("response", {}).get("results", [])
             logger.debug(f"Found {len(browse_results)} groups in {self.name} response")
 
-            # Extract ordered group IDs
+            # Extract ordered group IDs, and capture per-torrent canUseToken from
+            # the browse response (the torrentgroup endpoint doesn't return it).
             ordered_group_ids = []
             seen = set()
+            token_eligibility: dict[int, bool] = {}
             for g in browse_results:
                 gid = g.get("groupId")
                 if gid and gid not in seen:
                     ordered_group_ids.append(gid)
                     seen.add(gid)
+                for t in g.get("torrents", []):
+                    tid = t.get("torrentId")
+                    if tid is not None and "canUseToken" in t:
+                        token_eligibility[tid] = bool(t.get("canUseToken"))
 
             limited_group_ids = ordered_group_ids[:self.search_limit]
 
@@ -535,7 +659,7 @@ class GazelleProvider(Provider):
                 # Rate limit: sleep before each request
                 time.sleep(1.1)
 
-                group_releases = self._fetch_group_details(gid, query.title)
+                group_releases = self._fetch_group_details(gid, query.title, token_eligibility)
                 releases.extend(group_releases)
                 groups_fetched += 1
 

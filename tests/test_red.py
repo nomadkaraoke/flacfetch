@@ -189,3 +189,42 @@ def test_red_provider_name():
     """Test that REDProvider returns 'RED' as its name."""
     provider = REDProvider(api_key="test", base_url=MOCK_BASE_URL)
     assert provider.name == "RED"
+
+
+def test_red_captures_can_use_token_from_browse():
+    """canUseToken from the browse response should land on matching releases."""
+    provider = REDProvider(api_key="test", base_url=MOCK_BASE_URL)
+    provider.session.get = MagicMock()
+
+    # Browse response carries per-torrent canUseToken (torrentgroup does not).
+    browse_resp = MagicMock()
+    browse_resp.status_code = 200
+    browse_resp.json.return_value = {
+        "status": "success",
+        "response": {
+            "results": [{
+                "groupId": 123,
+                "torrents": [
+                    {"torrentId": 29991962, "canUseToken": True},
+                    {"torrentId": 12345678, "canUseToken": False},  # 24bit, >5GB-ish -> server says no
+                ],
+            }],
+        },
+    }
+
+    details_resp = MagicMock()
+    details_resp.status_code = 200
+    details_resp.json.return_value = SAMPLE_GROUP_RESPONSE
+
+    provider.session.get.side_effect = [browse_resp, details_resp]
+
+    releases = provider.search(TrackQuery(artist="Logistics", title="Fear Not"))
+    by_id = {r.source_id: r for r in releases}
+    assert by_id["29991962"].can_use_token is True
+    assert by_id["12345678"].can_use_token is False
+
+
+def test_red_use_fl_token_flag_propagates():
+    """use_fl_token passes through REDProvider to the Gazelle base."""
+    assert REDProvider(api_key="k", base_url=MOCK_BASE_URL).use_fl_token is False
+    assert REDProvider(api_key="k", base_url=MOCK_BASE_URL, use_fl_token=True).use_fl_token is True
