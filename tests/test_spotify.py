@@ -769,6 +769,32 @@ class TestSpotifyConcurrencySerialization:
                     self._make_release("4LXnEERKcz4aRC4NCMQJ0x"), str(tmp_path / "out")
                 )
 
+    def test_convert_forces_flac_format_for_temp_extension(self, tmp_path):
+        """ffmpeg must be told '-f flac': the temp output ends in .flac.tmp, so
+        the container cannot be inferred from the extension (regression).
+        """
+        downloader = SpotifyDownloader(provider=MagicMock())
+        pcm = tmp_path / "in.pcm"
+        pcm.write_bytes(b"\x00" * 16)
+        out = tmp_path / "out.flac.tmp"
+
+        completed = MagicMock()
+        completed.returncode = 0
+        with patch(
+            "flacfetch.downloaders.spotify.subprocess.run", return_value=completed
+        ) as mock_run:
+            out.write_bytes(b"")  # simulate ffmpeg producing the file
+            downloader._convert_pcm_to_flac(pcm, out)
+
+        cmd = mock_run.call_args.args[0]
+        # -f flac must appear as an OUTPUT option (after -i), forcing the muxer.
+        assert "-f" in cmd and "flac" in cmd
+        i_idx = cmd.index("-i")
+        f_indices = [i for i, tok in enumerate(cmd) if tok == "-f"]
+        assert any(idx > i_idx and cmd[idx + 1] == "flac" for idx in f_indices), (
+            f"expected '-f flac' after -i in ffmpeg cmd: {cmd}"
+        )
+
     def test_failed_capture_leaves_no_orphan_temp_files(self, tmp_path):
         """A failed capture must not leave its per-capture PCM/log on disk.
 

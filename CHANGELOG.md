@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.1] - 2026-09-01
+
+### Fixed
+- **Spotify FLAC conversion failed after v0.29.0** ("FLAC conversion failed" /
+  ffmpeg "Unable to choose an output format"). v0.29.0 converts to a
+  per-download temp file ending in `.flac.tmp`, but ffmpeg infers the output
+  container from the file extension and `.tmp` is not a known format. The
+  ffmpeg command now passes `-f flac` explicitly so the muxer no longer depends
+  on the extension. Added a regression test asserting `-f flac` is present.
+
 ## [0.29.0] - 2026-09-01
 
 ### Fixed
