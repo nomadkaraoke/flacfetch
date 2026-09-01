@@ -279,90 +279,97 @@ class SpotifyDownloader(Downloader):
         # (see _SPOTIFY_CAPTURE_LOCK). Everything after the capture (PCM verify,
         # FLAC conversion) operates only on this job's own files and is left
         # outside the lock so it does not block the next queued download.
-        wait_start = time.time()
-        with _SPOTIFY_CAPTURE_LOCK:
-            waited = time.time() - wait_start
-            if waited >= 1.0:
-                logger.info(
-                    f"Waited {waited:.1f}s for Spotify capture lock "
-                    f"(serialized behind another download): {track_uri}"
-                )
-            with open(pcm_path, "wb") as pcm_file, open(log_path, "w") as log_file:
-                librespot_proc = subprocess.Popen(
-                    librespot_cmd,
-                    stdout=pcm_file,
-                    stderr=log_file,
-                    env=librespot_env,
-                )
-
-                try:
-                    # Wait for our device to appear in Spotify
-                    device = self._wait_for_device(sp, device_name, timeout=15)
-                    if not device:
-                        raise SpotifyDownloadError(self._device_not_found_message(log_path))
-
-                    logger.debug(f"Device ready: {device['id']} ({device_name})")
-
-                    # Start playback
-                    logger.debug(f"Starting playback: {track_uri}")
-                    sp.start_playback(device_id=device["id"], uris=[track_uri])
-
-                    # Verify the requested track actually loaded before capturing.
-                    # If it did not (e.g. playback was hijacked), fail loudly
-                    # rather than record whatever else is playing on the account.
-                    if not self._wait_for_track_load(sp, track_uri, timeout=30):
-                        raise SpotifyDownloadError(
-                            f"Requested track {track_uri} did not load on device "
-                            f"{device_name}; refusing to capture to avoid saving "
-                            "the wrong audio"
-                        )
-
-                    # Wait for download to complete
-                    # librespot downloads faster than real-time, so we monitor file size
-                    self._wait_for_download(
-                        pcm_path, duration_secs, librespot_proc, timeout=duration_secs + 30
+        # All per-capture temp files carry a unique capture_id, so a failed
+        # capture leaves an orphan PCM (tens of MB) behind unless we always clean
+        # up. The outer finally removes the PCM, librespot log, and temp FLAC on
+        # every exit path (success or failure).
+        try:
+            wait_start = time.time()
+            with _SPOTIFY_CAPTURE_LOCK:
+                waited = time.time() - wait_start
+                if waited >= 1.0:
+                    logger.info(
+                        f"Waited {waited:.1f}s for Spotify capture lock "
+                        f"(serialized behind another download): {track_uri}"
+                    )
+                with open(pcm_path, "wb") as pcm_file, open(log_path, "w") as log_file:
+                    librespot_proc = subprocess.Popen(
+                        librespot_cmd,
+                        stdout=pcm_file,
+                        stderr=log_file,
+                        env=librespot_env,
                     )
 
-                    # Pause playback
                     try:
-                        sp.pause_playback(device_id=device["id"])
-                    except Exception:
-                        pass
+                        # Wait for our device to appear in Spotify
+                        device = self._wait_for_device(sp, device_name, timeout=15)
+                        if not device:
+                            raise SpotifyDownloadError(
+                                self._device_not_found_message(log_path, device_name)
+                            )
 
-                except KeyboardInterrupt:
-                    logger.info("Download interrupted")
-                    raise
-                except Exception as e:
-                    # Read log for more info
-                    log_content = ""
-                    if log_path.exists():
-                        log_content = log_path.read_text()[-500:]  # Last 500 chars
-                    logger.debug(f"librespot log: {log_content}")
-                    raise SpotifyDownloadError(f"Download failed: {e}") from e
-                finally:
-                    # Stop librespot gracefully
-                    self._stop_librespot(librespot_proc)
+                        logger.debug(f"Device ready: {device['id']} ({device_name})")
 
-        # Verify PCM was captured. The capture files are unique per download
-        # (capture_id), so this and the conversion below are safe to run outside
-        # the capture lock without another download clobbering them.
-        if not pcm_path.exists() or pcm_path.stat().st_size == 0:
-            log_content = log_path.read_text() if log_path.exists() else "No log"
-            log_path.unlink(missing_ok=True)
-            raise SpotifyDownloadError(f"No audio captured. Log: {log_content[-500:]}")
+                        # Start playback
+                        logger.debug(f"Starting playback: {track_uri}")
+                        sp.start_playback(device_id=device["id"], uris=[track_uri])
 
-        pcm_size = pcm_path.stat().st_size
-        logger.debug(f"Captured {pcm_size / (1024*1024):.2f} MB PCM")
+                        # Verify the requested track actually loaded before capturing.
+                        # If it did not (e.g. playback was hijacked), fail loudly
+                        # rather than record whatever else is playing on the account.
+                        if not self._wait_for_track_load(sp, track_uri, timeout=30):
+                            raise SpotifyDownloadError(
+                                f"Requested track {track_uri} did not load on device "
+                                f"{device_name}; refusing to capture to avoid saving "
+                                "the wrong audio"
+                            )
 
-        # Convert PCM to a per-download temp FLAC, then atomically move it into
-        # place. The atomic rename guarantees the returned path is always a
-        # complete file even if a concurrent download targets the same name.
-        try:
+                        # Wait for download to complete
+                        # librespot downloads faster than real-time, so we monitor file size
+                        self._wait_for_download(
+                            pcm_path, duration_secs, librespot_proc, timeout=duration_secs + 30
+                        )
+
+                        # Pause playback
+                        try:
+                            sp.pause_playback(device_id=device["id"])
+                        except Exception:
+                            pass
+
+                    except KeyboardInterrupt:
+                        logger.info("Download interrupted")
+                        raise
+                    except Exception as e:
+                        # Read log for more info
+                        log_content = ""
+                        if log_path.exists():
+                            log_content = log_path.read_text()[-500:]  # Last 500 chars
+                        logger.debug(f"librespot log: {log_content}")
+                        raise SpotifyDownloadError(f"Download failed: {e}") from e
+                    finally:
+                        # Stop librespot gracefully
+                        self._stop_librespot(librespot_proc)
+
+            # Verify PCM was captured. The capture files are unique per download
+            # (capture_id), so this and the conversion below are safe to run
+            # outside the capture lock without another download clobbering them.
+            if not pcm_path.exists() or pcm_path.stat().st_size == 0:
+                log_content = log_path.read_text() if log_path.exists() else "No log"
+                raise SpotifyDownloadError(f"No audio captured. Log: {log_content[-500:]}")
+
+            pcm_size = pcm_path.stat().st_size
+            logger.debug(f"Captured {pcm_size / (1024*1024):.2f} MB PCM")
+
+            # Convert PCM to a per-download temp FLAC, then atomically move it
+            # into place. The atomic rename guarantees the returned path is
+            # always a complete file even if a concurrent download targets the
+            # same name.
             if not self._convert_pcm_to_flac(pcm_path, flac_tmp_path):
                 raise SpotifyDownloadError("FLAC conversion failed")
             os.replace(flac_tmp_path, flac_path)
         finally:
-            # Cleanup temp files (best effort)
+            # Always clean up the per-capture temp files (best effort), including
+            # on every failure path, so nothing orphans on disk.
             pcm_path.unlink(missing_ok=True)
             log_path.unlink(missing_ok=True)
             flac_tmp_path.unlink(missing_ok=True)
@@ -370,12 +377,16 @@ class SpotifyDownloader(Downloader):
         logger.info(f"Download complete: {flac_path}")
         return str(flac_path)
 
-    def _device_not_found_message(self, log_path: Path) -> str:
+    def _device_not_found_message(
+        self, log_path: Path, device_name: str = LIBRESPOT_DEVICE_NAME
+    ) -> str:
         """Build a diagnostic message when the librespot device never appears.
 
         Reads the librespot log to distinguish the common failure modes so the
         error surfaced to callers (and karaoke-gen) is actionable rather than a
-        bare "device not found".
+        bare "device not found". ``device_name`` is the exact per-download name
+        that was registered, so the message names the device we actually waited
+        for.
         """
         tail = ""
         try:
@@ -384,7 +395,7 @@ class SpotifyDownloader(Downloader):
         except OSError:
             pass
 
-        base = f"Device '{LIBRESPOT_DEVICE_NAME}' not found in Spotify"
+        base = f"Device '{device_name}' not found in Spotify"
         if "INVALID_CREDENTIALS" in tail:
             return (
                 f"{base}: librespot could not register as a Spotify Connect "

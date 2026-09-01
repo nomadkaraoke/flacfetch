@@ -769,6 +769,45 @@ class TestSpotifyConcurrencySerialization:
                     self._make_release("4LXnEERKcz4aRC4NCMQJ0x"), str(tmp_path / "out")
                 )
 
+    def test_failed_capture_leaves_no_orphan_temp_files(self, tmp_path):
+        """A failed capture must not leave its per-capture PCM/log on disk.
+
+        The capture temp files carry a unique capture_id, so without explicit
+        cleanup every failure would orphan a (potentially tens-of-MB) PCM file.
+        """
+        downloader, creds_dir = self._stub_downloader(tmp_path)
+        out_dir = tmp_path / "out"
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+
+        def fake_wait_for_download(pcm_path, *_a, **_k):
+            # Simulate librespot having written some PCM before the failure.
+            pcm_path.write_bytes(b"\x00" * 8192)
+            raise SpotifyDownloadError("Download timeout")
+
+        with patch(
+            "flacfetch.downloaders.spotify.get_librespot_credentials_dir",
+            return_value=str(creds_dir),
+        ), patch(
+            "flacfetch.downloaders.spotify.subprocess.Popen", return_value=proc
+        ), patch.object(
+            downloader, "_wait_for_device", return_value={"id": "dev"}
+        ), patch.object(
+            downloader, "_wait_for_track_load", return_value=True
+        ), patch.object(
+            downloader, "_wait_for_download", side_effect=fake_wait_for_download
+        ), patch.object(
+            downloader, "_stop_librespot"
+        ):
+            with pytest.raises(SpotifyDownloadError):
+                downloader.download(
+                    self._make_release("4LXnEERKcz4aRC4NCMQJ0x"), str(out_dir)
+                )
+
+        leftovers = list(out_dir.glob("*.pcm")) + list(out_dir.glob("*.librespot.log"))
+        assert leftovers == [], f"failed capture orphaned temp files: {leftovers}"
+
 
 class TestSpotifyAuthFailFast:
     """Test that Spotify auth fails fast without cached token (for headless servers)."""
