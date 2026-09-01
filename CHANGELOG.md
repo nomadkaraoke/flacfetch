@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.0] - 2026-09-01
+
+### Fixed
+- **Concurrent Spotify downloads could capture each other's audio.** A Spotify
+  account has a single active playback stream, but Spotify captures ran in a
+  thread pool with no serialization: two overlapping `/download-by-id` requests
+  each started a librespot device (all named the constant `flacfetch-capture`)
+  and drove playback via the Web API on the *same* account. The second
+  `start_playback()` hijacked the account's one playback stream, so the first
+  download's capture pipe recorded the *other* track's audio while the second
+  starved and timed out. This silently produced input FLACs containing the wrong
+  song (e.g. a job whose source was *Maduk - One Last Picture* received
+  *Keeno - Shelter from the Storm* audio, both Spotify downloads having started
+  within 2 seconds of each other).
+  - **Spotify captures are now serialized process-wide** (`_SPOTIFY_CAPTURE_LOCK`):
+    only one librespot device + playback + capture runs at a time. Downloads for
+    other sources (YouTube, torrents) are process/file isolated and are *not*
+    affected — they still run concurrently. The lock is always released (the
+    capture is bounded by a timeout and a `finally` that stops librespot), so it
+    cannot deadlock; queued downloads log how long they waited.
+  - **Each capture registers a unique librespot device name**
+    (`flacfetch-capture-<uuid>`) and resolves the device by that exact name, so a
+    stale or overlapping device can never be mistaken for this download's device.
+  - **A capture now fails loudly if the requested track never loads** on the
+    device (previously the track-load check result was discarded and capture
+    proceeded regardless), preventing the wrong audio from being saved.
+
 ## [0.28.1] - 2026-08-30
 
 ### Fixed
