@@ -580,6 +580,235 @@ class TestLibrespotCredentialSelection:
         assert "unexpected librespot failure" in msg
 
 
+class TestSpotifyConcurrencySerialization:
+    """Concurrent Spotify captures must not overlap.
+
+    A Spotify account has a single active playback stream, so two overlapping
+    captures on the same account clobber each other -- one download's file ends
+    up containing another track's audio. Regression test for the 2026-09-01
+    incident (job 842948f4 got Keeno - Shelter from the Storm audio while its
+    source was Maduk - One Last Picture, because both Spotify downloads ran
+    within 2 seconds of each other).
+    """
+
+    def _make_release(self, track_id):
+        return Release(
+            title="Test",
+            artist="Test",
+            quality=Quality(AudioFormat.FLAC),
+            source_name="Spotify",
+            download_url=f"spotify:track:{track_id}",
+            duration_seconds=200,  # avoid a Web API duration lookup
+        )
+
+    def _stub_downloader(self, tmp_path):
+        creds_dir = tmp_path / "librespot"
+        creds_dir.mkdir()
+        (creds_dir / "credentials.json").write_text("{}")
+
+        provider = MagicMock()
+        downloader = SpotifyDownloader(provider=provider)
+        downloader._librespot_path = "/fake/librespot"
+        return downloader, creds_dir
+
+    def test_captures_are_serialized(self, tmp_path):
+        """Two concurrent download() calls never run their capture at the same time."""
+        import contextlib
+        import threading
+        import time
+
+        downloader, creds_dir = self._stub_downloader(tmp_path)
+
+        active = 0
+        max_active = 0
+        state_lock = threading.Lock()
+        errors = []
+
+        def fake_wait_for_download(pcm_path, *_args, **_kwargs):
+            nonlocal active, max_active
+            with state_lock:
+                active += 1
+                max_active = max(max_active, active)
+            # Give the other thread a chance to overlap if the lock is broken.
+            time.sleep(0.2)
+            # Leave some captured PCM behind so download() does not treat this as
+            # an empty capture.
+            pcm_path.write_bytes(b"\x00" * 4096)
+            with state_lock:
+                active -= 1
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+
+        def _convert(pcm_path, flac_tmp_path):
+            # Produce a real (empty) file so the atomic os.replace() succeeds.
+            flac_tmp_path.write_bytes(b"")
+            return True
+
+        def run(track_id):
+            try:
+                downloader.download(
+                    self._make_release(track_id), str(tmp_path / track_id)
+                )
+            except Exception as e:  # pragma: no cover - surfaced via assert below
+                errors.append(e)
+
+        # Install all shared patches ONCE in the main thread so their setup/teardown
+        # cannot interleave with (or be torn down under) the worker threads.
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                patch(
+                    "flacfetch.downloaders.spotify.get_librespot_credentials_dir",
+                    return_value=str(creds_dir),
+                )
+            )
+            stack.enter_context(
+                patch("flacfetch.downloaders.spotify.subprocess.Popen", return_value=proc)
+            )
+            stack.enter_context(
+                patch.object(downloader, "_wait_for_device", return_value={"id": "dev"})
+            )
+            stack.enter_context(
+                patch.object(downloader, "_wait_for_track_load", return_value=True)
+            )
+            stack.enter_context(
+                patch.object(
+                    downloader, "_wait_for_download", side_effect=fake_wait_for_download
+                )
+            )
+            stack.enter_context(patch.object(downloader, "_stop_librespot"))
+            stack.enter_context(
+                patch.object(downloader, "_convert_pcm_to_flac", side_effect=_convert)
+            )
+
+            threads = [
+                threading.Thread(target=run, args=("4LXnEERKcz4aRC4NCMQJ0x",)),
+                threading.Thread(target=run, args=("0S4fjRqfZP6XOF9j7vzmR1",)),
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        assert not errors, f"download() raised in a worker: {errors}"
+        assert max_active == 1, (
+            f"Spotify captures overlapped (max concurrent={max_active}); "
+            "serialization lock is not protecting the capture"
+        )
+
+    def test_each_capture_uses_a_unique_device_name(self, tmp_path):
+        """Each download registers librespot under its own device name."""
+        downloader, creds_dir = self._stub_downloader(tmp_path)
+
+        device_names = []
+
+        def capture_name(cmd, *_args, **_kwargs):
+            # librespot device name follows the "-n" flag
+            idx = cmd.index("-n")
+            device_names.append(cmd[idx + 1])
+            proc = MagicMock()
+            proc.poll.return_value = None
+            return proc
+
+        seen_wait_names = []
+
+        def fake_wait_for_device(sp, device_name, timeout=15):
+            seen_wait_names.append(device_name)
+            return {"id": "dev"}
+
+        for track_id in ("aaaa", "bbbb"):
+            with patch(
+                "flacfetch.downloaders.spotify.get_librespot_credentials_dir",
+                return_value=str(creds_dir),
+            ), patch(
+                "flacfetch.downloaders.spotify.subprocess.Popen",
+                side_effect=capture_name,
+            ), patch.object(
+                downloader, "_wait_for_device", side_effect=fake_wait_for_device
+            ), patch.object(
+                downloader, "_wait_for_track_load", return_value=True
+            ), patch.object(
+                downloader,
+                "_wait_for_download",
+                side_effect=lambda pcm_path, *a, **k: pcm_path.write_bytes(b"\x00" * 4096),
+            ), patch.object(
+                downloader, "_stop_librespot"
+            ), patch.object(
+                downloader,
+                "_convert_pcm_to_flac",
+                side_effect=lambda pcm, flac_tmp: (flac_tmp.write_bytes(b""), True)[1],
+            ):
+                downloader.download(self._make_release(track_id), str(tmp_path / track_id))
+
+        assert len(set(device_names)) == 2, f"device names not unique: {device_names}"
+        assert all(n.startswith("flacfetch-capture-") for n in device_names)
+        # The device we wait for must be the one we registered.
+        assert seen_wait_names == device_names
+
+    def test_capture_fails_if_requested_track_never_loads(self, tmp_path):
+        """If the requested track does not load, fail rather than capture wrong audio."""
+        downloader, creds_dir = self._stub_downloader(tmp_path)
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+
+        with patch(
+            "flacfetch.downloaders.spotify.get_librespot_credentials_dir",
+            return_value=str(creds_dir),
+        ), patch(
+            "flacfetch.downloaders.spotify.subprocess.Popen", return_value=proc
+        ), patch.object(
+            downloader, "_wait_for_device", return_value={"id": "dev"}
+        ), patch.object(
+            downloader, "_wait_for_track_load", return_value=False
+        ), patch.object(
+            downloader, "_stop_librespot"
+        ):
+            with pytest.raises(SpotifyDownloadError, match="did not load"):
+                downloader.download(
+                    self._make_release("4LXnEERKcz4aRC4NCMQJ0x"), str(tmp_path / "out")
+                )
+
+    def test_failed_capture_leaves_no_orphan_temp_files(self, tmp_path):
+        """A failed capture must not leave its per-capture PCM/log on disk.
+
+        The capture temp files carry a unique capture_id, so without explicit
+        cleanup every failure would orphan a (potentially tens-of-MB) PCM file.
+        """
+        downloader, creds_dir = self._stub_downloader(tmp_path)
+        out_dir = tmp_path / "out"
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+
+        def fake_wait_for_download(pcm_path, *_a, **_k):
+            # Simulate librespot having written some PCM before the failure.
+            pcm_path.write_bytes(b"\x00" * 8192)
+            raise SpotifyDownloadError("Download timeout")
+
+        with patch(
+            "flacfetch.downloaders.spotify.get_librespot_credentials_dir",
+            return_value=str(creds_dir),
+        ), patch(
+            "flacfetch.downloaders.spotify.subprocess.Popen", return_value=proc
+        ), patch.object(
+            downloader, "_wait_for_device", return_value={"id": "dev"}
+        ), patch.object(
+            downloader, "_wait_for_track_load", return_value=True
+        ), patch.object(
+            downloader, "_wait_for_download", side_effect=fake_wait_for_download
+        ), patch.object(
+            downloader, "_stop_librespot"
+        ):
+            with pytest.raises(SpotifyDownloadError):
+                downloader.download(
+                    self._make_release("4LXnEERKcz4aRC4NCMQJ0x"), str(out_dir)
+                )
+
+        leftovers = list(out_dir.glob("*.pcm")) + list(out_dir.glob("*.librespot.log"))
+        assert leftovers == [], f"failed capture orphaned temp files: {leftovers}"
+
+
 class TestSpotifyAuthFailFast:
     """Test that Spotify auth fails fast without cached token (for headless servers)."""
 
