@@ -518,6 +518,10 @@ class SpotifyDownloader(Downloader):
             "-ac", str(CHANNELS),
             "-i", str(input_path),
             "-c:a", "flac",
+            # Force the output container explicitly: the output path is a
+            # per-download temp file (``.flac.tmp``), so ffmpeg cannot infer the
+            # format from the extension.
+            "-f", "flac",
             str(output_path),
         ]
 
