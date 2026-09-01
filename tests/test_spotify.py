@@ -613,6 +613,7 @@ class TestSpotifyConcurrencySerialization:
 
     def test_captures_are_serialized(self, tmp_path):
         """Two concurrent download() calls never run their capture at the same time."""
+        import contextlib
         import threading
         import time
 
@@ -621,6 +622,7 @@ class TestSpotifyConcurrencySerialization:
         active = 0
         max_active = 0
         state_lock = threading.Lock()
+        errors = []
 
         def fake_wait_for_download(pcm_path, *_args, **_kwargs):
             nonlocal active, max_active
@@ -638,36 +640,57 @@ class TestSpotifyConcurrencySerialization:
         proc = MagicMock()
         proc.poll.return_value = None
 
+        def _convert(pcm_path, flac_tmp_path):
+            # Produce a real (empty) file so the atomic os.replace() succeeds.
+            flac_tmp_path.write_bytes(b"")
+            return True
+
         def run(track_id):
-            with patch(
-                "flacfetch.downloaders.spotify.get_librespot_credentials_dir",
-                return_value=str(creds_dir),
-            ), patch(
-                "flacfetch.downloaders.spotify.subprocess.Popen", return_value=proc
-            ), patch.object(
-                downloader, "_wait_for_device", return_value={"id": "dev"}
-            ), patch.object(
-                downloader, "_wait_for_track_load", return_value=True
-            ), patch.object(
-                downloader, "_wait_for_download", side_effect=fake_wait_for_download
-            ), patch.object(
-                downloader, "_stop_librespot"
-            ), patch.object(
-                downloader, "_convert_pcm_to_flac", return_value=True
-            ):
+            try:
                 downloader.download(
                     self._make_release(track_id), str(tmp_path / track_id)
                 )
+            except Exception as e:  # pragma: no cover - surfaced via assert below
+                errors.append(e)
 
-        threads = [
-            threading.Thread(target=run, args=("4LXnEERKcz4aRC4NCMQJ0x",)),
-            threading.Thread(target=run, args=("0S4fjRqfZP6XOF9j7vzmR1",)),
-        ]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+        # Install all shared patches ONCE in the main thread so their setup/teardown
+        # cannot interleave with (or be torn down under) the worker threads.
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                patch(
+                    "flacfetch.downloaders.spotify.get_librespot_credentials_dir",
+                    return_value=str(creds_dir),
+                )
+            )
+            stack.enter_context(
+                patch("flacfetch.downloaders.spotify.subprocess.Popen", return_value=proc)
+            )
+            stack.enter_context(
+                patch.object(downloader, "_wait_for_device", return_value={"id": "dev"})
+            )
+            stack.enter_context(
+                patch.object(downloader, "_wait_for_track_load", return_value=True)
+            )
+            stack.enter_context(
+                patch.object(
+                    downloader, "_wait_for_download", side_effect=fake_wait_for_download
+                )
+            )
+            stack.enter_context(patch.object(downloader, "_stop_librespot"))
+            stack.enter_context(
+                patch.object(downloader, "_convert_pcm_to_flac", side_effect=_convert)
+            )
 
+            threads = [
+                threading.Thread(target=run, args=("4LXnEERKcz4aRC4NCMQJ0x",)),
+                threading.Thread(target=run, args=("0S4fjRqfZP6XOF9j7vzmR1",)),
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        assert not errors, f"download() raised in a worker: {errors}"
         assert max_active == 1, (
             f"Spotify captures overlapped (max concurrent={max_active}); "
             "serialization lock is not protecting the capture"
@@ -711,7 +734,9 @@ class TestSpotifyConcurrencySerialization:
             ), patch.object(
                 downloader, "_stop_librespot"
             ), patch.object(
-                downloader, "_convert_pcm_to_flac", return_value=True
+                downloader,
+                "_convert_pcm_to_flac",
+                side_effect=lambda pcm, flac_tmp: (flac_tmp.write_bytes(b""), True)[1],
             ):
                 downloader.download(self._make_release(track_id), str(tmp_path / track_id))
 

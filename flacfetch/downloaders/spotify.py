@@ -205,9 +205,17 @@ class SpotifyDownloader(Downloader):
 
         os.makedirs(output_path, exist_ok=True)
 
-        pcm_path = Path(output_path) / f"{base_name}.pcm"
+        # Per-capture id used for the librespot device name AND the intermediate
+        # capture files, so no two downloads can ever share a device or clobber
+        # each other's temp files -- even if they target the same output path and
+        # base name (e.g. a retry of the same track). The final FLAC keeps the
+        # requested deterministic name and is published via an atomic rename.
+        capture_id = uuid.uuid4().hex
+
+        pcm_path = Path(output_path) / f"{base_name}.{capture_id}.pcm"
         flac_path = Path(output_path) / f"{base_name}.flac"
-        log_path = Path(output_path) / f"{base_name}.librespot.log"
+        flac_tmp_path = Path(output_path) / f"{base_name}.{capture_id}.flac.tmp"
+        log_path = Path(output_path) / f"{base_name}.{capture_id}.librespot.log"
 
         # The Web API client is always required to control playback on the
         # librespot device (start/pause). Authenticate it up-front.
@@ -222,8 +230,8 @@ class SpotifyDownloader(Downloader):
         # several Connect devices at once, so if a previous librespot has not
         # fully deregistered (or two ever overlap despite the lock) matching by a
         # shared constant name could grab the wrong device. A per-download name
-        # makes device resolution unambiguous.
-        device_name = f"{LIBRESPOT_DEVICE_NAME}-{uuid.uuid4().hex[:8]}"
+        # (full uuid, no truncation) makes device resolution unambiguous.
+        device_name = f"{LIBRESPOT_DEVICE_NAME}-{capture_id}"
 
         # Build the librespot invocation. Preferred: stored reusable credentials
         # minted by librespot's own OAuth client (the only client Spotify accepts
@@ -335,21 +343,29 @@ class SpotifyDownloader(Downloader):
                     # Stop librespot gracefully
                     self._stop_librespot(librespot_proc)
 
-        # Verify PCM was captured
+        # Verify PCM was captured. The capture files are unique per download
+        # (capture_id), so this and the conversion below are safe to run outside
+        # the capture lock without another download clobbering them.
         if not pcm_path.exists() or pcm_path.stat().st_size == 0:
             log_content = log_path.read_text() if log_path.exists() else "No log"
+            log_path.unlink(missing_ok=True)
             raise SpotifyDownloadError(f"No audio captured. Log: {log_content[-500:]}")
 
         pcm_size = pcm_path.stat().st_size
         logger.debug(f"Captured {pcm_size / (1024*1024):.2f} MB PCM")
 
-        # Convert PCM to FLAC
-        if not self._convert_pcm_to_flac(pcm_path, flac_path):
-            raise SpotifyDownloadError("FLAC conversion failed")
-
-        # Cleanup temp files
-        pcm_path.unlink(missing_ok=True)
-        log_path.unlink(missing_ok=True)
+        # Convert PCM to a per-download temp FLAC, then atomically move it into
+        # place. The atomic rename guarantees the returned path is always a
+        # complete file even if a concurrent download targets the same name.
+        try:
+            if not self._convert_pcm_to_flac(pcm_path, flac_tmp_path):
+                raise SpotifyDownloadError("FLAC conversion failed")
+            os.replace(flac_tmp_path, flac_path)
+        finally:
+            # Cleanup temp files (best effort)
+            pcm_path.unlink(missing_ok=True)
+            log_path.unlink(missing_ok=True)
+            flac_tmp_path.unlink(missing_ok=True)
 
         logger.info(f"Download complete: {flac_path}")
         return str(flac_path)
