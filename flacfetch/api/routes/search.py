@@ -5,16 +5,69 @@ import asyncio
 import logging
 import uuid
 from collections import Counter
-from typing import List
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from ..auth import verify_api_key
 from ..models import ProviderSearchStats, SearchRequest, SearchResponse, SearchResultItem
 from ..services import get_download_manager, get_search_cache_service
+from ..services.search_cache import SearchCacheService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["search"])
+
+# Provider sweeps are synchronous and can take 40s+. Running them directly in
+# the async handler blocks the whole event loop, which stalls health checks,
+# cache-hit searches, and download status polls behind every uncached search
+# (2026-09-18 incident: a queued search blew the caller's 60s timeout).
+# A single-thread executor keeps sweeps serialized (the provider instances are
+# shared and mutated per-search, so they must not run concurrently) while the
+# event loop stays responsive.
+_search_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="provider-search")
+
+# Identical searches that arrive while a sweep is in flight await its result
+# instead of queueing another full sweep behind it.
+_inflight_searches: Dict[str, "asyncio.Task"] = {}
+
+
+def _inflight_key(artist: str, title: str, exhaustive: bool) -> str:
+    normalized_artist = SearchCacheService._normalize_part(artist)
+    normalized_title = SearchCacheService._normalize_part(title)
+    return f"{normalized_artist}|||{normalized_title}|||{exhaustive}"
+
+
+def _configure_and_search(fetch_manager, artist: str, title: str, exhaustive: bool):
+    """Configure providers and run the sweep. Runs inside _search_executor so the
+    provider mutation and the search are atomic with respect to other sweeps."""
+    for provider in fetch_manager.providers:
+        # Check if provider has early termination settings (RED/OPS)
+        if hasattr(provider, 'early_termination'):
+            provider.early_termination = not exhaustive
+            if exhaustive:
+                # Also increase search limit for exhaustive mode
+                if hasattr(provider, 'search_limit'):
+                    provider.search_limit = 20
+
+    from flacfetch.core.models import TrackQuery
+    query = TrackQuery(artist=artist, title=title)
+    return fetch_manager.search(query)
+
+
+async def _search_and_cache(fetch_manager, cache_service, artist: str, title: str, exhaustive: bool):
+    """Run a provider sweep off the event loop and cache the results."""
+    loop = asyncio.get_running_loop()
+    releases = await loop.run_in_executor(
+        _search_executor, _configure_and_search, fetch_manager, artist, title, exhaustive
+    )
+
+    # Cache results (fire-and-forget, best-effort)
+    # Always cache fresh search results, including exhaustive searches
+    if releases:
+        asyncio.create_task(cache_service.cache_search_results(artist, title, releases))
+
+    return releases
 
 
 @router.post("/search", response_model=SearchResponse)
@@ -53,30 +106,31 @@ async def search_audio(
         if not from_cache:
             logger.info(f"Cache MISS for: {request.artist} - {request.title}")
 
-        # Configure providers based on exhaustive flag
-        for provider in fetch_manager.providers:
-            # Check if provider has early termination settings (RED/OPS)
-            if hasattr(provider, 'early_termination'):
-                provider.early_termination = not request.exhaustive
-                if request.exhaustive:
-                    # Also increase search limit for exhaustive mode
-                    if hasattr(provider, 'search_limit'):
-                        provider.search_limit = 20
+        key = _inflight_key(request.artist, request.title, request.exhaustive)
+        task = _inflight_searches.get(key)
+        if task is not None:
+            logger.info(f"Coalescing with in-flight search for: {request.artist} - {request.title}")
+        else:
+            task = asyncio.create_task(
+                _search_and_cache(
+                    fetch_manager, cache_service, request.artist, request.title, request.exhaustive
+                )
+            )
+            _inflight_searches[key] = task
+            task.add_done_callback(lambda t: _inflight_searches.pop(key, None))
+            # Retrieve the exception so an errored sweep with no remaining
+            # waiters doesn't emit "exception was never retrieved" warnings.
+            task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
         try:
-            from flacfetch.core.models import TrackQuery
-            query = TrackQuery(artist=request.artist, title=request.title)
-            releases = fetch_manager.search(query)
+            # shield() so one caller disconnecting doesn't cancel the sweep
+            # other coalesced callers are awaiting.
+            releases = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error(f"Search failed: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Search failed: {e}")
-
-        # Cache results (fire-and-forget, best-effort)
-        # Always cache fresh search results, including exhaustive searches
-        if releases:
-            asyncio.create_task(
-                cache_service.cache_search_results(request.artist, request.title, releases)
-            )
 
     if not releases:
         raise HTTPException(status_code=404, detail=f"No results found for: {request.artist} - {request.title}")
