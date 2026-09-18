@@ -29,13 +29,16 @@ _search_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="provide
 
 # Identical searches that arrive while a sweep is in flight await its result
 # instead of queueing another full sweep behind it.
-_inflight_searches: Dict[str, "asyncio.Task"] = {}
+_inflight_searches: Dict[tuple, "asyncio.Task"] = {}
+
+# Group-fetch limit for exhaustive sweeps (normal sweeps use each provider's own default)
+EXHAUSTIVE_SEARCH_LIMIT = 20
 
 
-def _inflight_key(artist: str, title: str, exhaustive: bool) -> str:
+def _inflight_key(artist: str, title: str, exhaustive: bool) -> tuple:
     normalized_artist = SearchCacheService._normalize_part(artist)
     normalized_title = SearchCacheService._normalize_part(title)
-    return f"{normalized_artist}|||{normalized_title}|||{exhaustive}"
+    return (normalized_artist, normalized_title, exhaustive)
 
 
 def _configure_and_search(fetch_manager, artist: str, title: str, exhaustive: bool):
@@ -45,10 +48,14 @@ def _configure_and_search(fetch_manager, artist: str, title: str, exhaustive: bo
         # Check if provider has early termination settings (RED/OPS)
         if hasattr(provider, 'early_termination'):
             provider.early_termination = not exhaustive
-            if exhaustive:
-                # Also increase search limit for exhaustive mode
-                if hasattr(provider, 'search_limit'):
-                    provider.search_limit = 20
+            if hasattr(provider, 'search_limit'):
+                # Remember the provider's own default so a non-exhaustive sweep
+                # doesn't inherit a previous exhaustive sweep's expanded limit
+                if not hasattr(provider, '_default_search_limit'):
+                    provider._default_search_limit = provider.search_limit
+                provider.search_limit = (
+                    EXHAUSTIVE_SEARCH_LIMIT if exhaustive else provider._default_search_limit
+                )
 
     from flacfetch.core.models import TrackQuery
     query = TrackQuery(artist=artist, title=title)

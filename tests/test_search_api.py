@@ -234,7 +234,9 @@ class TestSearchEndpoint:
     @pytest.mark.asyncio
     async def test_provider_config_applied_inside_executor(self):
         """Exhaustive flag configures providers atomically with the sweep."""
-        provider = Mock(spec=["early_termination", "search_limit", "name"])
+        provider = Mock(spec=["early_termination", "search_limit", "_default_search_limit", "name"])
+        del provider._default_search_limit  # not set until first configure
+        provider.search_limit = 10
         provider.name = "RED"
         fetch_manager = Mock()
         fetch_manager.providers = [provider]
@@ -246,3 +248,23 @@ class TestSearchEndpoint:
 
         assert provider.early_termination is False
         assert provider.search_limit == 20
+
+    @pytest.mark.asyncio
+    async def test_normal_search_restores_default_limit_after_exhaustive(self):
+        """A non-exhaustive sweep must not inherit an earlier exhaustive sweep's limit."""
+        provider = Mock(spec=["early_termination", "search_limit", "_default_search_limit", "name"])
+        del provider._default_search_limit
+        provider.search_limit = 10
+        provider.name = "RED"
+        fetch_manager = Mock()
+        fetch_manager.providers = [provider]
+        fetch_manager.search.return_value = [make_release()]
+
+        with patch.object(search_route, "get_download_manager", return_value=make_manager(fetch_manager)), \
+             patch.object(search_route, "get_search_cache_service", return_value=make_cache_service()):
+            await search_audio(SearchRequest(artist="ABBA", title="Waterloo", exhaustive=True), api_key="k")
+            assert provider.search_limit == 20
+            await search_audio(SearchRequest(artist="ABBA", title="SOS"), api_key="k")
+
+        assert provider.search_limit == 10
+        assert provider.early_termination is True
