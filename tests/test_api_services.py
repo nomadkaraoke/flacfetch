@@ -428,3 +428,65 @@ class TestDownloadManagerAsync:
 
         asyncio.new_event_loop().run_until_complete(run_test())
 
+
+
+class TestStallErrorCode:
+    """Per-request stall ceiling is threaded through, and a stall surfaces as a
+    machine-readable error_code so callers can offer "keep trying"."""
+
+    def _run_by_id(self, dm, side_effect=None):
+        mock_manager = Mock()
+        if side_effect is not None:
+            mock_manager.download_by_id.side_effect = side_effect
+        else:
+            mock_manager.download_by_id.return_value = Path("/tmp/test.flac")
+
+        async def run():
+            with patch.object(dm, '_get_fetch_manager', return_value=mock_manager):
+                await dm.execute_download_by_id("dl_s")
+
+        asyncio.new_event_loop().run_until_complete(run())
+        return mock_manager
+
+    def test_max_stall_seconds_passed_to_download_by_id(self):
+        dm = DownloadManager(download_dir="/tmp/test-downloads")
+        task = dm.create_download_by_id(source_name="RED", source_id="1", max_stall_seconds=3600)
+        dm._downloads["dl_s"] = dm._downloads.pop(task.download_id)
+        dm._downloads["dl_s"].download_id = "dl_s"
+        mgr = self._run_by_id(dm)
+        assert mgr.download_by_id.call_args.kwargs["max_stall_seconds"] == 3600
+
+    def test_stall_sets_error_code(self):
+        from flacfetch.downloaders.torrent import TorrentStalledError
+        dm = DownloadManager(download_dir="/tmp/test-downloads")
+        dm._downloads["dl_s"] = DownloadTask(download_id="dl_s", provider="RED", source_id="1")
+        self._run_by_id(dm, side_effect=TorrentStalledError("Torrent download stalled for 600s"))
+        t = dm.get_download("dl_s")
+        assert t.status == DownloadStatus.FAILED
+        assert t.error_code == "torrent_stalled"
+        assert "stalled" in t.error
+
+    def test_other_failure_has_no_error_code(self):
+        dm = DownloadManager(download_dir="/tmp/test-downloads")
+        dm._downloads["dl_s"] = DownloadTask(download_id="dl_s", provider="RED", source_id="1")
+        self._run_by_id(dm, side_effect=RuntimeError("Torrent download stopped with error: x"))
+        t = dm.get_download("dl_s")
+        assert t.status == DownloadStatus.FAILED
+        assert t.error_code is None
+
+    def test_execute_download_passes_max_stall_seconds(self):
+        dm = DownloadManager(download_dir="/tmp/test-downloads")
+        dm._searches["s1"] = SearchCache(search_id="s1", artist="A", title="S", results=[
+            Mock(source_name="RED", artist="A", title="S"),
+        ])
+        task = dm.create_download(search_id="s1", result_index=0, output_filename="x",
+                                  max_stall_seconds=1200)
+        mock_manager = Mock()
+        mock_manager.download.return_value = Path("/tmp/x.flac")
+
+        async def run():
+            with patch.object(dm, '_get_fetch_manager', return_value=mock_manager):
+                await dm.execute_download(task.download_id)
+
+        asyncio.new_event_loop().run_until_complete(run())
+        assert mock_manager.download.call_args.kwargs["max_stall_seconds"] == 1200

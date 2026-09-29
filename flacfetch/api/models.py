@@ -78,6 +78,11 @@ class DownloadRequest(BaseModel):
     output_filename: Optional[str] = Field(None, description="Custom output filename (without extension)")
     upload_to_gcs: bool = Field(False, description="Upload to GCS when complete")
     gcs_path: Optional[str] = Field(None, description="GCS path (required if upload_to_gcs)")
+    max_stall_seconds: Optional[float] = Field(
+        None, gt=0,
+        description="Torrents only: abort after this many seconds with no progress "
+                    "(overrides FLACFETCH_MAX_STALL_SECONDS; capped at 3600).",
+    )
 
 
 class DownloadByIdRequest(BaseModel):
@@ -89,6 +94,11 @@ class DownloadByIdRequest(BaseModel):
     download_url: Optional[str] = Field(None, description="For YouTube/Spotify, direct URL. REQUIRED for source_name='URL' (any yt-dlp-supported site, e.g. Facebook, SoundCloud, TikTok).")
     upload_to_gcs: bool = Field(False, description="Upload to GCS when complete")
     gcs_path: Optional[str] = Field(None, description="GCS path (required if upload_to_gcs)")
+    max_stall_seconds: Optional[float] = Field(
+        None, gt=0,
+        description="Torrents only: abort after this many seconds with no progress "
+                    "(overrides FLACFETCH_MAX_STALL_SECONDS; capped at 3600).",
+    )
 
 
 class DownloadStatus(str, Enum):
@@ -123,6 +133,9 @@ class DownloadStatusResponse(BaseModel):
     output_path: Optional[str] = None  # Local path when complete
     gcs_path: Optional[str] = None  # GCS path when uploaded
     error: Optional[str] = None
+    # Machine-readable failure kind, e.g. "torrent_stalled" (no progress for the
+    # whole stall ceiling — the caller may offer to keep trying).
+    error_code: Optional[str] = None
     started_at: Optional[datetime] = None
 
 

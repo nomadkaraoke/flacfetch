@@ -76,6 +76,7 @@ async def start_download(
         output_filename=request.output_filename,
         upload_to_gcs=request.upload_to_gcs,
         gcs_destination=request.gcs_path,
+        max_stall_seconds=request.max_stall_seconds,
     )
 
     logger.info(f"Created download task: {task.download_id} for {task.provider}: {task.artist} - {task.title}")
@@ -150,6 +151,7 @@ async def start_download_by_id(
         download_url=request.download_url,
         upload_to_gcs=request.upload_to_gcs,
         gcs_destination=request.gcs_path,
+        max_stall_seconds=request.max_stall_seconds,
     )
 
     logger.info(f"Created download-by-id task: {task.download_id} for {task.provider} ID={task.source_id}")
@@ -215,6 +217,7 @@ async def get_download_status(
         output_path=task.output_path,
         gcs_path=task.gcs_path,
         error=task.error,
+        error_code=task.error_code,
         started_at=task.started_at,
     )
 

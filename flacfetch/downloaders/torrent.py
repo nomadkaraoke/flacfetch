@@ -21,6 +21,18 @@ try:
 except ImportError:
     transmission_rpc = None
 
+# Upper bound for a per-request stall ceiling (see download(max_stall_seconds=)).
+MAX_STALL_SECONDS_LIMIT = 3600.0
+
+
+class TorrentStalledError(RuntimeError):
+    """A torrent made no progress for the whole stall ceiling (e.g. its only
+    seeder is offline). Distinct from other failures so API callers can offer
+    "keep trying" instead of treating it as a broken download."""
+
+    error_code = "torrent_stalled"
+
+
 class TorrentDownloader(Downloader):
     """
     Downloads torrents using Transmission daemon.
@@ -97,6 +109,24 @@ class TorrentDownloader(Downloader):
             "/var/lib/transmission-daemon/downloads"
         )
 
+    def _effective_max_stall(self, override: Optional[float]) -> float:
+        """The stall ceiling for one download: the override if given (clamped to
+        leave room for a re-announce and capped at MAX_STALL_SECONDS_LIMIT), else
+        the instance default. Never mutates the shared instance — concurrent
+        downloads share this downloader."""
+        if override is None:
+            return self.max_stall_seconds
+        try:
+            val = float(override)
+        except (TypeError, ValueError):
+            return self.max_stall_seconds
+        if not math.isfinite(val) or val <= 0:
+            return self.max_stall_seconds
+        min_ceiling = self.stall_reannounce_seconds + self.stall_reannounce_interval
+        # The re-announce room always wins over the cap (an env config whose
+        # threshold + interval exceeds the cap must not yield a smaller ceiling).
+        return min(max(val, min_ceiling), max(MAX_STALL_SECONDS_LIMIT, min_ceiling))
+
     @staticmethod
     def _positive_float_env(name: str, default: float) -> float:
         """Read a strictly-positive, finite float from the environment.
@@ -162,7 +192,13 @@ class TorrentDownloader(Downloader):
                 )
                 return False
 
-    def download(self, release: Release, output_path: str, output_filename: Optional[str] = None) -> str:
+    def download(
+        self,
+        release: Release,
+        output_path: str,
+        output_filename: Optional[str] = None,
+        max_stall_seconds: Optional[float] = None,
+    ) -> str:
         """
         Download a torrent using Transmission.
 
@@ -170,6 +206,10 @@ class TorrentDownloader(Downloader):
             release: Release object containing download_url (path to .torrent file)
             output_path: Directory to save downloaded files
             output_filename: Optional specific filename for the output file
+            max_stall_seconds: Per-download stall ceiling overriding
+                FLACFETCH_MAX_STALL_SECONDS (e.g. a caller's "keep trying for an
+                hour" retry). Clamped to [re-announce threshold + interval,
+                MAX_STALL_SECONDS_LIMIT].
 
         Returns:
             Path to the downloaded file
@@ -344,6 +384,7 @@ class TorrentDownloader(Downloader):
             max_stalls = 60  # 60 seconds of no progress before the on-screen warning
             last_progress_time = time.monotonic()
             last_reannounce_time = None  # None => first re-announce allowed as soon as stalled
+            max_stall = self._effective_max_stall(max_stall_seconds)
             missing_polls = 0  # consecutive polls where the torrent had vanished
 
             while True:
@@ -502,8 +543,8 @@ class TorrentDownloader(Downloader):
                 # download task exits instead of looping forever. The unbounded
                 # loop previously leaked a hung background task on every caller
                 # retry until the API stopped responding.
-                if stalled_for >= self.max_stall_seconds:
-                    raise RuntimeError(
+                if stalled_for >= max_stall:
+                    raise TorrentStalledError(
                         f"Torrent download stalled for {int(stalled_for)}s with no "
                         f"progress at {progress:.2f}% (peers: {peers}); aborting"
                     )
