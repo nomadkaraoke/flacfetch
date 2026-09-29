@@ -63,6 +63,17 @@ class TestStallConfig:
         assert d.max_stall_seconds > d.stall_reannounce_seconds
 
 
+    def test_per_request_override_is_clamped_and_does_not_mutate(self):
+        d = self._construct()
+        assert d._effective_max_stall(None) == 600.0
+        assert d._effective_max_stall(1200) == 1200.0
+        assert d._effective_max_stall(50) == 210.0        # room for a re-announce
+        assert d._effective_max_stall(99999) == 3600.0    # MAX_STALL_SECONDS_LIMIT
+        for bad in (float("nan"), float("inf"), 0, -5, "abc"):
+            assert d._effective_max_stall(bad) == 600.0
+        assert d.max_stall_seconds == 600.0               # shared instance untouched
+
+
 class TestTorrentDownloaderInit:
     """Tests for TorrentDownloader initialization."""
 
@@ -388,7 +399,7 @@ class TestStallHandling:
             f.write(b'd8:announce20:http://tracker/annce4:infod4:name4:teste')
             return f.name
 
-    def _run_stalled_download(self, keep_seeding, output_dir):
+    def _run_stalled_download(self, keep_seeding, output_dir, **download_kwargs):
         """Drive download() against a torrent that never transfers (0 B/s at a
         constant percentage) and return the mock client so callers can assert on
         re-announce / removal. Raises the RuntimeError from the hard-stall abort.
@@ -429,7 +440,7 @@ class TestStallHandling:
                 downloader.client = mock_client
                 downloader._ensure_daemon_running = Mock(return_value=True)
 
-                downloader.download(mock_release, output_dir)
+                downloader.download(mock_release, output_dir, **download_kwargs)
             finally:
                 os.unlink(torrent_path)
 
@@ -439,6 +450,18 @@ class TestStallHandling:
         with tempfile.TemporaryDirectory() as out_dir:
             with pytest.raises(RuntimeError, match="stalled"):
                 self._run_stalled_download(keep_seeding=False, output_dir=out_dir)
+
+    def test_stall_raises_typed_error_honouring_override(self):
+        """A stall raises TorrentStalledError (a RuntimeError, error_code
+        'torrent_stalled') and a per-request ceiling replaces the 600s default."""
+        from flacfetch.downloaders.torrent import TorrentStalledError
+        with tempfile.TemporaryDirectory() as out_dir:
+            with pytest.raises(TorrentStalledError) as exc:
+                self._run_stalled_download(keep_seeding=False, output_dir=out_dir,
+                                           max_stall_seconds=1200)
+        assert exc.value.error_code == "torrent_stalled"
+        stalled_for = int(str(exc.value).split("stalled for ")[1].split("s")[0])
+        assert stalled_for >= 1200
 
     def test_stall_reannounces_before_aborting(self):
         """The stall path forces at least one tracker re-announce (fresh peer

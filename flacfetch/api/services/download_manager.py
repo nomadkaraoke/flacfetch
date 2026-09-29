@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from ...downloaders.torrent import TorrentStalledError
 from ..models import DownloadStatus
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,7 @@ class DownloadTask:
     upload_to_gcs: bool = False
     gcs_destination: Optional[str] = None
     error: Optional[str] = None
+    error_code: Optional[str] = None
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     torrent_id: Optional[int] = None  # Transmission torrent ID
@@ -46,6 +48,7 @@ class DownloadTask:
     source_id: Optional[str] = None
     target_file: Optional[str] = None
     download_url: Optional[str] = None
+    max_stall_seconds: Optional[float] = None  # torrents: per-request stall ceiling
 
 
 @dataclass
@@ -327,6 +330,7 @@ class DownloadManager:
         output_filename: Optional[str] = None,
         upload_to_gcs: bool = False,
         gcs_destination: Optional[str] = None,
+        max_stall_seconds: Optional[float] = None,
     ) -> DownloadTask:
         """
         Create a new download task.
@@ -356,6 +360,7 @@ class DownloadManager:
             provider=provider,
             title=title,
             artist=artist,
+            max_stall_seconds=max_stall_seconds,
             started_at=datetime.now(timezone.utc),
         )
 
@@ -426,6 +431,7 @@ class DownloadManager:
                     release,
                     self.download_dir,
                     output_filename=output_filename,
+                    max_stall_seconds=task.max_stall_seconds,
                 ),
             )
 
@@ -458,6 +464,7 @@ class DownloadManager:
                 download_id,
                 status=DownloadStatus.FAILED,
                 error=str(e),
+                error_code=TorrentStalledError.error_code if isinstance(e, TorrentStalledError) else None,
             )
 
     def create_download_by_id(
@@ -469,6 +476,7 @@ class DownloadManager:
         download_url: Optional[str] = None,
         upload_to_gcs: bool = False,
         gcs_destination: Optional[str] = None,
+        max_stall_seconds: Optional[float] = None,
     ) -> DownloadTask:
         """
         Create a download task for direct download by source ID (no search required).
@@ -487,6 +495,7 @@ class DownloadManager:
             download_url=download_url,
             upload_to_gcs=upload_to_gcs,
             gcs_destination=gcs_destination,
+            max_stall_seconds=max_stall_seconds,
             started_at=datetime.now(timezone.utc),
         )
 
@@ -527,6 +536,7 @@ class DownloadManager:
                     output_filename=task.output_filename,
                     target_file=task.target_file,
                     download_url=task.download_url,
+                    max_stall_seconds=task.max_stall_seconds,
                 ),
             )
 
@@ -559,6 +569,7 @@ class DownloadManager:
                 download_id,
                 status=DownloadStatus.FAILED,
                 error=str(e),
+                error_code=TorrentStalledError.error_code if isinstance(e, TorrentStalledError) else None,
             )
 
     async def _upload_to_gcs(self, local_path: str, gcs_destination: str) -> str:

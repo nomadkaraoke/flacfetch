@@ -6,6 +6,14 @@ from .models import AudioFormat, MediaSource, Quality, Release, TrackQuery
 
 logger = get_logger("FetchManager")
 
+
+def _stall_kwargs(downloader, max_stall_seconds: Optional[float]) -> dict:
+    """Pass a per-request stall ceiling only to downloaders that support it
+    (torrent); YouTube/Spotify downloaders don't take the kwarg."""
+    if max_stall_seconds is None or not hasattr(downloader, "max_stall_seconds"):
+        return {}
+    return {"max_stall_seconds": max_stall_seconds}
+
 class FetchManager:
     def __init__(self):
         self.providers: list[Provider] = []
@@ -318,7 +326,13 @@ class FetchManager:
         sorted_releases = self._sort_releases(releases)
         return handler.select_release(sorted_releases)
 
-    def download(self, release: Release, output_path: str, output_filename: Optional[str] = None) -> str:
+    def download(
+        self,
+        release: Release,
+        output_path: str,
+        output_filename: Optional[str] = None,
+        max_stall_seconds: Optional[float] = None,
+    ) -> str:
         downloader = self._downloader_map.get(release.source_name, self._default_downloader)
         if not downloader:
             msg = f"No downloader registered for source: {release.source_name}"
@@ -356,7 +370,10 @@ class FetchManager:
                      raise ValueError(msg)
 
         logger.info(f"Starting download for {release.title}...")
-        downloaded_file = downloader.download(release, output_path, output_filename=output_filename)
+        downloaded_file = downloader.download(
+            release, output_path, output_filename=output_filename,
+            **_stall_kwargs(downloader, max_stall_seconds),
+        )
         return downloaded_file
 
     def download_by_id(
@@ -367,6 +384,7 @@ class FetchManager:
         output_filename: Optional[str] = None,
         target_file: Optional[str] = None,
         download_url: Optional[str] = None,
+        max_stall_seconds: Optional[float] = None,
     ) -> str:
         """
         Download by source ID without needing a cached Release object.
@@ -491,7 +509,10 @@ class FetchManager:
             )
 
             logger.info(f"Starting torrent download for {source_name} ID: {source_id}...")
-            return downloader.download(release, output_path, output_filename=output_filename)
+            return downloader.download(
+                release, output_path, output_filename=output_filename,
+                **_stall_kwargs(downloader, max_stall_seconds),
+            )
 
         # Unknown source
         msg = f"download_by_id not implemented for source: {source_name}"

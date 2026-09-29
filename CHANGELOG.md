@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.0] - 2026-09-29
+
+### Added
+- **Per-request torrent stall ceiling.** `POST /download` and `POST /download-by-id`
+  accept an optional `max_stall_seconds` (torrents only). It overrides
+  `FLACFETCH_MAX_STALL_SECONDS` for that one download, with the same minimum as
+  before (re-announce threshold + interval) and a cap of 3600s. The shared
+  downloader instance is not mutated, so concurrent downloads keep their own
+  ceilings. karaoke-gen uses this to wait longer for rare torrents whose only
+  seeder is intermittently offline, and for its "Keep trying" retry.
+- **`error_code` on download status.** A stalled torrent now raises
+  `TorrentStalledError` (still a `RuntimeError`). `GET /download/{id}/status`
+  reports `error_code: "torrent_stalled"` for it, so callers can tell a stall
+  apart from a broken download without parsing the error text.
+
 ## [0.29.1] - 2026-09-01
 
 ### Fixed
