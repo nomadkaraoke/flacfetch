@@ -123,7 +123,9 @@ class TorrentDownloader(Downloader):
         if not math.isfinite(val) or val <= 0:
             return self.max_stall_seconds
         min_ceiling = self.stall_reannounce_seconds + self.stall_reannounce_interval
-        return min(max(val, min_ceiling), MAX_STALL_SECONDS_LIMIT)
+        # The re-announce room always wins over the cap (an env config whose
+        # threshold + interval exceeds the cap must not yield a smaller ceiling).
+        return min(max(val, min_ceiling), max(MAX_STALL_SECONDS_LIMIT, min_ceiling))
 
     @staticmethod
     def _positive_float_env(name: str, default: float) -> float:

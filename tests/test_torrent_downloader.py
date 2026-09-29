@@ -73,6 +73,14 @@ class TestStallConfig:
             assert d._effective_max_stall(bad) == 600.0
         assert d.max_stall_seconds == 600.0               # shared instance untouched
 
+    def test_override_never_below_reannounce_room_even_above_cap(self):
+        d = self._construct(
+            FLACFETCH_STALL_REANNOUNCE_SECONDS="3000",
+            FLACFETCH_STALL_REANNOUNCE_INTERVAL="1200",   # room = 4200 > 3600 cap
+        )
+        assert d._effective_max_stall(60) == 4200.0
+        assert d._effective_max_stall(99999) == 4200.0
+
 
 class TestTorrentDownloaderInit:
     """Tests for TorrentDownloader initialization."""
