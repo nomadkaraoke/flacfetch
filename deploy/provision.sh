@@ -90,6 +90,8 @@ have() { command -v "$1" >/dev/null 2>&1; }
 [ "$(id -u)" -eq 0 ] || die "run as root (sudo bash deploy/provision.sh)"
 export HOME=/root
 export DEBIAN_FRONTEND=noninteractive
+# The root fs is only ~8.6 GB; pip's wheel cache under /root/.cache just grows.
+export PIP_NO_CACHE_DIR=1
 
 # =============================================================================
 log "Stage 1 — apt dependencies"
@@ -108,6 +110,39 @@ else
   apt-get install -y -qq $APT_CORE $APT_T64 || die "apt dependency install failed"
   log "apt deps installed (t64 variants)"
 fi
+
+# =============================================================================
+log "Stage 1a — root-disk hygiene (small root fs: cap logs + caches)"
+# =============================================================================
+# Root is ~8.6 GB; everything that grows lives on $DATA_MOUNT except these. Left
+# alone they reached 84% (Oct 2026): ~550 MB of cached .debs, a journal at its
+# 10%-of-fs default cap (~880 MB), and a stale /root/.cache browser.
+# Don't keep downloaded .deb files after install.
+cat > /etc/apt/apt.conf.d/99flacfetch-no-deb-cache <<'APT_NO_CACHE'
+APT::Keep-Downloaded-Packages "false";
+Binary::apt::APT::Keep-Downloaded-Packages "false";
+APT_NO_CACHE
+apt-get clean
+# Cap the persistent journal well below journald's default (10% of the fs).
+mkdir -p /etc/systemd/journald.conf.d
+cat > /etc/systemd/journald.conf.d/flacfetch.conf <<'JOURNALD_CAP'
+[Journal]
+SystemMaxUse=300M
+SystemKeepFree=1G
+JOURNALD_CAP
+systemctl restart systemd-journald
+journalctl --vacuum-size=300M >/dev/null 2>&1 || true
+# Rotate the append-only logs our timers/keeper write.
+cat > /etc/logrotate.d/flacfetch <<'LOGROTATE'
+/var/log/flacfetch-*.log /var/log/transmission-maintenance.log /var/log/flacfetch-disk-watch.log {
+    weekly
+    rotate 4
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
+LOGROTATE
 
 # =============================================================================
 log "Stage 1b — transmission 4.0.6 (source build)"
@@ -383,6 +418,9 @@ pip install -e "${APP_DIR}[keeper]" --quiet || die "pip install flacfetch[keeper
 # PLAYWRIGHT_BROWSERS_PATH below.
 export PLAYWRIGHT_BROWSERS_PATH
 mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"
+# Pre-de-root installs put the browser in /root/.cache/ms-playwright (~640 MB).
+# Nothing uses it any more; reclaim the root-disk space.
+rm -rf /root/.cache/ms-playwright
 patchright install chromium >/dev/null 2>&1 || python -m patchright install chromium \
   || warn "patchright chromium install failed"
 FLACFETCH_VERSION="$(python -c 'import flacfetch; print(flacfetch.__version__)' 2>/dev/null || echo unknown)"
@@ -871,6 +909,65 @@ Persistent=true
 WantedBy=timers.target
 TR_MAINT_TIMER
 
+# Disk-space watch (hourly): Pushbullet alert when / or the data mount crosses
+# FF_DISK_ALERT_PCT, at most once a day per filesystem, so creep is caught
+# before a full disk breaks downloads (data) or apt/journald (root).
+cat > "$APP_DIR/disk-watch.sh" <<'DISK_WATCH_SCRIPT'
+#!/bin/bash
+exec >> /var/log/flacfetch-disk-watch.log 2>&1
+THRESHOLD="${FF_DISK_ALERT_PCT:-85}"
+STATE_DIR=/var/lib/flacfetch-disk-watch
+mkdir -p "$STATE_DIR"
+for fs in / /mnt/flacfetch-data; do
+  pct="$(df --output=pcent "$fs" 2>/dev/null | tail -1 | tr -dc '0-9')"
+  [ -n "$pct" ] || continue
+  stamp="$STATE_DIR/$(echo "$fs" | tr '/' '_').alerted"
+  if [ "$pct" -lt "$THRESHOLD" ]; then
+    rm -f "$stamp"
+    continue
+  fi
+  # Re-alert at most once a day while it stays above the threshold.
+  [ -f "$stamp" ] && [ -z "$(find "$stamp" -mmin +1440)" ] && continue
+  echo "$(date -Is) $fs at ${pct}% (threshold ${THRESHOLD}%) — alerting"
+  detail="$(df -h "$fs" | tail -1)"
+  if /opt/flacfetch/venv/bin/python - "$fs" "$pct" "$detail" <<'PY'
+import sys
+from flacfetch.api.services.credential_check import send_pushbullet_notification
+fs, pct, detail = sys.argv[1:4]
+ok = send_pushbullet_notification(
+    f"flacup disk {fs} at {pct}%",
+    f"{detail}\nSee flacfetch deploy/README.md (Disk space) for cleanup steps.",
+)
+sys.exit(0 if ok else 1)
+PY
+  then
+    touch "$stamp"
+  else
+    echo "$(date -Is) $fs alert NOT sent (check PUSHBULLET_API_KEY in runtime.env); retrying next hour"
+  fi
+done
+DISK_WATCH_SCRIPT
+chmod +x "$APP_DIR/disk-watch.sh"
+cat > /etc/systemd/system/flacfetch-disk-watch.service <<DISK_WATCH_SERVICE
+[Unit]
+Description=Alert when flacup root or data disk is nearly full
+[Service]
+Type=oneshot
+ExecStart=$APP_DIR/disk-watch.sh
+User=root
+EnvironmentFile=-$RUNTIME_ENV
+DISK_WATCH_SERVICE
+cat > /etc/systemd/system/flacfetch-disk-watch.timer <<'DISK_WATCH_TIMER'
+[Unit]
+Description=Hourly flacup disk-space check
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=300
+Persistent=true
+[Install]
+WantedBy=timers.target
+DISK_WATCH_TIMER
+
 # Credential health check (daily 19:00 UTC)
 cat > "$APP_DIR/check-credentials.sh" <<'CRED_CHECK_SCRIPT'
 #!/bin/bash
@@ -969,6 +1066,7 @@ if [ -f /etc/systemd/system/bgutil-pot.service ]; then
 fi
 systemctl enable --now ytdlp-update.timer >/dev/null 2>&1 || true
 systemctl enable --now transmission-maintenance.timer >/dev/null 2>&1 || true
+systemctl enable --now flacfetch-disk-watch.timer >/dev/null 2>&1 || true
 systemctl enable flacfetch >/dev/null 2>&1 || true
 if [ -f "$ENV_FILE" ]; then
   systemctl restart flacfetch
