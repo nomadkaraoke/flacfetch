@@ -930,7 +930,7 @@ for fs in / /mnt/flacfetch-data; do
   [ -f "$stamp" ] && [ -z "$(find "$stamp" -mmin +1440)" ] && continue
   echo "$(date -Is) $fs at ${pct}% (threshold ${THRESHOLD}%) — alerting"
   detail="$(df -h "$fs" | tail -1)"
-  /opt/flacfetch/venv/bin/python - "$fs" "$pct" "$detail" <<'PY' && touch "$stamp"
+  if /opt/flacfetch/venv/bin/python - "$fs" "$pct" "$detail" <<'PY'
 import sys
 from flacfetch.api.services.credential_check import send_pushbullet_notification
 fs, pct, detail = sys.argv[1:4]
@@ -940,6 +940,11 @@ ok = send_pushbullet_notification(
 )
 sys.exit(0 if ok else 1)
 PY
+  then
+    touch "$stamp"
+  else
+    echo "$(date -Is) $fs alert NOT sent (check PUSHBULLET_API_KEY in runtime.env); retrying next hour"
+  fi
 done
 DISK_WATCH_SCRIPT
 chmod +x "$APP_DIR/disk-watch.sh"

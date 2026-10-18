@@ -99,7 +99,7 @@ If it fires:
 
 ```bash
 ssh flacup 'df -h / /mnt/flacfetch-data; du -xh --max-depth=2 / | sort -rh | head -20'
-apt-get clean; journalctl --vacuum-size=200M          # root
+ssh flacup 'apt-get clean; journalctl --vacuum-size=200M'   # root fs
 ```
 
 On the data disk, seeded torrents (`KEEP_SEEDING=true`) grow ~3-4 GB/month; prune
