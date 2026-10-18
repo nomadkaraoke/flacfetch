@@ -347,8 +347,15 @@ class FetchManager:
                 provider.populate_details(release)
 
         if provider:
-            logger.info(f"Fetching metadata/artifact for {release.title} from {provider.name}...")
-            artifact = provider.fetch_artifact(release)
+            torrent_id_from_url = getattr(provider, "torrent_id_from_url", None)
+            artifact = self._artifact_if_already_seeded(
+                provider, downloader,
+                torrent_id_from_url(release.download_url) if torrent_id_from_url else None,
+                release.target_file,
+            )
+            if not artifact:
+                logger.info(f"Fetching metadata/artifact for {release.title} from {provider.name}...")
+                artifact = provider.fetch_artifact(release)
             if artifact:
                 import os
                 import tempfile
@@ -375,6 +382,30 @@ class FetchManager:
             **_stall_kwargs(downloader, max_stall_seconds),
         )
         return downloaded_file
+
+    @staticmethod
+    def _artifact_if_already_seeded(provider, downloader, torrent_id, target_file) -> Optional[bytes]:
+        """Return the cached .torrent when its wanted data is already complete locally.
+
+        Re-requesting a torrent we already seed must not touch the tracker: RED
+        allows only four .torrent downloads per torrent per user, and with
+        Freeleech tokens enabled each fetch past the 7-day window would spend a
+        token on data we already have. Returns None (caller fetches normally) if
+        the provider has no cached copy or the downloader can't confirm the data
+        is complete on disk.
+        """
+        get_cached = getattr(provider, "get_cached_artifact", None)
+        has_completed = getattr(downloader, "has_completed_target", None)
+        if not (torrent_id and get_cached and has_completed):
+            return None
+        artifact = get_cached(torrent_id)
+        if not artifact or not has_completed(artifact, target_file):
+            return None
+        logger.info(
+            f"{provider.name} torrent {torrent_id} already complete locally; "
+            f"reusing cached .torrent (no tracker fetch, no token)"
+        )
+        return artifact
 
     def download_by_id(
         self,
@@ -482,8 +513,10 @@ class FetchManager:
                 logger.error(msg)
                 raise ValueError(msg)
 
-            logger.info(f"Fetching torrent artifact for {source_name} ID: {source_id}")
-            artifact = provider.fetch_artifact_by_id(source_id)
+            artifact = self._artifact_if_already_seeded(provider, downloader, source_id, target_file)
+            if not artifact:
+                logger.info(f"Fetching torrent artifact for {source_name} ID: {source_id}")
+                artifact = provider.fetch_artifact_by_id(source_id)
 
             if not artifact:
                 msg = f"Failed to fetch torrent file for {source_name} ID: {source_id}"

@@ -1,3 +1,4 @@
+import hashlib
 import math
 import os
 import shutil
@@ -23,6 +24,48 @@ except ImportError:
 
 # Upper bound for a per-request stall ceiling (see download(max_stall_seconds=)).
 MAX_STALL_SECONDS_LIMIT = 3600.0
+
+
+def _bdecode_end(data: bytes, i: int) -> int:
+    """Return the index just past the bencoded value starting at ``data[i]``."""
+    c = data[i:i + 1]
+    if c == b"i":
+        return data.index(b"e", i) + 1
+    if c in (b"l", b"d"):
+        i += 1
+        while data[i:i + 1] != b"e":
+            i = _bdecode_end(data, i)
+        return i + 1
+    if c.isdigit():
+        colon = data.index(b":", i)
+        end = colon + 1 + int(data[i:colon])
+        if end > len(data):
+            raise ValueError("truncated bencode string")
+        return end
+    raise ValueError(f"invalid bencode at offset {i}")
+
+
+def info_hash_from_metainfo(metainfo: bytes) -> Optional[str]:
+    """Compute a .torrent's v1 info-hash (SHA-1 of the raw bencoded ``info`` dict).
+
+    Returns the lowercase hex digest, or None if the data isn't a parseable
+    torrent. Hashes the exact bytes of the ``info`` value (never re-encodes), so
+    it matches what Transmission reports as ``hashString``.
+    """
+    try:
+        if metainfo[:1] != b"d":
+            return None
+        i = 1
+        while metainfo[i:i + 1] != b"e":
+            key_end = _bdecode_end(metainfo, i)
+            key = metainfo[metainfo.index(b":", i) + 1:key_end]
+            value_end = _bdecode_end(metainfo, key_end)
+            if key == b"info":
+                return hashlib.sha1(metainfo[key_end:value_end]).hexdigest()
+            i = value_end
+    except (ValueError, IndexError):
+        return None
+    return None
 
 
 class TorrentStalledError(RuntimeError):
@@ -191,6 +234,42 @@ class TorrentDownloader(Downloader):
                     "Start: transmission-daemon"
                 )
                 return False
+
+    def has_completed_target(self, metainfo: bytes, target_file: Optional[str] = None) -> bool:
+        """True if this torrent's wanted data is already complete on disk.
+
+        Lets callers skip re-fetching the .torrent from the tracker (and spending
+        a Freeleech token) when we're already seeding the data — private trackers
+        cap .torrent downloads per torrent (RED: four). Only meaningful in
+        keep_seeding mode; otherwise torrents are removed after each download.
+
+        ``target_file`` narrows the check to the matching file(s); without it the
+        whole torrent must be complete. Any lookup failure returns False so the
+        caller falls back to the normal tracker fetch.
+        """
+        if not self.keep_seeding:
+            return False
+        info_hash = info_hash_from_metainfo(metainfo)
+        if not info_hash:
+            return False
+        try:
+            if not self._ensure_daemon_running():
+                return False
+            torrent = self.client.get_torrent(info_hash)
+            files = torrent.get_files()
+        except Exception as e:  # KeyError when not in Transmission, RPC errors
+            logger.debug(f"Torrent {info_hash} not available locally: {e}")
+            return False
+        if target_file:
+            files = [f for f in files if target_file in f.name]
+        if not files:
+            return False
+        td = getattr(torrent, "download_dir", None)
+        base = Path(td if isinstance(td, str) and td else self._download_dir)
+        for f in files:
+            if f.size <= 0 or f.completed < f.size or not (base / f.name).exists():
+                return False
+        return True
 
     def download(
         self,

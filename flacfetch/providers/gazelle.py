@@ -6,6 +6,7 @@ import time
 from abc import abstractmethod
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
@@ -472,6 +473,36 @@ class GazelleProvider(Provider):
             return False
         return True
 
+    def get_cached_artifact(self, source_id: str) -> Optional[bytes]:
+        """Return the locally cached .torrent for a torrent ID, or None.
+
+        Never contacts the tracker. Lets callers reuse a torrent we already hold
+        (e.g. one that's fully seeded) without spending a token or counting
+        against the tracker's per-torrent .torrent download limit.
+        """
+        if not self.cache_dir or not source_id:
+            return None
+        cache_path = self.cache_dir / f"{source_id}.torrent"
+        if not cache_path.exists():
+            return None
+        try:
+            data = cache_path.read_bytes()
+        except OSError as e:
+            logger.warning(f"Error reading from cache: {e}")
+            return None
+        if not data:
+            return None
+        logger.info(f"Found torrent in cache: {cache_path}")
+        return data
+
+    @staticmethod
+    def torrent_id_from_url(url: Optional[str]) -> Optional[str]:
+        """Extract the torrent ID from a tracker download URL (``...&id=123``)."""
+        if not url:
+            return None
+        values = parse_qs(urlparse(url).query).get("id")
+        return values[0] if values else None
+
     def fetch_artifact_by_id(self, source_id: str, use_token: Optional[bool] = None) -> Optional[bytes]:
         """Fetch .torrent file by torrent ID directly.
 
@@ -510,17 +541,9 @@ class GazelleProvider(Provider):
 
         # Serve the cached .torrent if present (token, if any, is already
         # registered above; a cached torrent is fine for the actual data fetch).
-        if self.cache_dir:
-            cache_path = self.cache_dir / f"{source_id}.torrent"
-            if cache_path.exists():
-                try:
-                    logger.info(f"Found torrent in cache: {cache_path}")
-                    with open(cache_path, "rb") as f:
-                        data = f.read()
-                    if len(data) > 0:
-                        return data
-                except Exception as e:
-                    logger.warning(f"Error reading from cache: {e}")
+        cached = self.get_cached_artifact(source_id)
+        if cached:
+            return cached
 
         # No token spent and no cache: fetch normally.
         return self._fetch_torrent_from_url(url, source_id)
@@ -543,12 +566,7 @@ class GazelleProvider(Provider):
         use_token = self.use_fl_token and self._is_token_eligible(release)
 
         # Extract Torrent ID for caching
-        torrent_id = None
-        try:
-            if "id=" in release.download_url:
-                torrent_id = release.download_url.split("id=")[1].split("&")[0]
-        except IndexError:
-            pass
+        torrent_id = self.torrent_id_from_url(release.download_url)
 
         # Delegate to the by-id path (handles token spend, cache reuse, fallback).
         if torrent_id:
