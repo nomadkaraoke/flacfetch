@@ -748,3 +748,86 @@ class TestCachedArtifact:
     ])
     def test_torrent_id_from_url(self, url, expected):
         assert GazelleProvider.torrent_id_from_url(url) == expected
+
+
+class TestConcurrentTorrentFetch:
+    """Album batches request one torrent many times at once: one tracker fetch."""
+
+    def _provider(self, tmp_path, use_fl_token):
+        p = ConcreteGazelleProvider(
+            api_key="test",
+            base_url="https://test.example",
+            cache_subdir="test",
+            use_fl_token=use_fl_token,
+        )
+        p.cache_dir = tmp_path
+        return p
+
+    def _slow_caching_fetch(self, provider):
+        import time as _time
+
+        def fetch(url, torrent_id, *a, **kw):
+            _time.sleep(0.05)  # widen the race window
+            data = b"d4:infod1:ai1eee"
+            (provider.cache_dir / f"{torrent_id}.torrent").write_bytes(data)
+            return data
+        return MagicMock(side_effect=fetch)
+
+    def _run_concurrently(self, fn, n=5):
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=n) as pool:
+            return list(pool.map(lambda _: fn(), range(n)))
+
+    def test_single_tracker_fetch_without_tokens(self, tmp_path):
+        p = self._provider(tmp_path, use_fl_token=False)
+        p._fetch_torrent_from_url = self._slow_caching_fetch(p)
+
+        results = self._run_concurrently(lambda: p.fetch_artifact_by_id("42"))
+
+        assert p._fetch_torrent_from_url.call_count == 1
+        assert results == [b"d4:infod1:ai1eee"] * 5
+
+    def test_failed_token_not_retried_by_siblings(self, tmp_path):
+        p = self._provider(tmp_path, use_fl_token=True)
+        p._spend_token = MagicMock(return_value=None)  # no tokens left
+        p._fetch_torrent_from_url = self._slow_caching_fetch(p)
+
+        results = self._run_concurrently(lambda: p.fetch_artifact_by_id("42"))
+
+        assert p._spend_token.call_count == 1
+        assert p._fetch_torrent_from_url.call_count == 1
+        assert all(r == b"d4:infod1:ai1eee" for r in results)
+
+    def test_successful_token_spent_once(self, tmp_path):
+        p = self._provider(tmp_path, use_fl_token=True)
+        calls = []
+
+        def spend(url, torrent_id):
+            calls.append(torrent_id)
+            data = b"d4:infod1:ai1eee"
+            (p.cache_dir / f"{torrent_id}.torrent").write_bytes(data)
+            return data
+        p._spend_token = MagicMock(side_effect=spend)
+        p._fetch_torrent_from_url = MagicMock(side_effect=AssertionError("network"))
+
+        self._run_concurrently(lambda: p.fetch_artifact_by_id("42"))
+
+        assert calls == ["42"]
+
+    def test_token_retried_after_backoff(self, tmp_path):
+        p = self._provider(tmp_path, use_fl_token=True)
+        p._spend_token = MagicMock(return_value=None)
+        p._fetch_torrent_from_url = MagicMock(return_value=b"d1:ai1ee")
+
+        p.fetch_artifact_by_id("42")
+        p.fetch_artifact_by_id("42")
+        assert p._spend_token.call_count == 1
+
+        p._token_failures["42"] -= p.FL_TOKEN_FAILURE_BACKOFF_SECONDS + 1
+        p.fetch_artifact_by_id("42")
+        assert p._spend_token.call_count == 2
+
+    def test_different_torrents_not_serialized_together(self, tmp_path):
+        p = self._provider(tmp_path, use_fl_token=False)
+        assert p._fetch_lock("1") is p._fetch_lock("1")
+        assert p._fetch_lock("1") is not p._fetch_lock("2")

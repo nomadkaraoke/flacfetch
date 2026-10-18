@@ -47,6 +47,9 @@ class GazelleProvider(Provider):
     # the same torrent. We track spends locally with this TTL.
     FL_TOKEN_FREELEECH_WINDOW_SECONDS = 7 * 24 * 3600
 
+    # After a token spend fails for a torrent, don't retry it for this long.
+    FL_TOKEN_FAILURE_BACKOFF_SECONDS = 600
+
     def __init__(self, api_key: str, base_url: str, cache_subdir: str, use_fl_token: bool = False):
         """Initialize the Gazelle provider.
 
@@ -73,6 +76,15 @@ class GazelleProvider(Provider):
         # on-disk marker can't be written (no cache dir / disk error) so we still
         # don't double-spend on the same torrent within the freeleech window.
         self._token_spends: dict[str, float] = {}
+        # {torrent_id: failure_time} for token spends that just failed (no tokens
+        # left, ineligible, per-torrent download limit). Album batches send many
+        # requests for one torrent at once; without this every sibling retries
+        # the same doomed usetoken=1 request.
+        self._token_failures: dict[str, float] = {}
+        # Per-torrent-ID locks so concurrent requests for the same torrent make
+        # ONE tracker fetch: the first caches the .torrent, the rest hit the cache.
+        self._fetch_locks: dict[str, threading.Lock] = {}
+        self._fetch_locks_guard = threading.Lock()
         self.session = requests.Session()
         self.session.headers.update({"Authorization": self.api_key})
         self.search_limit = 10
@@ -524,29 +536,48 @@ class GazelleProvider(Provider):
 
         url = f"{self.base_url}/ajax.php?action=download&id={source_id}"
 
-        # If we should spend a token and haven't already tokened this torrent
-        # within the freeleech window, register the token FIRST -- before the
-        # cache short-circuit. A cached .torrent file does NOT make a download
-        # freeleech; the token must be registered server-side via usetoken=1,
-        # otherwise the (re-)download of the torrent data counts against ratio.
-        if use_token and not self._token_recently_spent(source_id):
-            with self._token_lock:
-                if not self._token_recently_spent(source_id):
+        # Single-flight per torrent: an album batch fires one request per track at
+        # once, and without this they all missed the (not-yet-written) cache and
+        # each fetched the .torrent -- counting against the tracker's per-torrent
+        # download limit (RED: four). Siblings now wait and take the cached copy.
+        with self._fetch_lock(source_id):
+            # If we should spend a token and haven't already tokened this torrent
+            # within the freeleech window, register the token FIRST -- before the
+            # cache short-circuit. A cached .torrent file does NOT make a download
+            # freeleech; the token must be registered server-side via usetoken=1,
+            # otherwise the (re-)download of the torrent data counts against ratio.
+            if (
+                use_token
+                and not self._token_recently_spent(source_id)
+                and not self._token_recently_failed(source_id)
+            ):
+                with self._token_lock:
                     content = self._spend_token(url, source_id)
                     if content:
                         self._record_token_spend(source_id)
                         logger.info(f"{self.name}: spent a Freeleech token on torrent {source_id}")
                         return content
+                    self._token_failures[source_id] = time.time()
                     logger.warning(f"{self.name}: Freeleech token could not be spent on torrent {source_id}; using cache/normal download")
 
-        # Serve the cached .torrent if present (token, if any, is already
-        # registered above; a cached torrent is fine for the actual data fetch).
-        cached = self.get_cached_artifact(source_id)
-        if cached:
-            return cached
+            # Serve the cached .torrent if present (token, if any, is already
+            # registered above; a cached torrent is fine for the actual data fetch).
+            cached = self.get_cached_artifact(source_id)
+            if cached:
+                return cached
 
-        # No token spent and no cache: fetch normally.
-        return self._fetch_torrent_from_url(url, source_id)
+            # No token spent and no cache: fetch normally.
+            return self._fetch_torrent_from_url(url, source_id)
+
+    def _fetch_lock(self, torrent_id: str) -> threading.Lock:
+        """The lock serializing tracker fetches for one torrent ID."""
+        with self._fetch_locks_guard:
+            return self._fetch_locks.setdefault(torrent_id, threading.Lock())
+
+    def _token_recently_failed(self, torrent_id: str) -> bool:
+        """True if a token spend on this torrent failed within the backoff window."""
+        ts = self._token_failures.get(torrent_id)
+        return ts is not None and time.time() - ts < self.FL_TOKEN_FAILURE_BACKOFF_SECONDS
 
     def fetch_artifact(self, release: Release) -> Optional[bytes]:
         """Fetch .torrent file for a release.

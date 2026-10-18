@@ -15,6 +15,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `flacfetch-disk-watch.timer` sends an hourly-checked Pushbullet alert when `/` or
   the data mount crosses 85% (`FF_DISK_ALERT_PCT`), at most once a day each.
 
+## [0.33.0] - 2026-10-18
+
+### Fixed
+- **One tracker fetch per torrent for concurrent (album/bulk) requests.**
+  `fetch_artifact_by_id` is now single-flight per torrent ID. A bulk batch of
+  several tracks from one album used to send all its requests before the first
+  had cached the `.torrent`, so several of them fetched it from the tracker
+  (seen live: RED 2133126 fetched twice in one second, OPS 900529 likewise),
+  using up RED's four-downloads-per-torrent allowance. Siblings now wait and reuse
+  the cached copy. A failed Freeleech token spend is also remembered for 10 minutes
+  (`FL_TOKEN_FAILURE_BACKOFF_SECONDS`), so siblings don't each retry the same
+  doomed `usetoken=1` request.
+
 ## [0.32.0] - 2026-10-18
 
 ### Fixed
