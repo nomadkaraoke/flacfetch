@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Provisioner: root-disk hygiene + disk-space alert.** New Stage 1a stops
+  flacup's 8.6 GB root fs creeping (it hit 84%): no cached `.deb`s, journal capped
+  at 300 MB, weekly logrotate for `/var/log/flacfetch-*.log`, `PIP_NO_CACHE_DIR`,
+  and the stale pre-de-root `/root/.cache/ms-playwright` removed. New
+  `flacfetch-disk-watch.timer` sends an hourly-checked Pushbullet alert when `/` or
+  the data mount crosses 85% (`FF_DISK_ALERT_PCT`), at most once a day each.
+
 ## [0.32.0] - 2026-10-18
 
 ### Fixed

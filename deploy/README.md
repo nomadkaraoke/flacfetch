@@ -78,3 +78,30 @@ Full sequencing in `../docs/archive/2026-06-18-netcup-provision-design.md`.
   headed Chrome `--no-sandbox`; its browser is installed into
   `$APP_DIR/ms-playwright` (`PLAYWRIGHT_BROWSERS_PATH`) so the non-root user can
   find it. A host firewall on `:8080` is handled at the Cloudflare edge / nftables.
+- `transmission-daemon`, `flacfetch` and `credential-keeper` have
+  `RequiresMountsFor=/mnt/flacfetch-data`. The partition is `nofail` in fstab so a
+  bad disk can't block boot; the services fail visibly instead of running on root.
+
+## Disk space
+
+The root fs is small (~8.6 GB on netcup VPS 1000); torrents, downloads and the
+browser profile live on `/mnt/flacfetch-data`. Stage 1a keeps root from creeping:
+no cached `.deb`s (`/etc/apt/apt.conf.d/99flacfetch-no-deb-cache`), journal capped
+at 300 MB (`/etc/systemd/journald.conf.d/flacfetch.conf`), weekly logrotate of
+`/var/log/flacfetch-*.log`, no pip cache, and the legacy `/root/.cache/ms-playwright`
+removed.
+
+`flacfetch-disk-watch.timer` checks both filesystems hourly and sends a Pushbullet
+alert when either crosses 85% (`FF_DISK_ALERT_PCT` in `runtime.env`), at most once a
+day per filesystem. Log: `/var/log/flacfetch-disk-watch.log`.
+
+If it fires:
+
+```bash
+ssh flacup 'df -h / /mnt/flacfetch-data; du -xh --max-depth=2 / | sort -rh | head -20'
+apt-get clean; journalctl --vacuum-size=200M          # root
+```
+
+On the data disk, seeded torrents (`KEEP_SEEDING=true`) grow ~3-4 GB/month; prune
+the oldest/least-seeded torrents in Transmission (remove *with* data) rather than
+deleting files under `downloads/` by hand.
