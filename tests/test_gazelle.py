@@ -742,6 +742,8 @@ class TestCachedArtifact:
         ("https://t.example/ajax.php?action=download&id=7&usetoken=1", "7"),
         ("https://t.example/ajax.php?action=download", None),
         ("https://t.example/ajax.php?action=download&id=", None),
+        ("https://t.example/ajax.php?action=download&group_id=9", None),
+        ("https://t.example/ajax.php?group_id=9&id=12", "12"),
         (None, None),
     ])
     def test_torrent_id_from_url(self, url, expected):

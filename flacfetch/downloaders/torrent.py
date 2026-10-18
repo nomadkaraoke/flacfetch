@@ -38,7 +38,10 @@ def _bdecode_end(data: bytes, i: int) -> int:
         return i + 1
     if c.isdigit():
         colon = data.index(b":", i)
-        return colon + 1 + int(data[i:colon])
+        end = colon + 1 + int(data[i:colon])
+        if end > len(data):
+            raise ValueError("truncated bencode string")
+        return end
     raise ValueError(f"invalid bencode at offset {i}")
 
 

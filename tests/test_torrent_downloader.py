@@ -733,7 +733,7 @@ class TestInfoHashFromMetainfo:
         assert info_hash_from_metainfo(meta) == hashlib.sha1(_bencode(_INFO)).hexdigest()
 
     @pytest.mark.parametrize("data", [
-        b"", b"not a torrent", b'{"status": "failure"}', b"d8:announce3:abce", b"d4:info",
+        b"", b"not a torrent", b'{"status": "failure"}', b"d8:announce3:abce", b"d4:info", b"d4:info99:xe",
     ])
     def test_invalid_returns_none(self, data):
         from flacfetch.downloaders.torrent import info_hash_from_metainfo

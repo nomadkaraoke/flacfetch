@@ -6,6 +6,7 @@ import time
 from abc import abstractmethod
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
@@ -497,10 +498,10 @@ class GazelleProvider(Provider):
     @staticmethod
     def torrent_id_from_url(url: Optional[str]) -> Optional[str]:
         """Extract the torrent ID from a tracker download URL (``...&id=123``)."""
-        if not url or "id=" not in url:
+        if not url:
             return None
-        torrent_id = url.split("id=")[1].split("&")[0]
-        return torrent_id or None
+        values = parse_qs(urlparse(url).query).get("id")
+        return values[0] if values else None
 
     def fetch_artifact_by_id(self, source_id: str, use_token: Optional[bool] = None) -> Optional[bytes]:
         """Fetch .torrent file by torrent ID directly.
