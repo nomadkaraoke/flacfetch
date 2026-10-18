@@ -134,7 +134,7 @@ systemctl restart systemd-journald
 journalctl --vacuum-size=300M >/dev/null 2>&1 || true
 # Rotate the append-only logs our timers/keeper write.
 cat > /etc/logrotate.d/flacfetch <<'LOGROTATE'
-/var/log/flacfetch-*.log /var/log/transmission-maintenance.log /var/log/flacfetch-disk-watch.log {
+/var/log/flacfetch-*.log /var/log/transmission-maintenance.log {
     weekly
     rotate 4
     compress
