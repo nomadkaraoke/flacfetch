@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.32.0] - 2026-10-18
+
+### Fixed
+- **Don't re-fetch a .torrent we're already seeding.** Re-requesting a RED/OPS
+  torrent whose wanted file is already complete in Transmission now reuses the
+  cached `.torrent` and skips the tracker entirely. Before, every request went
+  back to the tracker (and, with `RED_USE_FL_TOKEN`, tried to spend a new
+  Freeleech token whenever the 7-day freeleech window had lapsed). For a track
+  requested every day (the E2E test's `piri - dog`) this burned tokens on data
+  we already had and hit RED's four-downloads-per-torrent limit ("You have
+  already downloaded this torrent file four times"). Applies to both
+  `download_by_id` and search-result downloads; only in `keep_seeding` mode.
+  New `GazelleProvider.get_cached_artifact()`, `TorrentDownloader.has_completed_target()`,
+  `info_hash_from_metainfo()`.
+
+### Changed
+- **Provisioner: services require the data mount.** `transmission-daemon` (via a
+  `data-mount.conf` drop-in), `flacfetch`, and `credential-keeper` now set
+  `RequiresMountsFor=/mnt/flacfetch-data`. The partition stays `nofail` in fstab
+  so a bad disk can't block boot, but the services now fail visibly instead of
+  starting against an empty mountpoint on the small root disk.
+
 ## [0.31.0] - 2026-09-29
 
 ### Added

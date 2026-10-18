@@ -700,3 +700,102 @@ class TestDownloadById:
                 output_path="/output",
             )
 
+
+
+class TestSeededTorrentReuse:
+    """A torrent we already seed must not be re-fetched from the tracker.
+
+    RED caps .torrent downloads at four per torrent, and each re-fetch past the
+    freeleech window would spend another token on data we already have.
+    """
+
+    class _Provider(Provider):
+        def __init__(self, cached=b"d4:infod1:ai1eee"):
+            self.cached = cached
+            self.fetch_artifact_by_id = Mock(return_value=b"fresh-from-tracker")
+            self.fetch_artifact = Mock(return_value=b"fresh-from-tracker")
+
+        @property
+        def name(self):
+            return "RED"
+
+        def search(self, q):
+            return []
+
+        def get_cached_artifact(self, source_id):
+            return self.cached
+
+        @staticmethod
+        def torrent_id_from_url(url):
+            return url.split("id=")[1] if url and "id=" in url else None
+
+    def _downloader(self, complete):
+        dl = Mock(spec=Downloader)
+        dl.download.return_value = "/path/to/file.flac"
+        dl.has_completed_target = Mock(return_value=complete)
+        return dl
+
+    def _written_artifact(self, mgr, call):
+        written = {}
+
+        def fake_fdopen(fd, mode):
+            m = MagicMock()
+            m.__enter__.return_value.write.side_effect = lambda b: written.setdefault("b", b)
+            return m
+
+        with patch("tempfile.mkstemp", return_value=(999, "/tmp/t.torrent")), \
+             patch("os.fdopen", side_effect=fake_fdopen), patch("os.chmod"):
+            result = call()
+        return result, written.get("b")
+
+    def test_download_by_id_skips_tracker_when_seeded(self):
+        mgr, provider, dl = FetchManager(), self._Provider(), self._downloader(True)
+        mgr.add_provider(provider)
+        mgr.register_downloader("RED", dl)
+
+        result, written = self._written_artifact(mgr, lambda: mgr.download_by_id(
+            "RED", "5164236", "/out", target_file="04 - dog.flac"))
+
+        assert result == "/path/to/file.flac"
+        provider.fetch_artifact_by_id.assert_not_called()
+        dl.has_completed_target.assert_called_once_with(b"d4:infod1:ai1eee", "04 - dog.flac")
+        assert written == b"d4:infod1:ai1eee"
+
+    def test_download_by_id_fetches_when_not_complete(self):
+        mgr, provider, dl = FetchManager(), self._Provider(), self._downloader(False)
+        mgr.add_provider(provider)
+        mgr.register_downloader("RED", dl)
+
+        _, written = self._written_artifact(mgr, lambda: mgr.download_by_id(
+            "RED", "5164236", "/out", target_file="04 - dog.flac"))
+
+        provider.fetch_artifact_by_id.assert_called_once_with("5164236")
+        assert written == b"fresh-from-tracker"
+
+    def test_download_by_id_fetches_when_not_cached(self):
+        mgr, provider, dl = FetchManager(), self._Provider(cached=None), self._downloader(True)
+        mgr.add_provider(provider)
+        mgr.register_downloader("RED", dl)
+
+        self._written_artifact(mgr, lambda: mgr.download_by_id("RED", "5164236", "/out"))
+
+        provider.fetch_artifact_by_id.assert_called_once_with("5164236")
+        dl.has_completed_target.assert_not_called()
+
+    def test_search_download_skips_tracker_when_seeded(self):
+        mgr, provider, dl = FetchManager(), self._Provider(), self._downloader(True)
+        mgr.add_provider(provider)
+        mgr.register_downloader("RED", dl)
+        release = Release(
+            title="Album", artist="Artist",
+            quality=Quality(format=AudioFormat.FLAC, media=MediaSource.WEB),
+            source_name="RED",
+            download_url="https://redacted.sh/ajax.php?action=download&id=5164236",
+            target_file="04 - dog.flac",
+        )
+
+        _, written = self._written_artifact(mgr, lambda: mgr.download(release, "/out"))
+
+        provider.fetch_artifact.assert_not_called()
+        dl.has_completed_target.assert_called_once_with(b"d4:infod1:ai1eee", "04 - dog.flac")
+        assert written == b"d4:infod1:ai1eee"

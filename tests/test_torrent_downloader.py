@@ -688,3 +688,138 @@ class TestLocateCompletedTarget:
         t = self._torrent([self._file(3, "x.flac", 4, 4)], str(tmp_path))
         assert TorrentDownloader._locate_completed_target(
             t, str(tmp_path), self._release(None), []) is None
+
+
+def _bencode(value):
+    if isinstance(value, int):
+        return b"i%de" % value
+    if isinstance(value, bytes):
+        return b"%d:%s" % (len(value), value)
+    if isinstance(value, str):
+        return _bencode(value.encode())
+    if isinstance(value, list):
+        return b"l" + b"".join(_bencode(v) for v in value) + b"e"
+    if isinstance(value, dict):
+        items = sorted((k.encode() if isinstance(k, str) else k, v) for k, v in value.items())
+        return b"d" + b"".join(_bencode(k) + _bencode(v) for k, v in items) + b"e"
+    raise TypeError(value)
+
+
+_INFO = {
+    "name": "Artist - Album (2024) [FLAC]",
+    "piece length": 16384,
+    "pieces": b"\x00" * 20,
+    "files": [
+        {"length": 100, "path": ["01 - intro.flac"]},
+        {"length": 200, "path": ["04 - dog.flac"]},
+    ],
+}
+_METAINFO = _bencode({"announce": "https://tracker.example/announce", "info": _INFO})
+
+
+class TestInfoHashFromMetainfo:
+    def test_matches_sha1_of_raw_info_dict(self):
+        import hashlib
+
+        from flacfetch.downloaders.torrent import info_hash_from_metainfo
+        assert info_hash_from_metainfo(_METAINFO) == hashlib.sha1(_bencode(_INFO)).hexdigest()
+
+    def test_info_not_first_key(self):
+        """Keys before 'info' (and nested containers) are skipped correctly."""
+        import hashlib
+
+        from flacfetch.downloaders.torrent import info_hash_from_metainfo
+        meta = _bencode({"a-list": [1, b"x", {"k": [2]}], "comment": "hi", "info": _INFO})
+        assert info_hash_from_metainfo(meta) == hashlib.sha1(_bencode(_INFO)).hexdigest()
+
+    @pytest.mark.parametrize("data", [
+        b"", b"not a torrent", b'{"status": "failure"}', b"d8:announce3:abce", b"d4:info",
+    ])
+    def test_invalid_returns_none(self, data):
+        from flacfetch.downloaders.torrent import info_hash_from_metainfo
+        assert info_hash_from_metainfo(data) is None
+
+
+class TestHasCompletedTarget:
+    """Reuse check that lets us skip re-fetching a .torrent we already seed."""
+
+    def _file(self, fid, name, size, completed):
+        f = Mock()
+        f.id, f.name, f.size, f.completed = fid, name, size, completed
+        return f
+
+    def _downloader(self, files, download_dir, keep_seeding=True, get_torrent_error=None):
+        with patch('flacfetch.downloaders.torrent.transmission_rpc'):
+            from flacfetch.downloaders.torrent import TorrentDownloader
+            d = TorrentDownloader(keep_seeding=keep_seeding)
+        d._ensure_daemon_running = Mock(return_value=True)
+        d.client = Mock()
+        if get_torrent_error:
+            d.client.get_torrent.side_effect = get_torrent_error
+        else:
+            torrent = Mock()
+            torrent.download_dir = str(download_dir)
+            torrent.get_files.return_value = files
+            d.client.get_torrent.return_value = torrent
+        return d
+
+    def _on_disk(self, tmp_path, *names):
+        for n in names:
+            p = tmp_path / n
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"x")
+
+    def test_target_complete_on_disk(self, tmp_path):
+        import hashlib
+        album = "Artist - Album (2024) [FLAC]"
+        self._on_disk(tmp_path, f"{album}/04 - dog.flac")
+        files = [
+            self._file(0, f"{album}/01 - intro.flac", 100, 0),  # unwanted, incomplete
+            self._file(1, f"{album}/04 - dog.flac", 200, 200),
+        ]
+        d = self._downloader(files, tmp_path)
+        assert d.has_completed_target(_METAINFO, "04 - dog.flac") is True
+        d.client.get_torrent.assert_called_once_with(hashlib.sha1(_bencode(_INFO)).hexdigest())
+
+    def test_target_incomplete(self, tmp_path):
+        album = "Artist - Album (2024) [FLAC]"
+        self._on_disk(tmp_path, f"{album}/04 - dog.flac")
+        files = [self._file(1, f"{album}/04 - dog.flac", 200, 150)]
+        assert self._downloader(files, tmp_path).has_completed_target(_METAINFO, "04 - dog.flac") is False
+
+    def test_target_missing_from_disk(self, tmp_path):
+        files = [self._file(1, "Album/04 - dog.flac", 200, 200)]
+        assert self._downloader(files, tmp_path).has_completed_target(_METAINFO, "04 - dog.flac") is False
+
+    def test_target_not_in_torrent(self, tmp_path):
+        files = [self._file(1, "Album/04 - dog.flac", 200, 200)]
+        self._on_disk(tmp_path, "Album/04 - dog.flac")
+        assert self._downloader(files, tmp_path).has_completed_target(_METAINFO, "99 - cat.flac") is False
+
+    def test_whole_torrent_requires_every_file(self, tmp_path):
+        self._on_disk(tmp_path, "Album/01.flac", "Album/02.flac")
+        partial = [self._file(0, "Album/01.flac", 100, 100), self._file(1, "Album/02.flac", 100, 0)]
+        assert self._downloader(partial, tmp_path).has_completed_target(_METAINFO) is False
+        full = [self._file(0, "Album/01.flac", 100, 100), self._file(1, "Album/02.flac", 100, 100)]
+        assert self._downloader(full, tmp_path).has_completed_target(_METAINFO) is True
+
+    def test_not_in_transmission(self, tmp_path):
+        d = self._downloader([], tmp_path, get_torrent_error=KeyError("no torrent"))
+        assert d.has_completed_target(_METAINFO, "04 - dog.flac") is False
+
+    def test_not_keep_seeding_never_reuses(self, tmp_path):
+        files = [self._file(1, "Album/04 - dog.flac", 200, 200)]
+        self._on_disk(tmp_path, "Album/04 - dog.flac")
+        d = self._downloader(files, tmp_path, keep_seeding=False)
+        assert d.has_completed_target(_METAINFO, "04 - dog.flac") is False
+        d.client.get_torrent.assert_not_called()
+
+    def test_unparseable_metainfo(self, tmp_path):
+        d = self._downloader([], tmp_path)
+        assert d.has_completed_target(b'{"error": "x"}', "04 - dog.flac") is False
+        d.client.get_torrent.assert_not_called()
+
+    def test_daemon_unavailable(self, tmp_path):
+        d = self._downloader([], tmp_path)
+        d._ensure_daemon_running.return_value = False
+        assert d.has_completed_target(_METAINFO, "04 - dog.flac") is False

@@ -570,6 +570,15 @@ cat > /etc/systemd/system/transmission-daemon.service.d/limits.conf <<'TR_LIMITS
 [Service]
 LimitNOFILE=131072
 TR_LIMITS
+# Torrents/resume (symlinked above) and all seeded data live on $DATA_MOUNT,
+# which fstab mounts with `nofail` so a bad data partition can't block boot.
+# Without this, a failed mount would let transmission start against the empty
+# mountpoint on the small root disk: no torrents, new downloads filling root.
+# RequiresMountsFor makes the unit fail visibly instead.
+cat > /etc/systemd/system/transmission-daemon.service.d/data-mount.conf <<TR_MOUNT
+[Unit]
+RequiresMountsFor=$DATA_MOUNT
+TR_MOUNT
 systemctl daemon-reload
 systemctl start transmission-daemon
 for _ in $(seq 1 10); do transmission-remote localhost:9091 -l >/dev/null 2>&1 && { log "transmission up"; break; }; sleep 1; done
@@ -629,6 +638,7 @@ cat > /etc/systemd/system/flacfetch.service <<SYSTEMD
 Description=Flacfetch HTTP API Service
 After=network.target transmission-daemon.service
 Requires=transmission-daemon.service
+RequiresMountsFor=$DATA_MOUNT
 
 [Service]
 Type=simple
@@ -914,6 +924,7 @@ if [ -n "$FLACFETCH_ACCOUNT_EMAIL" ] && [ -n "$FLACFETCH_ACCOUNT_PASSWORD" ]; th
 Description=Flacfetch Credential Keeper (browser automation)
 After=network.target xvfb.service flacfetch.service
 Requires=xvfb.service
+RequiresMountsFor=$DATA_MOUNT
 
 [Service]
 Type=simple

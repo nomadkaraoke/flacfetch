@@ -141,8 +141,12 @@ Behaviour (opt-in, **off by default**):
   (its `canUseToken` flag — which is only true when you currently hold a token,
   the torrent is ≤ 5 GB, and it isn't already freeleech). This means tokens are
   used automatically whenever available and it simply stops once you run out.
-- Already-free torrents are never charged a token, and cached `.torrent` files are
-  reused without spending one.
+- Already-free torrents are never charged a token. A token is not re-spent on the
+  same torrent within its 7-day freeleech window.
+- If the requested file is already complete in Transmission (server/`keep_seeding`
+  mode), the cached `.torrent` is reused and the tracker is not contacted at all:
+  no token, and no hit on the tracker's per-torrent `.torrent` download limit
+  (RED allows four).
 - If a token spend fails for any reason, flacfetch transparently falls back to a
   normal (ratio-counted) download — a failed token never blocks a download.
 

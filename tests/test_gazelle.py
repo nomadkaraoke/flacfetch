@@ -706,3 +706,43 @@ class TestFreeleechTokens:
         result = no_token_provider.fetch_artifact_by_id("42")
         assert not no_token_provider._fetch_torrent_from_url.called
         assert result == b"d8:announce...cached"
+
+
+class TestCachedArtifact:
+    """get_cached_artifact / torrent_id_from_url never touch the tracker."""
+
+    @pytest.fixture
+    def provider(self, tmp_path):
+        p = ConcreteGazelleProvider(
+            api_key="test",
+            base_url="https://test.example",
+            cache_subdir="test",
+            use_fl_token=True,
+        )
+        p.cache_dir = tmp_path
+        p._fetch_torrent_from_url = MagicMock(side_effect=AssertionError("network"))
+        return p
+
+    def test_returns_cached_bytes(self, provider):
+        (provider.cache_dir / "42.torrent").write_bytes(b"d4:infod1:ai1eee")
+        assert provider.get_cached_artifact("42") == b"d4:infod1:ai1eee"
+
+    def test_missing_or_empty_returns_none(self, provider):
+        assert provider.get_cached_artifact("42") is None
+        (provider.cache_dir / "43.torrent").write_bytes(b"")
+        assert provider.get_cached_artifact("43") is None
+        assert provider.get_cached_artifact("") is None
+
+    def test_no_cache_dir_returns_none(self, provider):
+        provider.cache_dir = None
+        assert provider.get_cached_artifact("42") is None
+
+    @pytest.mark.parametrize("url,expected", [
+        ("https://t.example/ajax.php?action=download&id=5164236", "5164236"),
+        ("https://t.example/ajax.php?action=download&id=7&usetoken=1", "7"),
+        ("https://t.example/ajax.php?action=download", None),
+        ("https://t.example/ajax.php?action=download&id=", None),
+        (None, None),
+    ])
+    def test_torrent_id_from_url(self, url, expected):
+        assert GazelleProvider.torrent_id_from_url(url) == expected
