@@ -684,6 +684,7 @@ User=$FF_SERVICE_USER
 Group=$FF_SERVICE_USER
 SupplementaryGroups=debian-transmission
 UMask=002
+StateDirectory=flacfetch
 WorkingDirectory=$APP_DIR
 EnvironmentFile=-$RUNTIME_ENV
 Environment="HOME=$APP_DIR"
@@ -695,6 +696,7 @@ Environment="GOOGLE_CLOUD_PROJECT=${FF_GCP_PROJECT}"
 Environment="GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS}"
 Environment="FLACFETCH_KEEP_SEEDING=true"
 Environment="FLACFETCH_MIN_FREE_GB=5"
+Environment="FLACFETCH_SPOTIFY_LEDGER=/var/lib/flacfetch/spotify_ledger.sqlite"
 Environment="FLACFETCH_DOWNLOAD_DIR=${DOWNLOAD_DIR}"
 Environment="TRANSMISSION_HOST=localhost"
 Environment="TRANSMISSION_PORT=9091"

@@ -5,7 +5,7 @@ import logging
 import os
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from ..auth import verify_api_key
 from ..models import (
@@ -18,6 +18,7 @@ from ..models import (
     DownloadStatusResponse,
 )
 from ..services import get_download_manager
+from ..services.spotify_budget import DEFAULT_INTERACTIVE_RESERVE_S, BudgetConfig, get_spotify_ledger
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["download"])
@@ -110,6 +111,11 @@ async def start_download_by_id(
     - download_url: For YouTube/Spotify, the direct URL (optional, constructed from source_id if missing).
       REQUIRED for source_name='URL' (any yt-dlp-supported site, e.g. Facebook, SoundCloud, TikTok).
 
+    - priority / expected_duration_s (Spotify): 'batch' downloads need expected_duration_s and are
+      refused with 429 {"detail": {"code", "retry_after_s"}} + Retry-After when the rolling Spotify
+      listening budget is exhausted or the batch gate is closed. 'interactive' is never refused.
+    - delete_local_after_upload: delete the local file after a successful GCS upload (always for batch).
+
     The download runs in the background. Use GET /download/{download_id}/status to check progress.
     """
     manager = get_download_manager()
@@ -137,6 +143,14 @@ async def start_download_by_id(
             detail="gcs_path is required when upload_to_gcs is true"
         )
 
+    is_spotify = request.source_name == "Spotify"
+    is_batch = is_spotify and request.priority == "batch"
+    if is_batch and not request.expected_duration_s:
+        raise HTTPException(
+            status_code=400,
+            detail="expected_duration_s is required for Spotify downloads with priority='batch'"
+        )
+
     logger.info(
         f"Download by ID requested: source={request.source_name}, "
         f"id={request.source_id}, target_file={request.target_file}"
@@ -152,7 +166,29 @@ async def start_download_by_id(
         upload_to_gcs=request.upload_to_gcs,
         gcs_destination=request.gcs_path,
         max_stall_seconds=request.max_stall_seconds,
+        delete_local_after_upload=request.delete_local_after_upload or is_batch,
     )
+
+    if is_spotify:
+        ledger = get_spotify_ledger()
+        if is_batch:
+            ok, code, retry_after = ledger.try_reserve_batch(
+                task.download_id, request.expected_duration_s, BudgetConfig.from_env()
+            )
+            if not ok:
+                manager.discard_download(task.download_id)
+                logger.warning(f"Spotify batch download refused: {code} (retry in {retry_after}s)")
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": {"code": code, "retry_after_s": retry_after}},
+                    headers={"Retry-After": str(retry_after)},
+                )
+        else:
+            ledger.reserve(
+                task.download_id, "interactive",
+                request.expected_duration_s or DEFAULT_INTERACTIVE_RESERVE_S,
+            )
+        task.spotify_reserved = True
 
     logger.info(f"Created download-by-id task: {task.download_id} for {task.provider} ID={task.source_id}")
 

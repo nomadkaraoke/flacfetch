@@ -33,6 +33,7 @@ from .routes import (
     download_router,
     health_router,
     search_router,
+    spotify_router,
     torrents_router,
 )
 from .services import get_disk_manager, get_download_manager, get_search_cache_service, set_server_started_at
@@ -167,6 +168,7 @@ def create_app() -> FastAPI:
     app.include_router(config_router)
     app.include_router(credentials_router)
     app.include_router(cache_router)
+    app.include_router(spotify_router)
 
     return app
 
