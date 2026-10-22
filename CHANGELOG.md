@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-10-22
+
+### Added
+- **Album search: `POST /search/album`.** One tracker browse by artist + album
+  name (RED and OPS) plus the file lists of the top 3 groups, mapping every
+  requested track to a file of each lossless torrent (`track_files`, one-to-one,
+  track-number tie-break). It replaces N per-track searches for album batches:
+  karaoke-gen's Bulk "By album" sent 12 track searches for one album, and since
+  searches run on a single worker, 4 of them queued past the caller's 95s timeout.
+  Guards against handing a track the wrong recording: version markers (live,
+  remix, demo, acoustic, ...) must agree between title and file, only neutral
+  suffixes (feat., remastered, mono) are ignored, and matches weaker than an exact
+  title need a strong score or the file's track number to agree. Torrents rank by
+  tracks covered, then studio release type, non-vinyl, match strength, seeders.
+  Returns 502 (not 404) when every tracker failed.
+
+### Changed
+- **"Excellent" / top-seeded lossless bar is 10 seeders (was 50)**
+  (`BEST_CHOICE_MIN_SEEDERS`): CLI categories, `is_excellent_match`, remote CLI
+  auto-select. Matches karaoke-gen's BEST CHOICE rule; a lossless torrent with
+  ~10 seeders is almost always right. Track-sweep early termination still needs
+  a 50-seeder hit, so a modest match can't cut a sweep short.
+
 ### Changed
 - **Provisioner: root-disk hygiene + disk-space alert.** New Stage 1a stops
   flacup's 8.6 GB root fs creeping (it hit 84%): no cached `.deb`s, journal capped

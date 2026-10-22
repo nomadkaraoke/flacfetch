@@ -6,12 +6,23 @@ import logging
 import uuid
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from flacfetch.core.models import MediaSource
+
 from ..auth import verify_api_key
-from ..models import ProviderSearchStats, SearchRequest, SearchResponse, SearchResultItem
+from ..models import (
+    AlbumSearchRequest,
+    AlbumSearchResponse,
+    AlbumSearchResultItem,
+    AlbumTrackFile,
+    ProviderSearchStats,
+    SearchRequest,
+    SearchResponse,
+    SearchResultItem,
+)
 from ..services import get_download_manager, get_search_cache_service
 from ..services.search_cache import SearchCacheService
 
@@ -33,6 +44,21 @@ _inflight_searches: Dict[tuple, "asyncio.Task"] = {}
 
 # Group-fetch limit for exhaustive sweeps (normal sweeps use each provider's own default)
 EXHAUSTIVE_SEARCH_LIMIT = 20
+
+
+def _quality_fields(release) -> tuple[str, Optional[dict], bool]:
+    """(quality string, quality_data dict, is_lossless) for a release."""
+    if not release.quality:
+        return "", None, False
+    quality_data = {
+        "format": release.quality.format.name,
+        "bit_depth": release.quality.bit_depth,
+        "sample_rate": release.quality.sample_rate,
+        "bitrate": release.quality.bitrate,
+        "media": release.quality.media.name,
+    }
+    # Use is_true_lossless - Spotify is transcoded from lossy source
+    return str(release.quality), quality_data, release.quality.is_true_lossless(release.source_name)
 
 
 def _inflight_key(artist: str, title: str, exhaustive: bool) -> tuple:
@@ -151,20 +177,7 @@ async def search_audio(
     # Convert to response format
     results: List[SearchResultItem] = []
     for idx, release in enumerate(releases):
-        # Get quality info
-        quality_str = str(release.quality) if release.quality else ""
-        quality_data = None
-        is_lossless = False
-        if release.quality:
-            quality_data = {
-                "format": release.quality.format.name,
-                "bit_depth": release.quality.bit_depth,
-                "sample_rate": release.quality.sample_rate,
-                "bitrate": release.quality.bitrate,
-                "media": release.quality.media.name,
-            }
-            # Use is_true_lossless - Spotify is transcoded from lossy source
-            is_lossless = release.quality.is_true_lossless(release.source_name)
+        quality_str, quality_data, is_lossless = _quality_fields(release)
 
         results.append(SearchResultItem(
             index=idx,
@@ -212,3 +225,149 @@ async def search_audio(
         provider_stats=provider_stats,
     )
 
+
+
+# =============================================================================
+# Album search
+# =============================================================================
+
+# Album searches in flight, keyed like _inflight_key but per album + tracklist.
+_inflight_album_searches: Dict[tuple, "asyncio.Task"] = {}
+
+
+def _album_inflight_key(request: AlbumSearchRequest) -> tuple:
+    norm = SearchCacheService._normalize_part
+    tracks = tuple((t.key, norm(t.title), t.position) for t in request.tracks)
+    return (norm(request.artist), norm(request.album), tracks)
+
+
+# Release types that are the album as released (vs a live/compilation/remix
+# group whose name happens to contain the album's).
+_STUDIO_RELEASE_TYPES = {"Album", "EP", "Single", "Soundtrack"}
+
+
+def _album_sort_key(candidate):
+    """Most tracks covered, then studio release types, then non-vinyl, then the
+    strongest file matches, then seeders."""
+    release = candidate.release
+    is_vinyl = bool(release.quality and release.quality.media == MediaSource.VINYL)
+    not_studio = release.release_type not in _STUDIO_RELEASE_TYPES
+    match_total = sum(f.match_score for f in candidate.track_files.values())
+    return (-candidate.matched_count, not_studio, is_vinyl, -round(match_total, 3), -(release.seeders or 0))
+
+
+class AlbumSearchProvidersFailed(Exception):
+    """Every provider that supports album search raised (vs. found nothing)."""
+
+
+def _run_album_search(fetch_manager, artist: str, album: str, tracks: list) -> list:
+    """Album search on every provider that supports it (RED/OPS). Runs inside
+    _search_executor so it's serialized with track sweeps on the shared providers."""
+    candidates = []
+    attempted = failed = 0
+    for provider in fetch_manager.providers:
+        search_album = getattr(provider, "search_album", None)
+        if search_album is None:
+            continue
+        attempted += 1
+        try:
+            candidates.extend(search_album(artist, album, tracks))
+        except Exception as e:  # noqa: BLE001 - one tracker failing must not sink the other
+            failed += 1
+            logger.error(f"Album search failed on {provider.name}: {e}", exc_info=True)
+    if attempted and failed == attempted:
+        raise AlbumSearchProvidersFailed(f"all {attempted} album search providers failed")
+    candidates.sort(key=_album_sort_key)
+    return candidates
+
+
+@router.post("/search/album", response_model=AlbumSearchResponse)
+async def search_album(
+    request: AlbumSearchRequest,
+    api_key: str = Depends(verify_api_key),
+) -> AlbumSearchResponse:
+    """
+    Find lossless torrents of one album and map each requested track to its file.
+
+    One tracker browse by artist + album name (RED and OPS) instead of a search per
+    track. Each result is a torrent with ``track_files`` ({track key: target_file});
+    download a track with POST /download-by-id using the torrent's source_id and that
+    target_file. Results are ordered by how many requested tracks they cover, then
+    non-vinyl, then seeders. 404 when no torrent covers any requested track.
+    """
+    from flacfetch.core.album_match import AlbumTrack
+
+    manager = get_download_manager()
+    fetch_manager = manager._get_fetch_manager()
+    tracks = [AlbumTrack(key=t.key, title=t.title, position=t.position) for t in request.tracks]
+
+    logger.info(f"Album search: {request.artist} - {request.album} ({len(tracks)} tracks)")
+
+    key = _album_inflight_key(request)
+    task = _inflight_album_searches.get(key)
+    if task is None:
+        loop = asyncio.get_running_loop()
+        task = asyncio.ensure_future(loop.run_in_executor(
+            _search_executor, _run_album_search, fetch_manager, request.artist, request.album, tracks
+        ))
+        _inflight_album_searches[key] = task
+        task.add_done_callback(lambda t: _inflight_album_searches.pop(key, None))
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+    else:
+        logger.info(f"Coalescing with in-flight album search: {request.artist} - {request.album}")
+
+    try:
+        candidates = await asyncio.shield(task)
+    except asyncio.CancelledError:
+        raise
+    except AlbumSearchProvidersFailed as e:
+        # Distinct from 404: the trackers are failing, not the album missing.
+        raise HTTPException(status_code=502, detail=f"Album search failed: {e}")
+    except Exception as e:
+        logger.error(f"Album search failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Album search failed: {e}")
+
+    if not candidates:
+        raise HTTPException(
+            status_code=404, detail=f"No album torrents found for: {request.artist} - {request.album}"
+        )
+
+    results: List[AlbumSearchResultItem] = []
+    for candidate in candidates:
+        release = candidate.release
+        quality_str, quality_data, is_lossless = _quality_fields(release)
+        results.append(AlbumSearchResultItem(
+            title=release.title,
+            artist=release.artist,
+            provider=release.source_name,
+            source_id=release.source_id,
+            quality=quality_str,
+            quality_data=quality_data,
+            is_lossless=is_lossless,
+            seeders=release.seeders,
+            size_bytes=release.size_bytes,
+            formatted_size=release.formatted_size,
+            year=release.year,
+            label=release.label,
+            edition_info=release.edition_info,
+            release_type=release.release_type,
+            matched_count=candidate.matched_count,
+            track_files={
+                k: AlbumTrackFile(
+                    target_file=f.target_file, target_file_size=f.target_file_size, match_score=f.match_score
+                )
+                for k, f in candidate.track_files.items()
+            },
+        ))
+
+    logger.info(
+        f"Album search found {len(results)} torrents; best covers "
+        f"{results[0].matched_count}/{len(tracks)} tracks"
+    )
+    return AlbumSearchResponse(
+        artist=request.artist,
+        album=request.album,
+        tracks_requested=len(tracks),
+        results=results,
+        results_count=len(results),
+    )

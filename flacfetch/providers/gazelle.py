@@ -10,12 +10,17 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
+from ..core.album_match import AlbumCandidate, AlbumTrack, match_album_tracks, parse_file_list
 from ..core.interfaces import Provider
 from ..core.log import get_logger
 from ..core.matching import calculate_match_score
 from ..core.models import AudioFormat, MediaSource, Quality, Release, TrackQuery
 
 logger = get_logger("GazelleProvider")
+
+# Album search fetches file lists for only this many torrent groups: a browse by
+# artist + album name returns the album itself (and maybe a deluxe edition) first.
+ALBUM_SEARCH_MAX_GROUPS = 3
 
 # All characters that break Sphinx filelist search
 # Based on Gazelle's sph_escape_string() in sphinxql.class.php:112-131
@@ -91,6 +96,9 @@ class GazelleProvider(Provider):
 
         # Early termination settings
         self.early_termination = True
+        # Stop a track sweep early only on a really well-seeded hit; this stays at
+        # 50 even though BEST_CHOICE_MIN_SEEDERS (what counts as a good pick) is 10,
+        # so a modest match can't cut the sweep short before the studio release.
         self.early_termination_seeders = 50
         self.early_termination_release_types = {"Album", "Single", "EP"}
 
@@ -618,6 +626,91 @@ class GazelleProvider(Provider):
         """
         pass
 
+    RELEASE_TYPE_MAP = {
+        1: "Album", 3: "Soundtrack", 5: "EP", 6: "Anthology",
+        7: "Compilation", 9: "Single", 11: "Live album", 13: "Remix",
+        14: "Bootleg", 15: "Interview", 16: "Mixtape", 17: "Demo",
+        18: "Concert Recording", 19: "DJ Mix", 21: "Unknown"
+    }
+
+    def _get_torrent_group(self, group_id: int) -> Optional[tuple[dict[str, Any], list[dict[str, Any]]]]:
+        """Fetch a torrent group. Returns (group, torrents), or None on any failure."""
+        url = f"{self.base_url}/ajax.php"
+        params = {"action": "torrentgroup", "id": group_id}
+        resp = self.session.get(url, params=params, timeout=10)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        if data.get("status") != "success":
+            return None
+        response = data.get("response", {})
+        return response.get("group", {}), response.get("torrents", [])
+
+    def _build_release(
+        self,
+        group: dict[str, Any],
+        torrent: dict[str, Any],
+        quality: Quality,
+        token_eligibility: dict[int, bool],
+    ) -> Release:
+        """Build a torrent-level Release (no target file) from group + torrent metadata."""
+        artists = group.get("musicInfo", {}).get("artists", [])
+        artist = artists[0].get("name", "Unknown") if artists else "Unknown"
+        group_year = group.get("year")
+        release_type_str = self.RELEASE_TYPE_MAP.get(group.get("releaseType"), "Other")
+
+        dl_url = f"{self.base_url}/ajax.php?action=download&id={torrent['id']}"
+
+        edition_parts = []
+        remaster_title = torrent.get("remasterTitle")
+        remaster_year = torrent.get("remasterYear")
+        remaster_record_label = torrent.get("remasterRecordLabel")
+        remaster_catalogue_number = torrent.get("remasterCatalogueNumber")
+
+        if torrent.get("remastered"):
+            if remaster_title:
+                edition_parts.append(remaster_title)
+            if remaster_year:
+                edition_parts.append(f"{remaster_year}")
+
+        edition_info = " ".join(edition_parts) if edition_parts else None
+
+        label = remaster_record_label or group.get("recordLabel")
+        cat_num = remaster_catalogue_number or group.get("catalogueNumber")
+        year = remaster_year if (torrent.get("remastered") and remaster_year) else group_year
+
+        # Already-free torrents don't need (and shouldn't waste) a token.
+        is_freeleech = bool(
+            torrent.get("isFreeleech")
+            or torrent.get("isPersonalFreeleech")
+            or torrent.get("isNeutralLeech")
+            or torrent.get("isFreeload")
+            or torrent.get("freeTorrent")
+        )
+
+        # canUseToken comes from the browse response (torrentgroup omits
+        # it). It's the authoritative "a token can be spent here" signal:
+        # true only when the account currently has a spendable token.
+        can_use_token = token_eligibility.get(torrent.get("id"))
+
+        return Release(
+            title=group.get("name"),
+            artist=artist,
+            quality=quality,
+            source_name=self.name,
+            download_url=dl_url,
+            size_bytes=torrent.get("size"),
+            year=year,
+            edition_info=edition_info,
+            label=label,
+            catalogue_number=cat_num,
+            release_type=release_type_str,
+            seeders=torrent.get("seeders", 0),
+            is_freeleech=is_freeleech,
+            can_use_token=can_use_token,
+            source_id=str(torrent.get("id", "")),
+        )
+
     def _fetch_group_details(
         self,
         group_id: int,
@@ -637,35 +730,12 @@ class GazelleProvider(Provider):
             List of releases matching the track title
         """
         token_eligibility = token_eligibility or {}
-        url = f"{self.base_url}/ajax.php"
-        params = {"action": "torrentgroup", "id": group_id}
 
         try:
-            resp = self.session.get(url, params=params, timeout=10)
-            if resp.status_code != 200:
+            fetched = self._get_torrent_group(group_id)
+            if fetched is None:
                 return []
-
-            data = resp.json()
-            if data["status"] != "success":
-                return []
-
-            response = data.get("response", {})
-            group = response.get("group", {})
-            torrents = response.get("torrents", [])
-
-            artists = group.get("musicInfo", {}).get("artists", [])
-            artist = artists[0].get("name", "Unknown") if artists else "Unknown"
-            group_name = group.get("name")
-            group_year = group.get("year")
-            release_type_id = group.get("releaseType")
-
-            release_type_map = {
-                1: "Album", 3: "Soundtrack", 5: "EP", 6: "Anthology",
-                7: "Compilation", 9: "Single", 11: "Live album", 13: "Remix",
-                14: "Bootleg", 15: "Interview", 16: "Mixtape", 17: "Demo",
-                18: "Concert Recording", 19: "DJ Mix", 21: "Unknown"
-            }
-            release_type_str = release_type_map.get(release_type_id, "Other")
+            group, torrents = fetched
 
             releases = []
             for torrent in torrents:
@@ -680,63 +750,11 @@ class GazelleProvider(Provider):
                 if not target_file:
                     continue
 
-                dl_url = f"{self.base_url}/ajax.php?action=download&id={torrent['id']}"
-
-                edition_parts = []
-                remaster_title = torrent.get("remasterTitle")
-                remaster_year = torrent.get("remasterYear")
-                remaster_record_label = torrent.get("remasterRecordLabel")
-                remaster_catalogue_number = torrent.get("remasterCatalogueNumber")
-
-                if torrent.get("remastered"):
-                    if remaster_title:
-                        edition_parts.append(remaster_title)
-                    if remaster_year:
-                        edition_parts.append(f"{remaster_year}")
-
-                edition_info = " ".join(edition_parts) if edition_parts else None
-
-                label = remaster_record_label or group.get("recordLabel")
-                cat_num = remaster_catalogue_number or group.get("catalogueNumber")
-                year = remaster_year if (torrent.get("remastered") and remaster_year) else group_year
-
-                torrent_id = str(torrent.get("id", ""))
-
-                # Already-free torrents don't need (and shouldn't waste) a token.
-                is_freeleech = bool(
-                    torrent.get("isFreeleech")
-                    or torrent.get("isPersonalFreeleech")
-                    or torrent.get("isNeutralLeech")
-                    or torrent.get("isFreeload")
-                    or torrent.get("freeTorrent")
-                )
-
-                # canUseToken comes from the browse response (torrentgroup omits
-                # it). It's the authoritative "a token can be spent here" signal:
-                # true only when the account currently has a spendable token.
-                can_use_token = token_eligibility.get(torrent.get("id"))
-
-                r = Release(
-                    title=group_name,
-                    artist=artist,
-                    quality=quality,
-                    source_name=self.name,
-                    download_url=dl_url,
-                    size_bytes=torrent.get("size"),
-                    year=year,
-                    edition_info=edition_info,
-                    label=label,
-                    catalogue_number=cat_num,
-                    release_type=release_type_str,
-                    seeders=torrent.get("seeders", 0),
-                    is_freeleech=is_freeleech,
-                    can_use_token=can_use_token,
-                    target_file=target_file,
-                    target_file_size=target_size,
-                    match_score=match_score,
-                    track_pattern=track_title,
-                    source_id=torrent_id,
-                )
+                r = self._build_release(group, torrent, quality, token_eligibility)
+                r.target_file = target_file
+                r.target_file_size = target_size
+                r.match_score = match_score
+                r.track_pattern = track_title
                 releases.append(r)
 
             return releases
@@ -744,6 +762,102 @@ class GazelleProvider(Provider):
         except Exception as e:
             logger.error(f"Error fetching group details for {group_id}: {e}")
             return []
+
+    def _browse(self, params: dict[str, Any], raise_on_error: bool = False) -> tuple[list[int], dict[int, bool]]:
+        """Run a browse query. Returns (ordered unique group IDs, {torrentId: canUseToken}).
+
+        A failed browse returns empty results, or raises when ``raise_on_error``
+        (album search: a tracker outage must not look like "album not found").
+        """
+        url = f"{self.base_url}/ajax.php"
+
+        def fail(message: str):
+            if raise_on_error:
+                raise RuntimeError(f"{self.name} browse failed: {message}")
+            return [], {}
+
+        resp = self.session.get(url, params=params, timeout=10)
+        if resp.status_code != 200:
+            logger.error(f"{self.name} API returned {resp.status_code}: {resp.text[:200]}")
+            return fail(f"HTTP {resp.status_code}")
+        try:
+            data = resp.json()
+        except ValueError:
+            logger.error(f"{self.name} API returned invalid JSON")
+            return fail("invalid JSON")
+        if data.get("status") != "success":
+            logger.warning(f"{self.name} API status not success: {data.get('status')} - Response: {data}")
+            return fail(f"status {data.get('status')}")
+
+        ordered_group_ids: list[int] = []
+        seen = set()
+        token_eligibility: dict[int, bool] = {}
+        for g in data.get("response", {}).get("results", []):
+            gid = g.get("groupId")
+            if gid and gid not in seen:
+                ordered_group_ids.append(gid)
+                seen.add(gid)
+            for t in g.get("torrents", []):
+                tid = t.get("torrentId")
+                if tid is not None and "canUseToken" in t:
+                    token_eligibility[tid] = bool(t.get("canUseToken"))
+        return ordered_group_ids, token_eligibility
+
+    def search_album(
+        self,
+        artist: str,
+        album: str,
+        tracks: list[AlbumTrack],
+        max_groups: int = ALBUM_SEARCH_MAX_GROUPS,
+    ) -> list[AlbumCandidate]:
+        """Find lossless torrents of one album and map every requested track to a file.
+
+        One browse by artist + album name, then the file list of the top few
+        groups. Each lossless torrent becomes an AlbumCandidate whose
+        ``track_files`` holds the tracks it covers; torrents covering none are dropped.
+        """
+        params = {
+            "action": "browse",
+            "artistname": artist,
+            "groupname": self._sanitize_filelist_query(album),
+            "format": "FLAC",
+        }
+        logger.info(f"Album search on {self.name}: {artist} - {album} ({len(tracks)} tracks)")
+        # Browse errors (HTTP, JSON, connection) propagate: the route reports a
+        # tracker outage as 502, distinct from "no album found" (404).
+        group_ids, token_eligibility = self._browse(params, raise_on_error=True)
+
+        candidates: list[AlbumCandidate] = []
+        selected = group_ids[:max_groups]
+        fetched_ok = 0
+        for gid in selected:
+            # Rate limit: sleep before each request (same pacing as _search_browse)
+            time.sleep(1.1)
+            try:
+                fetched = self._get_torrent_group(gid)
+            except Exception as e:  # noqa: BLE001 - one bad group must not sink the album
+                logger.error(f"Error fetching group details for {gid}: {e}")
+                continue
+            if fetched is None:
+                continue
+            fetched_ok += 1
+            group, torrents = fetched
+            for torrent in torrents:
+                quality = self._parse_quality(torrent)
+                if not quality.is_lossless():
+                    continue
+                files = parse_file_list(torrent.get("fileList", ""))
+                track_files = match_album_tracks(files, tracks)
+                if not track_files:
+                    continue
+                release = self._build_release(group, torrent, quality, token_eligibility)
+                candidates.append(AlbumCandidate(release=release, track_files=track_files))
+
+        if selected and not fetched_ok:
+            raise RuntimeError(f"{self.name}: all {len(selected)} group detail requests failed")
+
+        logger.info(f"Album search on {self.name}: {len(candidates)} torrents cover at least one track")
+        return candidates
 
     def _search_browse(self, query: TrackQuery) -> list[Release]:
         """Perform a browse search and fetch group details.
@@ -756,8 +870,6 @@ class GazelleProvider(Provider):
         Returns:
             List of matching releases
         """
-        url = f"{self.base_url}/ajax.php"
-
         # Sanitize the filelist query to remove Sphinx special operators
         sanitized_title = self._sanitize_filelist_query(query.title) if query.title else ""
 
@@ -771,38 +883,8 @@ class GazelleProvider(Provider):
         logger.debug(f"Searching {self.name} with params: {params}")
 
         try:
-            resp = self.session.get(url, params=params, timeout=10)
-            if resp.status_code != 200:
-                logger.error(f"{self.name} API returned {resp.status_code}: {resp.text[:200]}")
-                return []
-
-            try:
-                data = resp.json()
-            except ValueError:
-                logger.error(f"{self.name} API returned invalid JSON")
-                return []
-
-            if data["status"] != "success":
-                logger.warning(f"{self.name} API status not success: {data.get('status')} - Response: {data}")
-                return []
-
-            browse_results = data.get("response", {}).get("results", [])
-            logger.debug(f"Found {len(browse_results)} groups in {self.name} response")
-
-            # Extract ordered group IDs, and capture per-torrent canUseToken from
-            # the browse response (the torrentgroup endpoint doesn't return it).
-            ordered_group_ids = []
-            seen = set()
-            token_eligibility: dict[int, bool] = {}
-            for g in browse_results:
-                gid = g.get("groupId")
-                if gid and gid not in seen:
-                    ordered_group_ids.append(gid)
-                    seen.add(gid)
-                for t in g.get("torrents", []):
-                    tid = t.get("torrentId")
-                    if tid is not None and "canUseToken" in t:
-                        token_eligibility[tid] = bool(t.get("canUseToken"))
+            ordered_group_ids, token_eligibility = self._browse(params)
+            logger.debug(f"Found {len(ordered_group_ids)} groups in {self.name} response")
 
             limited_group_ids = ordered_group_ids[:self.search_limit]
 

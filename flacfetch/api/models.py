@@ -10,7 +10,7 @@ from typing import (
     Optional,
 )
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # =============================================================================
 # Search Models
@@ -65,6 +65,65 @@ class SearchResponse(BaseModel):
     results: List[SearchResultItem]
     results_count: int
     provider_stats: Optional[List[ProviderSearchStats]] = None
+
+
+class AlbumSearchTrack(BaseModel):
+    """One requested track of an album search."""
+    key: str = Field(..., min_length=1, description="Caller's ID for this track, echoed back in track_files")
+    title: str = Field(..., min_length=1)
+    position: Optional[int] = Field(None, description="Track number on its medium (tie-break only)")
+
+
+class AlbumSearchRequest(BaseModel):
+    """Request to find torrents of one album covering the given tracks."""
+    artist: str = Field(..., min_length=1)
+    album: str = Field(..., min_length=1, description="Album (release group) title")
+    tracks: List[AlbumSearchTrack] = Field(..., min_length=1, max_length=200)
+
+    @field_validator("tracks")
+    @classmethod
+    def _unique_keys(cls, tracks: List[AlbumSearchTrack]) -> List[AlbumSearchTrack]:
+        # track_files is keyed by these; a duplicate key would silently drop a match.
+        keys = [t.key for t in tracks]
+        if len(set(keys)) != len(keys):
+            raise ValueError("track keys must be unique")
+        return tracks
+
+
+class AlbumTrackFile(BaseModel):
+    """The torrent file chosen for one requested track."""
+    target_file: str
+    target_file_size: Optional[int] = None
+    match_score: float = 0.0
+
+
+class AlbumSearchResultItem(BaseModel):
+    """One lossless torrent of the album with its per-track files."""
+    title: str
+    artist: str
+    provider: str
+    source_id: Optional[str] = None
+    quality: str
+    quality_data: Optional[Dict[str, Any]] = None
+    is_lossless: bool = False
+    seeders: Optional[int] = None
+    size_bytes: Optional[int] = None
+    formatted_size: Optional[str] = None
+    year: Optional[int] = None
+    label: Optional[str] = None
+    edition_info: Optional[str] = None
+    release_type: Optional[str] = None
+    matched_count: int = 0
+    track_files: Dict[str, AlbumTrackFile] = Field(default_factory=dict)
+
+
+class AlbumSearchResponse(BaseModel):
+    """Response from the album search endpoint, best-covering torrents first."""
+    artist: str
+    album: str
+    tracks_requested: int
+    results: List[AlbumSearchResultItem]
+    results_count: int
 
 
 # =============================================================================
