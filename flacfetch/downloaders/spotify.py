@@ -56,6 +56,28 @@ BIT_DEPTH = 16
 _SPOTIFY_CAPTURE_LOCK = threading.Lock()
 
 
+class CapturedPath(str):
+    """Path of a downloaded file that also carries how much audio was captured.
+
+    A plain ``str`` everywhere else; ``captured_s`` is PCM bytes / (44100 * 4),
+    used by the API's Spotify listening budget.
+    """
+
+    captured_s: float = 0.0
+
+    def __new__(cls, path: str, captured_s: float = 0.0):
+        obj = super().__new__(cls, path)
+        obj.captured_s = captured_s
+        return obj
+
+
+def _pcm_seconds(pcm_path: Path) -> float:
+    try:
+        return pcm_path.stat().st_size / (SAMPLE_RATE * 4)
+    except OSError:
+        return 0.0
+
+
 class SpotifyDownloadError(Exception):
     """Raised when Spotify download fails."""
 
@@ -358,6 +380,7 @@ class SpotifyDownloader(Downloader):
                 raise SpotifyDownloadError(f"No audio captured. Log: {log_content[-500:]}")
 
             pcm_size = pcm_path.stat().st_size
+            captured_s = pcm_size / (SAMPLE_RATE * 4)
             logger.debug(f"Captured {pcm_size / (1024*1024):.2f} MB PCM")
 
             # Convert PCM to a per-download temp FLAC, then atomically move it
@@ -367,6 +390,10 @@ class SpotifyDownloader(Downloader):
             if not self._convert_pcm_to_flac(pcm_path, flac_tmp_path):
                 raise SpotifyDownloadError("FLAC conversion failed")
             os.replace(flac_tmp_path, flac_path)
+        except Exception as e:
+            # Tell the budget ledger how much was actually played before failing.
+            e.captured_s = _pcm_seconds(pcm_path)  # type: ignore[attr-defined]
+            raise
         finally:
             # Always clean up the per-capture temp files (best effort), including
             # on every failure path, so nothing orphans on disk.
@@ -375,7 +402,7 @@ class SpotifyDownloader(Downloader):
             flac_tmp_path.unlink(missing_ok=True)
 
         logger.info(f"Download complete: {flac_path}")
-        return str(flac_path)
+        return CapturedPath(str(flac_path), captured_s)
 
     def _device_not_found_message(
         self, log_path: Path, device_name: str = LIBRESPOT_DEVICE_NAME

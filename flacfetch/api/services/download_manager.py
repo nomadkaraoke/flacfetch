@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from ...downloaders.torrent import TorrentStalledError
 from ..models import DownloadStatus
+from .spotify_budget import get_spotify_ledger
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,8 @@ class DownloadTask:
     target_file: Optional[str] = None
     download_url: Optional[str] = None
     max_stall_seconds: Optional[float] = None  # torrents: per-request stall ceiling
+    delete_local_after_upload: bool = False
+    spotify_reserved: bool = False  # a Spotify budget ledger entry exists for this task
 
 
 @dataclass
@@ -477,6 +480,7 @@ class DownloadManager:
         upload_to_gcs: bool = False,
         gcs_destination: Optional[str] = None,
         max_stall_seconds: Optional[float] = None,
+        delete_local_after_upload: bool = False,
     ) -> DownloadTask:
         """
         Create a download task for direct download by source ID (no search required).
@@ -496,6 +500,7 @@ class DownloadManager:
             upload_to_gcs=upload_to_gcs,
             gcs_destination=gcs_destination,
             max_stall_seconds=max_stall_seconds,
+            delete_local_after_upload=delete_local_after_upload,
             started_at=datetime.now(timezone.utc),
         )
 
@@ -503,6 +508,35 @@ class DownloadManager:
             self._downloads[download_id] = task
 
         return task
+
+    def discard_download(self, download_id: str) -> None:
+        """Forget a task that was created but never started (e.g. refused by the budget)."""
+        with self._lock:
+            self._downloads.pop(download_id, None)
+
+    def _settle_spotify(self, task: DownloadTask, captured_s: Optional[float]) -> None:
+        """Close out the task's Spotify ledger entry (settle with captured audio, else release)."""
+        if not task.spotify_reserved:
+            return
+        task.spotify_reserved = False
+        try:
+            ledger = get_spotify_ledger()
+            if captured_s is None or captured_s > 0:
+                ledger.settle(task.download_id, captured_s)
+            else:
+                ledger.release(task.download_id)
+        except Exception as e:
+            logger.warning(f"Could not update Spotify ledger for {task.download_id}: {e}")
+
+    def _delete_local_file(self, path: str) -> None:
+        """Remove an uploaded file and its parent dir if that is now empty (never download_dir)."""
+        try:
+            os.unlink(path)
+            parent = os.path.dirname(path)
+            if os.path.abspath(parent) != os.path.abspath(self.download_dir) and not os.listdir(parent):
+                os.rmdir(parent)
+        except OSError as e:
+            logger.warning(f"Could not delete local file after upload {path}: {e}")
 
     async def execute_download_by_id(self, download_id: str) -> None:
         """
@@ -527,12 +561,17 @@ class DownloadManager:
             # Execute download in a thread to avoid blocking the event loop
             manager = self._get_fetch_manager()
             loop = asyncio.get_running_loop()
+            # Never delete seeding torrent data; the flag only applies to non-torrent sources.
+            delete_after_upload = task.delete_local_after_upload and task.provider not in ("RED", "OPS")
+            # Concurrent downloads with the same output_filename must not share a file:
+            # use a per-task directory when the file is deleted after upload.
+            out_dir = os.path.join(self.download_dir, task.download_id) if delete_after_upload else self.download_dir
             output_path = await loop.run_in_executor(
                 None,
                 lambda: manager.download_by_id(
                     source_name=task.provider,
                     source_id=task.source_id,
-                    output_path=self.download_dir,
+                    output_path=out_dir,
                     output_filename=task.output_filename,
                     target_file=task.target_file,
                     download_url=task.download_url,
@@ -547,6 +586,7 @@ class DownloadManager:
             )
 
             logger.info(f"Download complete: {output_path}")
+            self._settle_spotify(task, getattr(output_path, "captured_s", None))
 
             # Upload to GCS if requested
             if task.upload_to_gcs and task.gcs_destination:
@@ -554,6 +594,8 @@ class DownloadManager:
                 gcs_path = await self._upload_to_gcs(output_path, task.gcs_destination)
                 self.update_download(download_id, gcs_path=gcs_path)
                 logger.info(f"Uploaded to GCS: {gcs_path}")
+                if delete_after_upload:
+                    self._delete_local_file(output_path)
 
             # Final status depends on whether it's a torrent (seeding) or not
             if task.provider in ["RED", "OPS"] and self.keep_seeding:
@@ -565,6 +607,7 @@ class DownloadManager:
 
         except Exception as e:
             logger.error(f"Download by ID failed: {e}", exc_info=True)
+            self._settle_spotify(task, getattr(e, "captured_s", 0.0))
             self.update_download(
                 download_id,
                 status=DownloadStatus.FAILED,

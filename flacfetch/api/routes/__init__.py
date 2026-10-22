@@ -7,6 +7,7 @@ from .credentials import router as credentials_router
 from .download import router as download_router
 from .health import router as health_router
 from .search import router as search_router
+from .spotify import router as spotify_router
 from .torrents import router as torrents_router
 
 __all__ = [
@@ -17,5 +18,6 @@ __all__ = [
     "config_router",
     "credentials_router",
     "cache_router",
+    "spotify_router",
 ]
 

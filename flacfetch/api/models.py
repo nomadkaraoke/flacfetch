@@ -7,6 +7,7 @@ from typing import (
     Any,
     Dict,
     List,
+    Literal,
     Optional,
 )
 
@@ -158,6 +159,32 @@ class DownloadByIdRequest(BaseModel):
         description="Torrents only: abort after this many seconds with no progress "
                     "(overrides FLACFETCH_MAX_STALL_SECONDS; capped at 3600).",
     )
+    priority: Literal["interactive", "batch"] = Field(
+        "interactive",
+        description="Spotify only. 'batch' downloads are gated by the rolling listening budget "
+                    "(429 with Retry-After when refused); 'interactive' are never refused.",
+    )
+    expected_duration_s: Optional[int] = Field(
+        None, gt=0, le=1200,
+        description="Spotify: expected track length in seconds. Required for priority='batch'.",
+    )
+    delete_local_after_upload: bool = Field(
+        False,
+        description="Delete the local file after a successful GCS upload (always on for batch).",
+    )
+
+
+class SpotifyBudgetResponse(BaseModel):
+    """Rolling-window Spotify listening usage."""
+    window_s: int
+    total_s: float
+    batch_s: float
+    batch_budget_s: int
+    hard_cap_s: int
+    batch_in_flight: int
+    interactive_in_flight: int
+    batch_allowed_now: bool
+    retry_after_s: int
 
 
 class DownloadStatus(str, Enum):

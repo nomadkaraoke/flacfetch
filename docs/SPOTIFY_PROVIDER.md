@@ -220,6 +220,44 @@ Environment="SPOTIPY_CLIENT_SECRET=${SPOTIPY_CLIENT_SECRET}"
 Environment="SPOTIPY_REDIRECT_URI=http://127.0.0.1:8888/callback"
 ```
 
+## Listening budget and batch priority (HTTP API)
+
+Spotify Premium must not "listen" to more than 24 h of audio per rolling 24 h. Every Spotify
+download made through `POST /download-by-id` is recorded in a SQLite ledger (path from
+`FLACFETCH_SPOTIFY_LEDGER`, set by `deploy/provision.sh` to `/var/lib/flacfetch-api/spotify_ledger.sqlite`;
+survives restarts). The directory is the systemd `StateDirectory=flacfetch-api` of the API unit;
+existing hosts must re-run `deploy/provision.sh` once to add it. Captured seconds = PCM bytes / (44100 x 4); a download that fails before any
+audio is captured is released and does not count.
+
+`POST /download-by-id` extra fields (Spotify):
+
+| Field | Description |
+|-------|-------------|
+| `priority` | `"interactive"` (default, never refused, only counted) or `"batch"` |
+| `expected_duration_s` | Track length, 1-1200. Required for `batch` (400 otherwise); interactive reserves this or 300 s |
+| `delete_local_after_upload` | Delete the local file (and empty parent dir) after a successful GCS upload. Always on for `batch` |
+
+A `batch` request is refused with `429`, header `Retry-After`, and body
+`{"detail": {"code": "...", "retry_after_s": N}}` when:
+
+| Code | Condition |
+|------|-----------|
+| `spotify_budget` | batch seconds in the window + this track > batch budget (12 h), or all Spotify seconds + this track > hard cap minus interactive reserve (24 h - 2 h) |
+| `batch_busy` | 2 batch downloads already reserved/in flight |
+| `interactive_active` | an interactive Spotify download is queued or running |
+| `batch_gap` | the previous batch started less than 30 s ago |
+
+`GET /spotify/budget` (API key) returns `window_s, total_s, batch_s, batch_budget_s, hard_cap_s,
+batch_in_flight, interactive_in_flight, batch_allowed_now, retry_after_s`.
+
+Tunables (env): `FLACFETCH_SPOTIFY_BATCH_BUDGET_S` (43200), `FLACFETCH_SPOTIFY_HARD_CAP_S` (86400),
+`FLACFETCH_SPOTIFY_INTERACTIVE_RESERVE_S` (7200), `FLACFETCH_SPOTIFY_MAX_BATCH_IN_FLIGHT` (2),
+`FLACFETCH_SPOTIFY_MIN_BATCH_GAP_S` (30), `FLACFETCH_SPOTIFY_WINDOW_S` (86400).
+Search-based `POST /download` Spotify downloads are not counted by the ledger; only `POST /download-by-id` is.
+Reservations still unsettled after 2 h are counted at their reserved length (crash safety).
+Captures themselves are serialised by a process-wide lock, so "2 in flight" means one capturing
+and one waiting.
+
 ## How Downloads Work
 
 1. **Search**: Uses Spotify Web API via spotipy to search for tracks

@@ -684,6 +684,7 @@ User=$FF_SERVICE_USER
 Group=$FF_SERVICE_USER
 SupplementaryGroups=debian-transmission
 UMask=002
+StateDirectory=flacfetch-api
 WorkingDirectory=$APP_DIR
 EnvironmentFile=-$RUNTIME_ENV
 Environment="HOME=$APP_DIR"
@@ -695,6 +696,7 @@ Environment="GOOGLE_CLOUD_PROJECT=${FF_GCP_PROJECT}"
 Environment="GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS}"
 Environment="FLACFETCH_KEEP_SEEDING=true"
 Environment="FLACFETCH_MIN_FREE_GB=5"
+Environment="FLACFETCH_SPOTIFY_LEDGER=/var/lib/flacfetch-api/spotify_ledger.sqlite"
 Environment="FLACFETCH_DOWNLOAD_DIR=${DOWNLOAD_DIR}"
 Environment="TRANSMISSION_HOST=localhost"
 Environment="TRANSMISSION_PORT=9091"
@@ -861,6 +863,7 @@ moving=$(awk -v a="${d1:-0}" -v b="${d2:-0}" 'BEGIN{print (a>1 || b>1)?1:0}')
 # consecutive strikes, and rely on the cooldown to bound restart frequency.
 if [ "$uptime_hours" -ge "$WEDGE_MIN_UPTIME_HOURS" ] && [ "${w1:-0}" -ge 1 ] && [ "${w2:-0}" -ge 1 ] && [ "$moving" -eq 0 ]; then
   last=$(cat "$LAST_WEDGE_RESTART" 2>/dev/null || echo 0)
+  [[ $last =~ ^[0-9]+$ ]] || last=0
   age=$(( $(date +%s) - last ))
   if [ "$age" -lt "$WEDGE_COOLDOWN_SEC" ]; then
     echo "wedge suspected but last wedge-restart was ${age}s ago (< ${WEDGE_COOLDOWN_SEC}s cooldown) — deferring"
