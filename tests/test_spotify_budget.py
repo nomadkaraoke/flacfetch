@@ -142,3 +142,17 @@ class TestLedger:
         assert ledger.try_reserve_batch("b", 240, cfg)[0] is True
         clock.t += 31
         assert ledger.try_reserve_batch("c", 240, cfg)[1] == "batch_busy"
+
+
+def test_singleton_settles_orphaned_reservations_on_startup(tmp_path, monkeypatch):
+    from flacfetch.api.services import spotify_budget as sb
+
+    path = str(tmp_path / "l.sqlite")
+    monkeypatch.setenv("FLACFETCH_SPOTIFY_LEDGER", path)
+    sb.reset_spotify_ledger()
+    SpotifyLedger(path).reserve("orphan", "interactive", 300)
+    try:
+        u = sb.get_spotify_ledger().usage()
+        assert u.interactive_in_flight == 0 and u.total_s == 300
+    finally:
+        sb.reset_spotify_ledger()

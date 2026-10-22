@@ -252,6 +252,7 @@ batch_in_flight, interactive_in_flight, batch_allowed_now, retry_after_s`.
 Tunables (env): `FLACFETCH_SPOTIFY_BATCH_BUDGET_S` (43200), `FLACFETCH_SPOTIFY_HARD_CAP_S` (86400),
 `FLACFETCH_SPOTIFY_INTERACTIVE_RESERVE_S` (7200), `FLACFETCH_SPOTIFY_MAX_BATCH_IN_FLIGHT` (2),
 `FLACFETCH_SPOTIFY_MIN_BATCH_GAP_S` (30), `FLACFETCH_SPOTIFY_WINDOW_S` (86400).
+Search-based `POST /download` Spotify downloads are not counted by the ledger; only `POST /download-by-id` is.
 Reservations still unsettled after 2 h are counted at their reserved length (crash safety).
 Captures themselves are serialised by a process-wide lock, so "2 in flight" means one capturing
 and one waiting.

@@ -561,12 +561,17 @@ class DownloadManager:
             # Execute download in a thread to avoid blocking the event loop
             manager = self._get_fetch_manager()
             loop = asyncio.get_running_loop()
+            # Never delete seeding torrent data; the flag only applies to non-torrent sources.
+            delete_after_upload = task.delete_local_after_upload and task.provider not in ("RED", "OPS")
+            # Concurrent downloads with the same output_filename must not share a file:
+            # use a per-task directory when the file is deleted after upload.
+            out_dir = os.path.join(self.download_dir, task.download_id) if delete_after_upload else self.download_dir
             output_path = await loop.run_in_executor(
                 None,
                 lambda: manager.download_by_id(
                     source_name=task.provider,
                     source_id=task.source_id,
-                    output_path=self.download_dir,
+                    output_path=out_dir,
                     output_filename=task.output_filename,
                     target_file=task.target_file,
                     download_url=task.download_url,
@@ -589,7 +594,7 @@ class DownloadManager:
                 gcs_path = await self._upload_to_gcs(output_path, task.gcs_destination)
                 self.update_download(download_id, gcs_path=gcs_path)
                 logger.info(f"Uploaded to GCS: {gcs_path}")
-                if task.delete_local_after_upload:
+                if delete_after_upload:
                     self._delete_local_file(output_path)
 
             # Final status depends on whether it's a torrent (seeding) or not

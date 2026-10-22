@@ -1,9 +1,11 @@
 """
 Spotify listening-budget endpoint.
 """
+import logging
 import time
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
 
 from ..auth import verify_api_key
 from ..models import SpotifyBudgetResponse
@@ -14,6 +16,7 @@ from ..services.spotify_budget import (
     get_spotify_ledger,
 )
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["spotify"])
 
 
@@ -22,7 +25,15 @@ async def get_spotify_budget(api_key: str = Depends(verify_api_key)) -> SpotifyB
     """Rolling-window Spotify listening usage and whether a batch download may start now."""
     cfg = BudgetConfig.from_env()
     now = time.time()
-    usage = get_spotify_ledger().usage(now, cfg.window_s)
+    try:
+        usage = get_spotify_ledger().usage(now, cfg.window_s)
+    except Exception as e:
+        logger.warning(f"Spotify ledger unavailable for /spotify/budget: {e}")
+        return JSONResponse(
+            status_code=503,
+            content={"detail": {"code": "budget_unavailable", "retry_after_s": 60}},
+            headers={"Retry-After": "60"},
+        )
     ok, _code, retry = check_batch(usage, PROBE_BATCH_SECONDS, cfg, now)
     return SpotifyBudgetResponse(
         window_s=cfg.window_s,

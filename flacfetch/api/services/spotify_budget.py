@@ -199,6 +199,14 @@ class SpotifyLedger:
         with self._tx() as conn:
             conn.execute("UPDATE entries SET state='released' WHERE download_id=?", (download_id,))
 
+    def settle_orphans(self) -> int:
+        """Settle every still-reserved row at its reserved size (their process is gone)."""
+        with self._tx() as conn:
+            cur = conn.execute(
+                "UPDATE entries SET state='done', captured_s=reserved_s WHERE state='reserved'"
+            )
+            return cur.rowcount
+
     def usage(self, now: Optional[float] = None, window_s: int = 86400) -> Usage:
         with self._tx() as conn:
             return self._usage(conn, self._now() if now is None else now, window_s)
@@ -250,7 +258,12 @@ def get_spotify_ledger() -> SpotifyLedger:
     global _ledger
     with _ledger_lock:
         if _ledger is None:
-            _ledger = SpotifyLedger(default_ledger_path())
+            ledger = SpotifyLedger(default_ledger_path())
+            # A new process has no downloads in flight; rows left reserved are orphans of a restart.
+            n = ledger.settle_orphans()
+            if n:
+                logger.info(f"Settled {n} orphaned reserved Spotify ledger entries at startup")
+            _ledger = ledger
         return _ledger
 
 

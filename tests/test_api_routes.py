@@ -355,3 +355,103 @@ class TestSpotifyBudgetRoutes:
         assert r.json()["detail"]["code"] == "budget_unavailable"
         assert r.headers["Retry-After"] == "60"
         assert dm.list_downloads() == []
+
+    def test_budget_endpoint_503_when_ledger_unavailable(self, env):
+        from unittest.mock import patch
+
+        client, _, _ = env
+        with patch("flacfetch.api.routes.spotify.get_spotify_ledger", side_effect=OSError("disk full")):
+            r = client.get("/spotify/budget")
+        assert r.status_code == 503
+        assert r.json()["detail"] == {"code": "budget_unavailable", "retry_after_s": 60}
+        assert r.headers["Retry-After"] == "60"
+
+    @staticmethod
+    def _run(dm, mgr, download_id, upload):
+        import asyncio
+        from unittest.mock import patch
+
+        async def go():
+            with patch.object(dm, "_get_fetch_manager", return_value=mgr), \
+                    patch.object(dm, "_upload_to_gcs", upload):
+                await dm.execute_download_by_id(download_id)
+
+        asyncio.new_event_loop().run_until_complete(go())
+
+    def test_concurrent_batch_same_filename_use_own_dirs(self, env, tmp_path):
+        import asyncio
+        from unittest.mock import patch
+
+        from flacfetch.api.services.download_manager import DownloadManager
+        from flacfetch.downloaders.spotify import CapturedPath
+
+        _, _, ledger = env
+        dm = DownloadManager(download_dir=str(tmp_path / "dl"))
+        tasks = [
+            dm.create_download_by_id(
+                source_name="Spotify", source_id=f"t{i}", output_filename="original",
+                upload_to_gcs=True, gcs_destination="p", delete_local_after_upload=True)
+            for i in range(2)
+        ]
+        uploaded = {}
+
+        class Mgr:
+            def download_by_id(self, output_path, output_filename, **kw):
+                import os
+                os.makedirs(output_path, exist_ok=True)
+                f = os.path.join(output_path, output_filename + ".flac")
+                open(f, "w").write(os.path.basename(output_path))
+                return CapturedPath(f, 100.0)
+
+        async def upload(path, dest):
+            await asyncio.sleep(0.05)
+            uploaded[path] = open(path).read()  # raises if another task deleted/replaced it
+            return "gs://b/x"
+
+        async def go():
+            with patch.object(dm, "_get_fetch_manager", return_value=Mgr()), \
+                    patch.object(dm, "_upload_to_gcs", upload):
+                await asyncio.gather(*(dm.execute_download_by_id(t.download_id) for t in tasks))
+
+        asyncio.new_event_loop().run_until_complete(go())
+        assert len(uploaded) == 2
+        for path, content in uploaded.items():
+            assert content == tasks[0].download_id or content == tasks[1].download_id
+            assert content in path
+        assert all(dm.get_download(t.download_id).status.value == "complete" for t in tasks)
+        assert (tmp_path / "dl").exists() and list((tmp_path / "dl").iterdir()) == []
+
+    def test_upload_failure_after_capture_settles_captured_seconds(self, env, tmp_path):
+        from unittest.mock import AsyncMock, Mock
+
+        from flacfetch.api.services.download_manager import DownloadManager
+        from flacfetch.downloaders.spotify import CapturedPath
+
+        _, _, ledger = env
+        dm = DownloadManager(download_dir=str(tmp_path / "dl"))
+        task = dm.create_download_by_id(
+            source_name="Spotify", source_id="t", upload_to_gcs=True, gcs_destination="p")
+        ledger.reserve(task.download_id, "batch", 240)
+        task.spotify_reserved = True
+        mgr = Mock()
+        mgr.download_by_id.return_value = CapturedPath("/tmp/none.flac", 123.0)
+        self._run(dm, mgr, task.download_id, AsyncMock(side_effect=RuntimeError("gcs down")))
+        u = ledger.usage()
+        assert u.batch_s == 123.0 and u.batch_in_flight == 0
+
+    def test_delete_flag_ignored_for_torrent_providers(self, env, tmp_path):
+        from unittest.mock import AsyncMock, Mock
+
+        from flacfetch.api.services.download_manager import DownloadManager
+
+        dm = DownloadManager(download_dir=str(tmp_path / "dl"))
+        f = tmp_path / "seed.flac"
+        f.write_bytes(b"x")
+        task = dm.create_download_by_id(
+            source_name="RED", source_id="1", upload_to_gcs=True, gcs_destination="p",
+            delete_local_after_upload=True)
+        mgr = Mock()
+        mgr.download_by_id.return_value = str(f)
+        self._run(dm, mgr, task.download_id, AsyncMock(return_value="gs://b/x"))
+        assert f.exists()
+        assert mgr.download_by_id.call_args.kwargs["output_path"] == dm.download_dir
