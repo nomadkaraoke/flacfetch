@@ -10,6 +10,11 @@ from typing import Optional
 
 from .models import Release, TrackQuery
 
+# Seeders a TRUE lossless torrent needs to be a "top seeded" / excellent pick.
+# A lossless torrent with ~10 seeders is almost always the right source (was 50);
+# keep in step with BEST_CHOICE_MIN_SEEDERS in karaoke-gen.
+BEST_CHOICE_MIN_SEEDERS = 10
+
 
 @dataclass
 class Category:
@@ -107,7 +112,7 @@ def categorize_releases(
     for r in releases:
         if is_assigned(r):
             continue
-        if is_true_lossless(r) and r.seeders and r.seeders >= 50:
+        if is_true_lossless(r) and r.seeders and r.seeders >= BEST_CHOICE_MIN_SEEDERS:
             if artist_matches(r):
                 top_seeded.append(r)
                 mark_assigned(r)
@@ -260,7 +265,7 @@ def is_excellent_match(release: Release, query: Optional[TrackQuery] = None) -> 
     - Lossless format
     - Artist exactly matches search (or very close)
     - Release type is Album, Single, or EP (not compilation)
-    - 50+ seeders
+    - BEST_CHOICE_MIN_SEEDERS+ seeders
 
     Args:
         release: Release to check
@@ -272,7 +277,7 @@ def is_excellent_match(release: Release, query: Optional[TrackQuery] = None) -> 
     if not release.quality or not release.quality.is_lossless():
         return False
 
-    if not release.seeders or release.seeders < 50:
+    if not release.seeders or release.seeders < BEST_CHOICE_MIN_SEEDERS:
         return False
 
     if release.release_type not in ("Album", "Single", "EP"):

@@ -264,6 +264,26 @@ if best:
 
 See **[LIBRARY.md](LIBRARY.md)** for full library API documentation.
 
+### HTTP API: album search
+
+`POST /search/album` finds lossless torrents of one album and maps each requested
+track to its file, with a single tracker browse (RED and OPS) instead of one search
+per track. Callers making several tracks from one album (e.g. karaoke-gen's Bulk
+"By album") should use it.
+
+```json
+{"artist": "Artist", "album": "Album Title",
+ "tracks": [{"key": "t1", "title": "First Song", "position": 1}]}
+```
+
+Each result is a torrent (`provider`, `source_id`, quality, seeders, `release_type`,
+...) with `matched_count` and `track_files` (`{key: {target_file, target_file_size,
+match_score}}`), ordered by tracks covered, then non-vinyl, then seeders. Download
+a track with `POST /download-by-id` using the torrent's `source_id` and that track's
+`target_file`; concurrent downloads of one torrent share it. Returns 404 when no
+torrent covers any requested track. Album searches run on the same single search
+worker as track searches, and identical in-flight requests are coalesced.
+
 ## Architecture & Design
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed architecture, design choices, and implementation learnings.

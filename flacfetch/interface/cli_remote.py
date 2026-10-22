@@ -35,6 +35,7 @@ try:
 except ImportError:
     httpx = None
 
+from ..core.categorize import BEST_CHOICE_MIN_SEEDERS
 from .cli import Colors, format_release_line, print_categorized_releases, print_releases
 
 # Matches an 11-character YouTube video ID in the common URL shapes
@@ -1681,7 +1682,7 @@ Optional:
         # Check for excellent match (lossless, matching artist, good seeders)
         is_excellent = (
             selected.get("is_lossless", False) and
-            selected.get("seeders", 0) >= 50 and
+            selected.get("seeders", 0) >= BEST_CHOICE_MIN_SEEDERS and
             selected.get("release_type") in ("Album", "Single", "EP")
         )
 
