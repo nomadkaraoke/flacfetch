@@ -334,3 +334,24 @@ class TestSpotifyBudgetRoutes:
 
         asyncio.new_event_loop().run_until_complete(run())
         assert ledger.usage().total_s == 0
+
+    def test_ledger_error_interactive_fails_open(self, env):
+        from unittest.mock import patch
+
+        client, dm, _ = env
+        with patch("flacfetch.api.routes.download.get_spotify_ledger", side_effect=OSError("disk full")):
+            r = client.post("/download-by-id", json=self._body())
+        assert r.status_code == 200
+        assert len(dm.list_downloads()) == 1
+        assert dm.list_downloads()[0].spotify_reserved is False
+
+    def test_ledger_error_batch_fails_closed_503(self, env):
+        from unittest.mock import patch
+
+        client, dm, _ = env
+        with patch("flacfetch.api.routes.download.get_spotify_ledger", side_effect=OSError("disk full")):
+            r = client.post("/download-by-id", json=self._body(priority="batch", expected_duration_s=240))
+        assert r.status_code == 503
+        assert r.json()["detail"]["code"] == "budget_unavailable"
+        assert r.headers["Retry-After"] == "60"
+        assert dm.list_downloads() == []

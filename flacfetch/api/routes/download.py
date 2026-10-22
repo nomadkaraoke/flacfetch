@@ -170,25 +170,38 @@ async def start_download_by_id(
     )
 
     if is_spotify:
-        ledger = get_spotify_ledger()
-        if is_batch:
-            ok, code, retry_after = ledger.try_reserve_batch(
-                task.download_id, request.expected_duration_s, BudgetConfig.from_env()
-            )
-            if not ok:
-                manager.discard_download(task.download_id)
-                logger.warning(f"Spotify batch download refused: {code} (retry in {retry_after}s)")
-                return JSONResponse(
-                    status_code=429,
-                    content={"detail": {"code": code, "retry_after_s": retry_after}},
-                    headers={"Retry-After": str(retry_after)},
+        try:
+            ledger = get_spotify_ledger()
+            if is_batch:
+                ok, code, retry_after = ledger.try_reserve_batch(
+                    task.download_id, request.expected_duration_s, BudgetConfig.from_env()
                 )
-        else:
-            ledger.reserve(
-                task.download_id, "interactive",
-                request.expected_duration_s or DEFAULT_INTERACTIVE_RESERVE_S,
-            )
-        task.spotify_reserved = True
+                if not ok:
+                    manager.discard_download(task.download_id)
+                    logger.warning(f"Spotify batch download refused: {code} (retry in {retry_after}s)")
+                    return JSONResponse(
+                        status_code=429,
+                        content={"detail": {"code": code, "retry_after_s": retry_after}},
+                        headers={"Retry-After": str(retry_after)},
+                    )
+            else:
+                ledger.reserve(
+                    task.download_id, "interactive",
+                    request.expected_duration_s or DEFAULT_INTERACTIVE_RESERVE_S,
+                )
+            task.spotify_reserved = True
+        except Exception as e:
+            if not is_batch:
+                # Interactive downloads are never refused: fail open, uncounted.
+                logger.warning(f"Spotify ledger unavailable; interactive download proceeds uncounted: {e}")
+            else:
+                manager.discard_download(task.download_id)
+                logger.warning(f"Spotify ledger unavailable; refusing batch download: {e}")
+                return JSONResponse(
+                    status_code=503,
+                    content={"detail": {"code": "budget_unavailable", "retry_after_s": 60}},
+                    headers={"Retry-After": "60"},
+                )
 
     logger.info(f"Created download-by-id task: {task.download_id} for {task.provider} ID={task.source_id}")
 
