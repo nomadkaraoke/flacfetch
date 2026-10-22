@@ -179,6 +179,16 @@ class TestWrongRecordingGuards:
         assert set(got) == {"t", "s"}
         assert got["s"] == "01 Track.flac" and got["t"] == "03 Track.flac"
 
+    def test_vs_credit_is_neutral(self):
+        # Seen live: OPS CD rip of a 2011 album credits "08 Heavy (vs. Dizzee Rascal).flac".
+        files = parse_file_list(file_list("08 Hollow Crown (vs. Tempo Kid).flac"))
+        result = match_album_tracks(files, [AlbumTrack("k", "Hollow Crown", 8)])
+        assert result["k"].match_score == 1.0
+
+    def test_credit_bracket_naming_a_remix_is_still_a_remix(self):
+        files = parse_file_list(file_list("08 Hollow Crown (vs. Tempo Kid Remix).flac"))
+        assert match_album_tracks(files, [AlbumTrack("k", "Hollow Crown", 8)]) == {}
+
     def test_dots_in_titles_are_not_extensions(self):
         assert self._m(["05 Mr. Lantern.flac"], [AlbumTrack("k", "Mr. Lantern", 5)]) == {"k": "05 Mr. Lantern.flac"}
 

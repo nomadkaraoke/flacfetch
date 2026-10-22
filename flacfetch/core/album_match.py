@@ -36,11 +36,11 @@ POSITION_BONUS = 0.05
 
 # "06 Title", "06 - Title", "06. Title", "1-06 Title" (disc-track), "A1 Title" is ignored.
 _TRACK_NUMBER_RE = re.compile(r"^(?:\d{1,2}[-.])?(\d{1,3})(?=[\s.\-_])")
-# Bracketed suffixes that don't change which recording it is ("(feat. X)",
+# Bracketed suffixes that don't change which recording it is ("(feat. X)", "(vs. X)",
 # "[Remastered 2011]", "(Mono)"); stripped from titles and file names alike.
 # Version suffixes ("(Live)", "(Remix)") are NOT stripped: they're another recording.
 _NEUTRAL_BRACKET_RE = re.compile(
-    r"\s*[\(\[]\s*(?:feat\.?|ft\.?|featuring|with|remaster(?:ed)?|\d{4}\s+remaster(?:ed)?|"
+    r"\s*[\(\[]\s*(?:feat\.?|ft\.?|featuring|with|vs\.?|versus|remaster(?:ed)?|\d{4}\s+remaster(?:ed)?|"
     r"mono|stereo|explicit|clean|bonus track)\b[^\)\]]*[\)\]]",
     re.IGNORECASE,
 )
@@ -130,10 +130,12 @@ def title_score(title: str, path: str) -> float:
     """How well a file matches a track title (0..1), ignoring neutral suffixes such
     as "(feat. X)" on either side. 0.0 when the two disagree on version markers:
     "Song (Live)" never matches "01 Song.flac", nor "Song" "02 Song (Live).flac"."""
+    # Markers are compared on the full names: a credit bracket can also name a
+    # version ("(vs. X Remix)") and stripping it must not hide that.
+    if version_markers(title) != version_markers(_file_title(path)):
+        return 0.0
     want = _strip_neutral(title) or title
     have = _strip_neutral(_file_title(path)) or _file_title(path)
-    if version_markers(want) != version_markers(have):
-        return 0.0
     # calculate_match_score strips a file extension (everything after the last
     # dot), so give it one: "05 Mr. Brightside" must not become "05 Mr".
     return calculate_match_score(want, f"{have}.flac")
