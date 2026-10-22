@@ -763,21 +763,31 @@ class GazelleProvider(Provider):
             logger.error(f"Error fetching group details for {group_id}: {e}")
             return []
 
-    def _browse(self, params: dict[str, Any]) -> tuple[list[int], dict[int, bool]]:
-        """Run a browse query. Returns (ordered unique group IDs, {torrentId: canUseToken})."""
+    def _browse(self, params: dict[str, Any], raise_on_error: bool = False) -> tuple[list[int], dict[int, bool]]:
+        """Run a browse query. Returns (ordered unique group IDs, {torrentId: canUseToken}).
+
+        A failed browse returns empty results, or raises when ``raise_on_error``
+        (album search: a tracker outage must not look like "album not found").
+        """
         url = f"{self.base_url}/ajax.php"
+
+        def fail(message: str):
+            if raise_on_error:
+                raise RuntimeError(f"{self.name} browse failed: {message}")
+            return [], {}
+
         resp = self.session.get(url, params=params, timeout=10)
         if resp.status_code != 200:
             logger.error(f"{self.name} API returned {resp.status_code}: {resp.text[:200]}")
-            return [], {}
+            return fail(f"HTTP {resp.status_code}")
         try:
             data = resp.json()
         except ValueError:
             logger.error(f"{self.name} API returned invalid JSON")
-            return [], {}
+            return fail("invalid JSON")
         if data.get("status") != "success":
             logger.warning(f"{self.name} API status not success: {data.get('status')} - Response: {data}")
-            return [], {}
+            return fail(f"status {data.get('status')}")
 
         ordered_group_ids: list[int] = []
         seen = set()
@@ -813,14 +823,14 @@ class GazelleProvider(Provider):
             "format": "FLAC",
         }
         logger.info(f"Album search on {self.name}: {artist} - {album} ({len(tracks)} tracks)")
-        try:
-            group_ids, token_eligibility = self._browse(params)
-        except requests.RequestException as e:
-            logger.error(f"Connection error to {self.name}: {e}")
-            return []
+        # Browse errors (HTTP, JSON, connection) propagate: the route reports a
+        # tracker outage as 502, distinct from "no album found" (404).
+        group_ids, token_eligibility = self._browse(params, raise_on_error=True)
 
         candidates: list[AlbumCandidate] = []
-        for gid in group_ids[:max_groups]:
+        selected = group_ids[:max_groups]
+        fetched_ok = 0
+        for gid in selected:
             # Rate limit: sleep before each request (same pacing as _search_browse)
             time.sleep(1.1)
             try:
@@ -830,6 +840,7 @@ class GazelleProvider(Provider):
                 continue
             if fetched is None:
                 continue
+            fetched_ok += 1
             group, torrents = fetched
             for torrent in torrents:
                 quality = self._parse_quality(torrent)
@@ -841,6 +852,9 @@ class GazelleProvider(Provider):
                     continue
                 release = self._build_release(group, torrent, quality, token_eligibility)
                 candidates.append(AlbumCandidate(release=release, track_files=track_files))
+
+        if selected and not fetched_ok:
+            raise RuntimeError(f"{self.name}: all {len(selected)} group detail requests failed")
 
         logger.info(f"Album search on {self.name}: {len(candidates)} torrents cover at least one track")
         return candidates

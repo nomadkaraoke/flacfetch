@@ -5,6 +5,7 @@ import threading
 from unittest.mock import Mock, patch
 
 import pytest
+import requests
 from fastapi import HTTPException
 
 from flacfetch.api.models import AlbumSearchRequest, AlbumSearchTrack
@@ -166,6 +167,18 @@ class TestWrongRecordingGuards:
         got = self._m(["06 Hollow Crown (feat. Tempo Kid) [Remastered].flac"], [AlbumTrack("k", "Hollow Crown", None)])
         assert got == {"k": "06 Hollow Crown (feat. Tempo Kid) [Remastered].flac"}
 
+    @pytest.mark.parametrize("suffix", ["(A Cappella)", "(Acappella)", "(a capella)"])
+    def test_a_cappella_is_a_version(self, suffix):
+        assert self._m([f"05 Ember {suffix}.flac"], [AlbumTrack("k", "Ember", 5)]) == {}
+
+    def test_maximum_cardinality_assignment(self):
+        # Greedy alone gives "01 Track.flac" to "Track" and strands "Tracks", whose
+        # only acceptable file it is; augmenting moves "Track" to its other file.
+        files = ["01 Track.flac", "03 Track.flac"]
+        got = self._m(files, [AlbumTrack("t", "Track", 1), AlbumTrack("s", "Tracks", 1)])
+        assert set(got) == {"t", "s"}
+        assert got["s"] == "01 Track.flac" and got["t"] == "03 Track.flac"
+
     def test_dots_in_titles_are_not_extensions(self):
         assert self._m(["05 Mr. Lantern.flac"], [AlbumTrack("k", "Mr. Lantern", 5)]) == {"k": "05 Mr. Lantern.flac"}
 
@@ -258,9 +271,31 @@ class TestGazelleSearchAlbum:
         provider.session.get = Mock(side_effect=[json_resp(browse), json_resp(group)])
         assert provider.search_album("Test Artist", "Paper Lanterns", tracks("Glass Harbour")) == []
 
-    def test_browse_failure_returns_empty(self, provider):
+    def test_browse_http_failure_raises(self, provider):
+        """A tracker outage must reach the route as an error (502), not 'not found' (404)."""
         provider.session.get = Mock(return_value=Mock(status_code=500, text="boom"))
+        with pytest.raises(RuntimeError):
+            provider.search_album("Test Artist", "Paper Lanterns", tracks("Glass Harbour"))
+
+    def test_browse_connection_failure_propagates(self, provider):
+        provider.session.get = Mock(side_effect=requests.ConnectionError("tracker down"))
+        with pytest.raises(requests.ConnectionError):
+            provider.search_album("Test Artist", "Paper Lanterns", tracks("Glass Harbour"))
+
+    def test_all_group_fetches_failing_raises(self, provider):
+        browse = {"status": "success", "response": {"results": [{"groupId": 1}, {"groupId": 2}]}}
+        provider.session.get = Mock(side_effect=[json_resp(browse), RuntimeError("x"), RuntimeError("y")])
+        with pytest.raises(RuntimeError):
+            provider.search_album("Test Artist", "Paper Lanterns", tracks("Glass Harbour"))
+
+    def test_no_groups_is_empty_not_error(self, provider):
+        provider.session.get = Mock(return_value=json_resp({"status": "success", "response": {"results": []}}))
         assert provider.search_album("Test Artist", "Paper Lanterns", tracks("Glass Harbour")) == []
+
+    def test_track_search_browse_failure_still_returns_empty(self, provider):
+        from flacfetch.core.models import TrackQuery
+        provider.session.get = Mock(return_value=Mock(status_code=500, text="boom"))
+        assert provider._search_browse(TrackQuery(artist="Test Artist", title="Glass Harbour")) == []
 
     def test_bad_group_does_not_sink_others(self, provider):
         browse = {"status": "success", "response": {"results": [{"groupId": 1}, {"groupId": 2}]}}
@@ -309,6 +344,14 @@ def clear_album_inflight():
     search_route._inflight_album_searches.clear()
     yield
     search_route._inflight_album_searches.clear()
+
+
+class TestAlbumSearchRequest:
+    def test_duplicate_track_keys_rejected(self):
+        with pytest.raises(ValueError):
+            AlbumSearchRequest(artist="A", album="B", tracks=[
+                AlbumSearchTrack(key="k", title="One"), AlbumSearchTrack(key="k", title="Two"),
+            ])
 
 
 class TestAlbumSearchRoute:

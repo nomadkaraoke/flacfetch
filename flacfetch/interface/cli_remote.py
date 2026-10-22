@@ -1680,7 +1680,15 @@ Optional:
         selected = display_results[0]
 
         # Check for excellent match (lossless, matching artist, good seeders)
+        selected_artist = (selected.get("artist") or "").lower()
+        searched_artist = (artist or "").lower()
+        artist_matches = not searched_artist or not selected_artist or (
+            selected_artist == searched_artist
+            or searched_artist in selected_artist
+            or selected_artist in searched_artist
+        )
         is_excellent = (
+            artist_matches and
             selected.get("is_lossless", False) and
             selected.get("seeders", 0) >= BEST_CHOICE_MIN_SEEDERS and
             selected.get("release_type") in ("Album", "Single", "EP")

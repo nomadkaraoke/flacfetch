@@ -47,8 +47,10 @@ _NEUTRAL_BRACKET_RE = re.compile(
 # Words that mark a different recording of the same song.
 _VERSION_MARKERS = frozenset({
     "live", "remix", "mix", "acoustic", "demo", "edit", "instrumental", "reprise",
-    "unplugged", "session", "sessions", "version", "dub", "vip", "karaoke", "a cappella", "acapella",
+    "unplugged", "session", "sessions", "version", "dub", "vip", "karaoke", "acapella",
 })
+# Multi-word markers folded to one token before tokenizing.
+_MARKER_PHRASES = re.compile(r"\ba\s+cap+el+a\b|\bacap+el+a\b", re.IGNORECASE)
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
 
@@ -120,7 +122,7 @@ def _file_title(path: str) -> str:
 
 def version_markers(text: str) -> frozenset:
     """Version words ("live", "remix", ...) in a title or file name."""
-    words = set(_WORD_RE.findall(text.lower()))
+    words = set(_WORD_RE.findall(_MARKER_PHRASES.sub(" acapella ", text).lower()))
     return frozenset(m for m in _VERSION_MARKERS if m in words)
 
 
@@ -158,7 +160,8 @@ def match_album_tracks(
 ) -> dict[str, TrackFile]:
     """Assign each track at most one file and each file at most one track.
 
-    Greedy on score: the strongest title/file pairs are assigned first. A file is
+    Greedy on score (the strongest title/file pairs are assigned first), then
+    augmented to cover as many tracks as possible. A file is
     only a candidate when its version markers agree with the title and the match
     is strong enough (``_accept``). Tracks with no acceptable file are left out of
     the result: better a per-track search or a human pick than the wrong recording.
@@ -177,14 +180,39 @@ def match_album_tracks(
             pairs.append((ranked, score, ti, fi))
 
     pairs.sort(key=lambda p: (-p[0], p[2], p[3]))
-    used_tracks: set[int] = set()
-    used_files: set[int] = set()
-    result: dict[str, TrackFile] = {}
+
+    # Greedy on score first (best pairs win), then augmenting paths so the
+    # assignment covers as many tracks as possible: greedy alone can give the
+    # only file a track could use to a track that had another option.
+    track_of_file: dict[int, int] = {}
+    file_of_track: dict[int, int] = {}
+    edges: dict[int, list[int]] = {}
+    pair_score: dict[tuple[int, int], float] = {}
     for _ranked, score, ti, fi in pairs:
-        if ti in used_tracks or fi in used_files:
-            continue
-        used_tracks.add(ti)
-        used_files.add(fi)
+        edges.setdefault(ti, []).append(fi)  # in rank order
+        pair_score[(ti, fi)] = score
+        if ti not in file_of_track and fi not in track_of_file:
+            file_of_track[ti] = fi
+            track_of_file[fi] = ti
+
+    def augment(ti: int, seen: set[int]) -> bool:
+        for fi in edges.get(ti, []):
+            if fi in seen:
+                continue
+            seen.add(fi)
+            owner = track_of_file.get(fi)
+            if owner is None or augment(owner, seen):
+                file_of_track[ti] = fi
+                track_of_file[fi] = ti
+                return True
+        return False
+
+    for ti in edges:
+        if ti not in file_of_track:
+            augment(ti, set())
+
+    result: dict[str, TrackFile] = {}
+    for ti, fi in file_of_track.items():
         path, size = files[fi]
-        result[tracks[ti].key] = TrackFile(target_file=path, target_file_size=size, match_score=score)
+        result[tracks[ti].key] = TrackFile(target_file=path, target_file_size=size, match_score=pair_score[(ti, fi)])
     return result

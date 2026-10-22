@@ -10,7 +10,7 @@ from typing import (
     Optional,
 )
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # =============================================================================
 # Search Models
@@ -79,6 +79,15 @@ class AlbumSearchRequest(BaseModel):
     artist: str = Field(..., min_length=1)
     album: str = Field(..., min_length=1, description="Album (release group) title")
     tracks: List[AlbumSearchTrack] = Field(..., min_length=1, max_length=200)
+
+    @field_validator("tracks")
+    @classmethod
+    def _unique_keys(cls, tracks: List[AlbumSearchTrack]) -> List[AlbumSearchTrack]:
+        # track_files is keyed by these; a duplicate key would silently drop a match.
+        keys = [t.key for t in tracks]
+        if len(set(keys)) != len(keys):
+            raise ValueError("track keys must be unique")
+        return tracks
 
 
 class AlbumTrackFile(BaseModel):
