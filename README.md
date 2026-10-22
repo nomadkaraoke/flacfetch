@@ -278,10 +278,12 @@ per track. Callers making several tracks from one album (e.g. karaoke-gen's Bulk
 
 Each result is a torrent (`provider`, `source_id`, quality, seeders, `release_type`,
 ...) with `matched_count` and `track_files` (`{key: {target_file, target_file_size,
-match_score}}`), ordered by tracks covered, then non-vinyl, then seeders. Download
+match_score}}`), ordered by tracks covered, then studio release type, non-vinyl,
+match strength and seeders. A track only gets a file whose version (live, remix,
+demo, ...) agrees with the requested title. Download
 a track with `POST /download-by-id` using the torrent's `source_id` and that track's
 `target_file`; concurrent downloads of one torrent share it. Returns 404 when no
-torrent covers any requested track. Album searches run on the same single search
+torrent covers any requested track, 502 when every tracker failed. Album searches run on the same single search
 worker as track searches, and identical in-flight requests are coalesced.
 
 ## Architecture & Design

@@ -120,6 +120,56 @@ class TestMatchAlbumTracks:
         assert result["b"].target_file == "CD2/01 Lantern.flac"
 
 
+class TestWrongRecordingGuards:
+    """Album mode resolves many tracks at once; a plausible-but-wrong file is the
+    worst outcome (the wrong recording becomes karaoke). Better no match."""
+
+    def _m(self, files, trs):
+        return {k: f.target_file for k, f in match_album_tracks(parse_file_list(file_list(*files)), trs).items()}
+
+    def test_live_request_gets_the_live_file_not_the_studio_one(self):
+        assert self._m(["01 Ember.flac", "02 Ember (Live).flac"], [AlbumTrack("l", "Ember (Live)")]) == {
+            "l": "02 Ember (Live).flac"}
+
+    def test_live_and_studio_requested_together_are_not_swapped(self):
+        got = self._m(["01 Ember.flac", "02 Ember (Live).flac"],
+                      [AlbumTrack("l", "Ember (Live)", 1), AlbumTrack("s", "Ember", 2)])
+        assert got == {"l": "02 Ember (Live).flac", "s": "01 Ember.flac"}
+
+    def test_repeated_positions_across_discs(self):
+        got = self._m(["CD1/06 Ember.flac", "CD2/06 Ember (Demo).flac"], [AlbumTrack("d", "Ember (Demo)", 6)])
+        assert got == {"d": "CD2/06 Ember (Demo).flac"}
+
+    def test_remix_request_never_matches_the_original(self):
+        assert self._m(["01 Ember.flac"], [AlbumTrack("r", "Ember (Night Remix)", 1)]) == {}
+
+    def test_studio_request_never_matches_only_a_live_file(self):
+        assert self._m(["01 Ember (Live).flac"], [AlbumTrack("s", "Ember", 1)]) == {}
+
+    @pytest.mark.parametrize("request_title,file_name,position", [
+        ("Hope", "01 Home.flac", 2),                        # fuzzy only, position disagrees
+        ("Run", "03 Fun.flac", 4),
+        ("Tide", "05 Tide Is Turning Now.flac", 3),          # contained, weak, position disagrees
+    ])
+    def test_weak_matches_without_position_agreement_rejected(self, request_title, file_name, position):
+        assert self._m([file_name], [AlbumTrack("k", request_title, position)]) == {}
+
+    def test_contained_title_accepted_when_position_agrees(self):
+        assert self._m(["05 Tide Is Turning Now.flac"], [AlbumTrack("k", "Tide", 5)]) == {
+            "k": "05 Tide Is Turning Now.flac"}
+
+    def test_title_words_that_look_like_version_markers(self):
+        assert self._m(["05 Live Wire Mix Tape.flac"], [AlbumTrack("k", "Live Wire Mix Tape", 5)]) == {
+            "k": "05 Live Wire Mix Tape.flac"}
+
+    def test_neutral_suffixes_ignored_on_both_sides(self):
+        got = self._m(["06 Hollow Crown (feat. Tempo Kid) [Remastered].flac"], [AlbumTrack("k", "Hollow Crown", None)])
+        assert got == {"k": "06 Hollow Crown (feat. Tempo Kid) [Remastered].flac"}
+
+    def test_dots_in_titles_are_not_extensions(self):
+        assert self._m(["05 Mr. Lantern.flac"], [AlbumTrack("k", "Mr. Lantern", 5)]) == {"k": "05 Mr. Lantern.flac"}
+
+
 # =============================================================================
 # Gazelle provider
 # =============================================================================
@@ -287,6 +337,30 @@ class TestAlbumSearchRoute:
         assert resp.tracks_requested == 3
 
     @pytest.mark.asyncio
+    async def test_studio_release_and_better_matches_rank_above_live(self):
+        live = make_candidate("live", matched=3, seeders=900)
+        live.release.release_type = "Live album"
+        weak = make_candidate("weak", matched=3, seeders=500)
+        for f in weak.track_files.values():
+            f.match_score = 0.9
+        prov = Mock(spec=["name", "search_album"])
+        prov.name = "RED"
+        prov.search_album.return_value = [live, weak, make_candidate("exact", matched=3, seeders=20)]
+        with patch.object(search_route, "get_download_manager", return_value=manager_with([prov])):
+            resp = await search_route.search_album(album_request(), api_key="k")
+        assert [r.source_id for r in resp.results] == ["exact", "weak", "live"]
+
+    @pytest.mark.asyncio
+    async def test_all_trackers_failing_is_502_not_404(self):
+        bad = Mock(spec=["name", "search_album"])
+        bad.name = "RED"
+        bad.search_album.side_effect = RuntimeError("tracker down")
+        with patch.object(search_route, "get_download_manager", return_value=manager_with([bad])):
+            with pytest.raises(HTTPException) as exc:
+                await search_route.search_album(album_request(), api_key="k")
+        assert exc.value.status_code == 502
+
+    @pytest.mark.asyncio
     async def test_runs_on_the_search_executor(self):
         thread_names = []
         prov = Mock(spec=["name", "search_album"])
@@ -362,3 +436,7 @@ class TestBestChoiceThreshold:
     def test_excellent_at_ten_not_nine(self):
         assert is_excellent_match(self._release(10)) is True
         assert is_excellent_match(self._release(9)) is False
+
+    def test_early_termination_still_needs_a_well_seeded_hit(self):
+        provider = FakeGazelle(api_key="k", base_url="https://tracker.example", cache_subdir="test-album")
+        assert provider.early_termination_seeders == 50

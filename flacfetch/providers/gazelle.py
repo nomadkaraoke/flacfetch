@@ -11,7 +11,6 @@ from urllib.parse import parse_qs, urlparse
 import requests
 
 from ..core.album_match import AlbumCandidate, AlbumTrack, match_album_tracks, parse_file_list
-from ..core.categorize import BEST_CHOICE_MIN_SEEDERS
 from ..core.interfaces import Provider
 from ..core.log import get_logger
 from ..core.matching import calculate_match_score
@@ -97,7 +96,10 @@ class GazelleProvider(Provider):
 
         # Early termination settings
         self.early_termination = True
-        self.early_termination_seeders = BEST_CHOICE_MIN_SEEDERS
+        # Stop a track sweep early only on a really well-seeded hit; this stays at
+        # 50 even though BEST_CHOICE_MIN_SEEDERS (what counts as a good pick) is 10,
+        # so a modest match can't cut the sweep short before the studio release.
+        self.early_termination_seeders = 50
         self.early_termination_release_types = {"Album", "Single", "EP"}
 
         # Setup persistent cache
@@ -639,7 +641,7 @@ class GazelleProvider(Provider):
         if resp.status_code != 200:
             return None
         data = resp.json()
-        if data["status"] != "success":
+        if data.get("status") != "success":
             return None
         response = data.get("response", {})
         return response.get("group", {}), response.get("torrents", [])
@@ -773,7 +775,7 @@ class GazelleProvider(Provider):
         except ValueError:
             logger.error(f"{self.name} API returned invalid JSON")
             return [], {}
-        if data["status"] != "success":
+        if data.get("status") != "success":
             logger.warning(f"{self.name} API status not success: {data.get('status')} - Response: {data}")
             return [], {}
 

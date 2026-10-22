@@ -10,6 +10,8 @@ from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from flacfetch.core.models import MediaSource
+
 from ..auth import verify_api_key
 from ..models import (
     AlbumSearchRequest,
@@ -239,24 +241,42 @@ def _album_inflight_key(request: AlbumSearchRequest) -> tuple:
     return (norm(request.artist), norm(request.album), tracks)
 
 
+# Release types that are the album as released (vs a live/compilation/remix
+# group whose name happens to contain the album's).
+_STUDIO_RELEASE_TYPES = {"Album", "EP", "Single", "Soundtrack"}
+
+
 def _album_sort_key(candidate):
+    """Most tracks covered, then studio release types, then non-vinyl, then the
+    strongest file matches, then seeders."""
     release = candidate.release
-    is_vinyl = bool(release.quality and release.quality.media.name == "VINYL")
-    return (-candidate.matched_count, is_vinyl, -(release.seeders or 0))
+    is_vinyl = bool(release.quality and release.quality.media == MediaSource.VINYL)
+    not_studio = release.release_type not in _STUDIO_RELEASE_TYPES
+    match_total = sum(f.match_score for f in candidate.track_files.values())
+    return (-candidate.matched_count, not_studio, is_vinyl, -round(match_total, 3), -(release.seeders or 0))
+
+
+class AlbumSearchProvidersFailed(Exception):
+    """Every provider that supports album search raised (vs. found nothing)."""
 
 
 def _run_album_search(fetch_manager, artist: str, album: str, tracks: list) -> list:
     """Album search on every provider that supports it (RED/OPS). Runs inside
     _search_executor so it's serialized with track sweeps on the shared providers."""
     candidates = []
+    attempted = failed = 0
     for provider in fetch_manager.providers:
         search_album = getattr(provider, "search_album", None)
         if search_album is None:
             continue
+        attempted += 1
         try:
             candidates.extend(search_album(artist, album, tracks))
         except Exception as e:  # noqa: BLE001 - one tracker failing must not sink the other
+            failed += 1
             logger.error(f"Album search failed on {provider.name}: {e}", exc_info=True)
+    if attempted and failed == attempted:
+        raise AlbumSearchProvidersFailed(f"all {attempted} album search providers failed")
     candidates.sort(key=_album_sort_key)
     return candidates
 
@@ -300,6 +320,9 @@ async def search_album(
         candidates = await asyncio.shield(task)
     except asyncio.CancelledError:
         raise
+    except AlbumSearchProvidersFailed as e:
+        # Distinct from 404: the trackers are failing, not the album missing.
+        raise HTTPException(status_code=502, detail=f"Album search failed: {e}")
     except Exception as e:
         logger.error(f"Album search failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Album search failed: {e}")
