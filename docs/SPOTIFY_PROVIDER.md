@@ -225,7 +225,8 @@ Environment="SPOTIPY_REDIRECT_URI=http://127.0.0.1:8888/callback"
 Spotify Premium must not "listen" to more than 24 h of audio per rolling 24 h. Every Spotify
 download made through `POST /download-by-id` is recorded in a SQLite ledger (path from
 `FLACFETCH_SPOTIFY_LEDGER`, set by `deploy/provision.sh` to `/var/lib/flacfetch-api/spotify_ledger.sqlite`;
-survives restarts). Captured seconds = PCM bytes / (44100 x 4); a download that fails before any
+survives restarts). The directory is the systemd `StateDirectory=flacfetch-api` of the API unit;
+existing hosts must re-run `deploy/provision.sh` once to add it. Captured seconds = PCM bytes / (44100 x 4); a download that fails before any
 audio is captured is released and does not count.
 
 `POST /download-by-id` extra fields (Spotify):

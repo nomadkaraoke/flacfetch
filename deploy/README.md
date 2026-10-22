@@ -105,3 +105,11 @@ ssh flacup 'apt-get clean; journalctl --vacuum-size=200M'   # root fs
 On the data disk, seeded torrents (`KEEP_SEEDING=true`) grow ~3-4 GB/month; prune
 the oldest/least-seeded torrents in Transmission (remove *with* data) rather than
 deleting files under `downloads/` by hand.
+
+## State directory (`/var/lib/flacfetch-api`)
+
+The API unit sets `StateDirectory=flacfetch-api`, so systemd creates
+`/var/lib/flacfetch-api` owned by the service user. It holds the Spotify listening
+ledger (`spotify_ledger.sqlite`, `FLACFETCH_SPOTIFY_LEDGER`); see
+`../docs/SPOTIFY_PROVIDER.md`. Hosts provisioned before v0.35.0 must re-run
+`sudo bash deploy/provision.sh` (idempotent) to add it, then restart `flacfetch-api`.

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-10-22
+
+### Added
+- **Spotify listening budget + batch priority** for `POST /download-by-id`: a persistent
+  rolling-24h SQLite ledger, `priority: "batch"` (429 with `Retry-After` and
+  `{code, retry_after_s}` when over budget/busy), `expected_duration_s`,
+  `delete_local_after_upload`, and `GET /spotify/budget`. Interactive requests are never refused.
+  Deploy: `pip install -e .[api,spotify]`, re-run `deploy/provision.sh` (adds
+  `StateDirectory=flacfetch-api` and `FLACFETCH_SPOTIFY_LEDGER`), restart. See docs/SPOTIFY_PROVIDER.md.
+
 ## [0.34.1] - 2026-10-22
 
 ### Fixed
