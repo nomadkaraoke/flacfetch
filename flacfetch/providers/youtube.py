@@ -29,9 +29,11 @@ class YoutubeProvider(Provider):
         return "YouTube"
 
     def search(self, query: TrackQuery) -> list[Release]:
-        # Search for 5 results
-        # Adding "topic" often helps find the auto-generated "Topic" channel results which are high quality audio
-        search_query = f"ytsearch5:{query.artist} {query.title} topic"
+        # Search for 5 results. Keep the query plain: a " topic" suffix (meant to
+        # surface auto-generated Topic channel audio) pushed the actual song out of
+        # the top 5 entirely for lesser-known tracks (Playa Fly - N God We Trust).
+        # select_best() still prefers Topic/official uploads when they do appear.
+        search_query = f"ytsearch5:{query.artist} {query.title}"
 
         # Get base options (includes cookies if available)
         ydl_opts = get_ytdlp_base_opts(self.cookies_file)
