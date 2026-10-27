@@ -1023,6 +1023,18 @@ class TestDownloadBudget:
         assert p.fetch_artifact_by_id("42") is None
         assert "budget used up" in p.fetch_errors["42"]
 
+    def test_failed_ledger_write_kept_in_memory(self, tmp_path, monkeypatch):
+        from pathlib import Path
+        p = self._provider(tmp_path)
+        p.session.get = MagicMock(side_effect=self._read_timeout())
+        monkeypatch.setattr(Path, "write_text", MagicMock(side_effect=OSError("disk full")))
+
+        p.fetch_artifact_by_id("42")
+        assert not (tmp_path / "42.downloads.json").exists()
+        assert p.fetch_artifact_by_id("42") is None
+        assert p.session.get.call_count == 1
+        assert p.downloads_used("42") == 1
+
     def test_unreadable_ledger_blocks(self, tmp_path):
         (tmp_path / "42.downloads.json").write_text("{not json")
         p = self._provider(tmp_path)

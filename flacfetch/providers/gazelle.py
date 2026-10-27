@@ -110,8 +110,9 @@ class GazelleProvider(Provider):
         # ONE tracker fetch: the first caches the .torrent, the rest hit the cache.
         self._fetch_locks: dict[str, threading.Lock] = {}
         self._fetch_locks_guard = threading.Lock()
-        # Per-torrent download ledgers (see TORRENT_DOWNLOAD_BUDGET), kept in
-        # memory only when there is no cache dir to persist them in.
+        # Per-torrent download ledgers (see TORRENT_DOWNLOAD_BUDGET) kept in
+        # memory: when there is no cache dir, or the last disk write failed (an
+        # unrecorded request must never let retries reach the tracker again).
         self._download_ledgers: dict[str, dict] = {}
         # {torrent_id: reason} for the last failed fetch, surfaced in job errors.
         self.fetch_errors: dict[str, str] = {}
@@ -459,6 +460,8 @@ class GazelleProvider(Provider):
         path = self._download_ledger_path(torrent_id)
         if not path:
             return self._download_ledgers.setdefault(torrent_id, {"requests": [], "limit_reached": False})
+        if torrent_id in self._download_ledgers:
+            return self._download_ledgers[torrent_id]
         if not path.exists():
             return {"requests": [], "limit_reached": False}
         try:
@@ -496,10 +499,14 @@ class GazelleProvider(Provider):
         path = self._download_ledger_path(torrent_id)
         if not path:
             return
+        tmp = path.with_name(path.name + ".tmp")
         try:
-            path.write_text(json.dumps(ledger))
+            tmp.write_text(json.dumps(ledger))
+            tmp.replace(path)
+            self._download_ledgers.pop(torrent_id, None)
         except OSError as e:
-            logger.warning(f"{self.name}: could not write download ledger for {torrent_id}: {e}")
+            logger.warning(f"{self.name}: could not write download ledger for {torrent_id}: {e}; keeping it in memory")
+            self._download_ledgers[torrent_id] = ledger
 
     def downloads_used(self, torrent_id: str) -> int:
         """Requests for this torrent that may have counted against the tracker's limit."""
