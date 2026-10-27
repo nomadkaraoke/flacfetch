@@ -994,6 +994,35 @@ class TestDownloadBudget:
         assert p.fetch_artifact_by_id("42") == self.TORRENT
         assert p.downloads_used("42") == 1
 
+    @pytest.mark.parametrize("make_error", [
+        lambda: __import__("requests").exceptions.SSLError("handshake failed"),
+        lambda: __import__("requests").exceptions.ConnectionError(
+            __import__("urllib3").exceptions.MaxRetryError(
+                None, "/", __import__("urllib3").exceptions.NewConnectionError(None, "refused"))),
+    ])
+    def test_errors_before_sending_not_counted(self, tmp_path, make_error):
+        p = self._provider(tmp_path)
+        p.session.get = MagicMock(side_effect=[make_error(), self._resp()])
+        assert p.fetch_artifact_by_id("42") is None
+        assert "Could not connect" in p.fetch_errors["42"]
+        assert p.fetch_artifact_by_id("42") == self.TORRENT  # no cooldown
+        assert p.downloads_used("42") == 1
+
+    def test_dropped_connection_after_send_counted(self, tmp_path):
+        import requests
+        p = self._provider(tmp_path)
+        p.session.get = MagicMock(side_effect=requests.exceptions.ConnectionError("Connection aborted."))
+        assert p.fetch_artifact_by_id("42") is None
+        assert p.downloads_used("42") == 1
+
+    @pytest.mark.parametrize("content", ["{}", "[]", '{"requests": [1]}', '{"limit_reached": false}'])
+    def test_wrong_shaped_ledger_blocks(self, tmp_path, content):
+        (tmp_path / "42.downloads.json").write_text(content)
+        p = self._provider(tmp_path)
+        p.session.get = MagicMock(side_effect=AssertionError("network"))
+        assert p.fetch_artifact_by_id("42") is None
+        assert "budget used up" in p.fetch_errors["42"]
+
     def test_unreadable_ledger_blocks(self, tmp_path):
         (tmp_path / "42.downloads.json").write_text("{not json")
         p = self._provider(tmp_path)

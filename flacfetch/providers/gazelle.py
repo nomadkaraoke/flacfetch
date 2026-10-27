@@ -10,6 +10,7 @@ from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
 
 import requests
+from urllib3.exceptions import NewConnectionError
 
 from ..core.album_match import AlbumCandidate, AlbumTrack, match_album_tracks, parse_file_list
 from ..core.interfaces import Provider
@@ -399,18 +400,37 @@ class GazelleProvider(Provider):
                     if outcome == "unanswered":
                         self.fetch_errors[torrent_id] = f"{self.name} returned HTTP {resp.status_code} for the .torrent download"
                     return None
-            except requests.exceptions.ConnectTimeout as e:
-                # Never connected, so the request was never sent: not counted.
+            except requests.exceptions.RequestException as e:
                 logger.error(f"Error fetching artifact: {e}")
-                return None
-            except Exception as e:
+                if self._request_never_sent(e):
+                    # DNS / refused / TLS / proxy failure: the tracker never saw it.
+                    self.fetch_errors[torrent_id] = f"Could not connect to {self.name} ({type(e).__name__})"
+                    return None
                 # Read timeout / dropped connection: the tracker may have counted it.
                 self._record_download_request(torrent_id, kind, "unanswered")
-                logger.error(f"Error fetching artifact: {e}")
                 self.fetch_errors[torrent_id] = f"{self.name} did not answer the .torrent download ({type(e).__name__})"
+                return None
+            except Exception as e:
+                # Anything else may have happened after the tracker served the
+                # file, so count it rather than risk an unrecorded download.
+                self._record_download_request(torrent_id, kind, "unanswered")
+                logger.error(f"Error fetching artifact: {e}")
+                self.fetch_errors[torrent_id] = f"{self.name} .torrent download failed ({type(e).__name__})"
                 return None
 
         return None
+
+    @staticmethod
+    def _request_never_sent(error: Exception) -> bool:
+        """True when a requests error happened before the request reached the tracker."""
+        if isinstance(error, (requests.exceptions.ConnectTimeout, requests.exceptions.SSLError, requests.exceptions.ProxyError)):
+            return True
+        if isinstance(error, requests.exceptions.ConnectionError):
+            # Wraps urllib3's MaxRetryError; NewConnectionError (incl. DNS
+            # NameResolutionError) means no connection was ever made.
+            reason = getattr(error.args[0], "reason", None) if error.args else None
+            return isinstance(reason, NewConnectionError)
+        return False
 
     @staticmethod
     def _is_limit_error(body) -> bool:
@@ -442,7 +462,11 @@ class GazelleProvider(Provider):
         if not path.exists():
             return {"requests": [], "limit_reached": False}
         try:
-            return json.loads(path.read_text())
+            ledger = json.loads(path.read_text())
+            if not (isinstance(ledger, dict) and isinstance(ledger.get("requests"), list)
+                    and all(isinstance(r, dict) for r in ledger["requests"])):
+                raise ValueError("unexpected ledger shape")
+            return ledger
         except (OSError, ValueError) as e:
             # An unreadable ledger must not unlock fresh downloads.
             logger.warning(f"{self.name}: unreadable download ledger for {torrent_id} ({e}); treating as used up")
@@ -480,7 +504,7 @@ class GazelleProvider(Provider):
     def downloads_used(self, torrent_id: str) -> int:
         """Requests for this torrent that may have counted against the tracker's limit."""
         ledger = self._load_download_ledger(torrent_id)
-        return sum(1 for r in ledger["requests"] if r["outcome"] in ("ok", "unanswered"))
+        return sum(1 for r in ledger["requests"] if r.get("outcome") in ("ok", "unanswered"))
 
     def _download_blocked_reason(self, torrent_id: Optional[str]) -> Optional[str]:
         """Why the tracker must not be asked for this torrent right now, or None."""
@@ -489,7 +513,7 @@ class GazelleProvider(Provider):
         ledger = self._load_download_ledger(torrent_id)
         if ledger.get("limit_reached") or self.downloads_used(torrent_id) >= self.TORRENT_DOWNLOAD_BUDGET:
             return self._limit_reached_message(torrent_id)
-        unanswered = [r["t"] for r in ledger["requests"] if r["outcome"] == "unanswered"]
+        unanswered = [r.get("t", 0) for r in ledger["requests"] if r.get("outcome") == "unanswered"]
         if unanswered:
             wait = unanswered[-1] + self.UNANSWERED_COOLDOWN_SECONDS - time.time()
             if wait > 0:
