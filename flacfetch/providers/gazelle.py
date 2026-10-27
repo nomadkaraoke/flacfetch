@@ -1,6 +1,7 @@
 """Base provider for Gazelle-based private music trackers (RED, OPS, etc.)."""
 
 import html
+import json
 import threading
 import time
 from abc import abstractmethod
@@ -55,6 +56,24 @@ class GazelleProvider(Provider):
     # After a token spend fails for a torrent, don't retry it for this long.
     FL_TOKEN_FAILURE_BACKOFF_SECONDS = 600
 
+    # RED lets a user fetch each .torrent file through the API only four times,
+    # ever ("You have already downloaded this torrent file four times"); after
+    # that it must come from a browser. Every request that may have counted is
+    # recorded per torrent in an on-disk ledger, and we stop at this many so one
+    # download is always left for a manual browser recovery.
+    TORRENT_DOWNLOAD_BUDGET = 3
+
+    # A request the tracker never answered (read timeout, dropped connection,
+    # 5xx) may still have counted server-side: on 2026-10-23 RED stalled and
+    # three timed-out fetches used up a torrent's limit with nothing cached.
+    # After one, don't ask the tracker for that torrent again for this long.
+    UNANSWERED_COOLDOWN_SECONDS = 300
+
+    # (connect, read) timeouts for .torrent downloads. The file is a few KB, so
+    # a slow response is the tracker stalling; waiting it out is far cheaper
+    # than a retry that spends another of the four downloads.
+    DOWNLOAD_TIMEOUT = (10, 60)
+
     def __init__(self, api_key: str, base_url: str, cache_subdir: str, use_fl_token: bool = False):
         """Initialize the Gazelle provider.
 
@@ -90,6 +109,11 @@ class GazelleProvider(Provider):
         # ONE tracker fetch: the first caches the .torrent, the rest hit the cache.
         self._fetch_locks: dict[str, threading.Lock] = {}
         self._fetch_locks_guard = threading.Lock()
+        # In-memory mirror of the per-torrent download ledger (see
+        # TORRENT_DOWNLOAD_BUDGET), used as-is when there is no cache dir.
+        self._download_ledgers: dict[str, dict] = {}
+        # {torrent_id: reason} for the last failed fetch, surfaced in job errors.
+        self.fetch_errors: dict[str, str] = {}
         self.session = requests.Session()
         self.session.headers.update({"Authorization": self.api_key})
         self.search_limit = 10
@@ -259,9 +283,13 @@ class GazelleProvider(Provider):
     def _fetch_torrent_from_url(self, url: str, torrent_id: Optional[str] = None, max_retries: int = 3) -> Optional[bytes]:
         """Fetch a torrent file from URL and cache it.
 
+        Every request goes through the per-torrent download ledger: nothing is
+        sent once the torrent's budget is used up or while it is cooling down
+        after an unanswered request (see TORRENT_DOWNLOAD_BUDGET).
+
         Args:
             url: Download URL for the torrent file
-            torrent_id: Optional torrent ID for caching
+            torrent_id: Optional torrent ID for caching (parsed from the URL if omitted)
             max_retries: Maximum number of retries on rate limiting (default 3)
 
         Returns:
@@ -271,8 +299,17 @@ class GazelleProvider(Provider):
         if url.startswith("/") or url.startswith("file://"):
             return None
 
+        torrent_id = torrent_id or self.torrent_id_from_url(url)
+        kind = "token" if "usetoken=1" in url else "normal"
+
         retries = 0
         while retries <= max_retries:
+            blocked = self._download_blocked_reason(torrent_id)
+            if blocked:
+                logger.error(f"{self.name}: not requesting .torrent {torrent_id}: {blocked}")
+                self.fetch_errors[torrent_id] = blocked
+                return None
+
             try:
                 logger.info(f"Fetching artifact from {url}")
 
@@ -283,7 +320,7 @@ class GazelleProvider(Provider):
                 logger.debug(f"Downloading artifact from: {url}")
                 logger.debug(f"Request Headers: {req_headers}")
 
-                resp = self.session.get(url, timeout=10, allow_redirects=False)
+                resp = self.session.get(url, timeout=self.DOWNLOAD_TIMEOUT, allow_redirects=False)
                 logger.debug(f"Response Status: {resp.status_code}")
                 logger.debug(f"Response Headers: {dict(resp.headers)}")
 
@@ -293,10 +330,10 @@ class GazelleProvider(Provider):
                         logger.debug(f"Response Body (JSON): {content}")
                         if content.get("status") == "failure" and "already downloaded" in content.get("error", ""):
                             logger.error(f"{self.name} Limit Reached: {content.get('error')}")
-                            logger.info("Tip: You can download the .torrent file manually from the website and place it in the cache directory:")
-                            if self.cache_dir and torrent_id:
-                                logger.info(f"  {self.cache_dir}/{torrent_id}.torrent")
-                    except:
+                            self._mark_download_limit_reached(torrent_id)
+                            self.fetch_errors[torrent_id] = self._limit_reached_message(torrent_id)
+                            return None
+                    except Exception:
                         logger.debug(f"Response Body (Text/Raw): {resp.text[:500]}")
 
                 if resp.status_code in (301, 302, 303, 307, 308):
@@ -305,7 +342,7 @@ class GazelleProvider(Provider):
                     if redirect_url:
                         if redirect_url.startswith("/"):
                             redirect_url = self.base_url + redirect_url
-                        resp = self.session.get(redirect_url, timeout=10)
+                        resp = self.session.get(redirect_url, timeout=self.DOWNLOAD_TIMEOUT)
 
                 if resp.status_code == 200:
                     # The download endpoint returns raw bencoded .torrent bytes on
@@ -316,6 +353,7 @@ class GazelleProvider(Provider):
                     content_type = resp.headers.get("Content-Type", "").lower()
                     is_torrent = resp.content[:1] == b"d" and "json" not in content_type
                     if not is_torrent:
+                        self._record_download_request(torrent_id, kind, "refused")
                         try:
                             err = resp.json()
                             logger.warning(f"{self.name} download returned an error instead of a torrent: {err.get('error', err)}")
@@ -323,6 +361,7 @@ class GazelleProvider(Provider):
                             logger.warning(f"{self.name} download returned non-torrent content ({len(resp.content)} bytes): {resp.content[:100]}")
                         return None
 
+                    self._record_download_request(torrent_id, kind, "ok")
                     logger.debug(f"Artifact fetched successfully ({len(resp.content)} bytes)")
                     if len(resp.content) < 1000:
                         logger.warning(f"Artifact seems too small ({len(resp.content)} bytes). Content sample: {resp.content[:100]}")
@@ -339,6 +378,7 @@ class GazelleProvider(Provider):
 
                     return resp.content
                 elif resp.status_code == 429:
+                    self._record_download_request(torrent_id, kind, "refused")
                     retries += 1
                     if retries <= max_retries:
                         logger.warning(f"Rate limited while fetching artifact. Retry {retries}/{max_retries} in 2s...")
@@ -348,13 +388,110 @@ class GazelleProvider(Provider):
                         logger.error(f"Rate limit exceeded after {max_retries} retries")
                         return None
                 else:
+                    # A 4xx is an explicit refusal (nothing served). A 5xx may have
+                    # been generated and counted before the server failed.
+                    outcome = "unanswered" if resp.status_code >= 500 else "refused"
+                    self._record_download_request(torrent_id, kind, outcome)
                     logger.error(f"Failed to fetch artifact: Status {resp.status_code}")
+                    if outcome == "unanswered":
+                        self.fetch_errors[torrent_id] = f"{self.name} returned HTTP {resp.status_code} for the .torrent download"
                     return None
-            except Exception as e:
+            except requests.exceptions.ConnectTimeout as e:
+                # Never connected, so the request was never sent: not counted.
                 logger.error(f"Error fetching artifact: {e}")
+                return None
+            except Exception as e:
+                # Read timeout / dropped connection: the tracker may have counted it.
+                self._record_download_request(torrent_id, kind, "unanswered")
+                logger.error(f"Error fetching artifact: {e}")
+                self.fetch_errors[torrent_id] = f"{self.name} did not answer the .torrent download ({type(e).__name__})"
                 return None
 
         return None
+
+    # ---- per-torrent download ledger --------------------------------------
+
+    def _download_ledger_path(self, torrent_id: str) -> Optional[Path]:
+        if not self.cache_dir or not torrent_id:
+            return None
+        return self.cache_dir / f"{torrent_id}.downloads.json"
+
+    def _load_download_ledger(self, torrent_id: str) -> dict:
+        """The torrent's ledger: ``{"requests": [{t, kind, outcome}], "limit_reached": bool}``."""
+        ledger = self._download_ledgers.get(torrent_id)
+        if ledger is not None:
+            return ledger
+        ledger = {"requests": [], "limit_reached": False}
+        path = self._download_ledger_path(torrent_id)
+        if path and path.exists():
+            try:
+                ledger = json.loads(path.read_text())
+            except (OSError, ValueError) as e:
+                # An unreadable ledger must not unlock fresh downloads.
+                logger.warning(f"{self.name}: unreadable download ledger for {torrent_id} ({e}); treating as used up")
+                ledger = {"requests": [], "limit_reached": True}
+        self._download_ledgers[torrent_id] = ledger
+        return ledger
+
+    def _record_download_request(self, torrent_id: Optional[str], kind: str, outcome: str) -> None:
+        """Record one download-endpoint request.
+
+        ``outcome`` is ``ok`` (torrent served), ``unanswered`` (timeout, dropped
+        connection, 5xx: may have counted) or ``refused`` (an explicit error or
+        429: nothing served, not counted).
+        """
+        if not torrent_id:
+            return
+        ledger = self._load_download_ledger(torrent_id)
+        ledger["requests"].append({"t": time.time(), "kind": kind, "outcome": outcome})
+        self._save_download_ledger(torrent_id, ledger)
+
+    def _mark_download_limit_reached(self, torrent_id: Optional[str]) -> None:
+        if not torrent_id:
+            return
+        ledger = self._load_download_ledger(torrent_id)
+        ledger["limit_reached"] = True
+        self._save_download_ledger(torrent_id, ledger)
+
+    def _save_download_ledger(self, torrent_id: str, ledger: dict) -> None:
+        path = self._download_ledger_path(torrent_id)
+        if not path:
+            return
+        try:
+            path.write_text(json.dumps(ledger))
+        except OSError as e:
+            logger.warning(f"{self.name}: could not write download ledger for {torrent_id}: {e}")
+
+    def downloads_used(self, torrent_id: str) -> int:
+        """Requests for this torrent that may have counted against the tracker's limit."""
+        ledger = self._load_download_ledger(torrent_id)
+        return sum(1 for r in ledger["requests"] if r["outcome"] in ("ok", "unanswered"))
+
+    def _download_blocked_reason(self, torrent_id: Optional[str]) -> Optional[str]:
+        """Why the tracker must not be asked for this torrent right now, or None."""
+        if not torrent_id:
+            return None
+        ledger = self._load_download_ledger(torrent_id)
+        if ledger.get("limit_reached") or self.downloads_used(torrent_id) >= self.TORRENT_DOWNLOAD_BUDGET:
+            return self._limit_reached_message(torrent_id)
+        unanswered = [r["t"] for r in ledger["requests"] if r["outcome"] == "unanswered"]
+        if unanswered:
+            wait = unanswered[-1] + self.UNANSWERED_COOLDOWN_SECONDS - time.time()
+            if wait > 0:
+                return (
+                    f"{self.name} did not answer the last .torrent request for {torrent_id}; "
+                    f"not asking again for {int(wait) + 1}s so a stalled tracker can't use up "
+                    f"its download limit. Retry in a few minutes."
+                )
+        return None
+
+    def _limit_reached_message(self, torrent_id: str) -> str:
+        path = self.cache_dir / f"{torrent_id}.torrent" if self.cache_dir else f"<cache>/{torrent_id}.torrent"
+        return (
+            f"{self.name} .torrent download budget used up for torrent {torrent_id} "
+            f"({self.downloads_used(torrent_id)} recorded requests). Download the .torrent "
+            f"in a browser and save it as {path}, then retry."
+        )
 
     def _token_marker_path(self, torrent_id: str) -> Optional[Path]:
         """Path of the local marker recording a token spend for a torrent."""
@@ -549,15 +686,22 @@ class GazelleProvider(Provider):
         # each fetched the .torrent -- counting against the tracker's per-torrent
         # download limit (RED: four). Siblings now wait and take the cached copy.
         with self._fetch_lock(source_id):
+            self.fetch_errors.pop(source_id, None)
+            cached = self.get_cached_artifact(source_id)
+
             # If we should spend a token and haven't already tokened this torrent
             # within the freeleech window, register the token FIRST -- before the
             # cache short-circuit. A cached .torrent file does NOT make a download
             # freeleech; the token must be registered server-side via usetoken=1,
             # otherwise the (re-)download of the torrent data counts against ratio.
+            # A successful token spend is itself a .torrent download, though, so
+            # with a cached copy in hand only spend one while it leaves room in the
+            # download budget: running out would cost far more than one torrent's ratio.
             if (
                 use_token
                 and not self._token_recently_spent(source_id)
                 and not self._token_recently_failed(source_id)
+                and not (cached and self.downloads_used(source_id) + 1 >= self.TORRENT_DOWNLOAD_BUDGET)
             ):
                 with self._token_lock:
                     content = self._spend_token(url, source_id)
@@ -570,7 +714,6 @@ class GazelleProvider(Provider):
 
             # Serve the cached .torrent if present (token, if any, is already
             # registered above; a cached torrent is fine for the actual data fetch).
-            cached = self.get_cached_artifact(source_id)
             if cached:
                 return cached
 

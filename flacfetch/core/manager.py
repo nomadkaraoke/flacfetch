@@ -373,6 +373,10 @@ class FetchManager:
                  # If download_url is http..., TorrentDownloader will fail.
                  if release.download_url and release.download_url.startswith("http"):
                      msg = "Failed to download torrent file from provider. Cannot proceed with download."
+                     torrent_id = torrent_id_from_url(release.download_url) if torrent_id_from_url else None
+                     reason = getattr(provider, "fetch_errors", {}).get(torrent_id)
+                     if reason:
+                         msg = f"{msg} {reason}"
                      logger.error(msg)
                      raise ValueError(msg)
 
@@ -520,6 +524,9 @@ class FetchManager:
 
             if not artifact:
                 msg = f"Failed to fetch torrent file for {source_name} ID: {source_id}"
+                reason = getattr(provider, "fetch_errors", {}).get(source_id)
+                if reason:
+                    msg = f"{msg}: {reason}"
                 logger.error(msg)
                 raise ValueError(msg)
 

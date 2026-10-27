@@ -831,3 +831,177 @@ class TestConcurrentTorrentFetch:
         p = self._provider(tmp_path, use_fl_token=False)
         assert p._fetch_lock("1") is p._fetch_lock("1")
         assert p._fetch_lock("1") is not p._fetch_lock("2")
+
+
+class TestDownloadBudget:
+    """The per-torrent ledger keeps RED's four-download limit out of reach.
+
+    Incident 2026-10-23 (RED 2319570): RED stalled, three fetches timed out at
+    10s with nothing cached, and they counted server-side anyway; the limit
+    was gone before a retry could succeed.
+    """
+
+    TORRENT = b"d8:announce" + b"x" * 2000
+
+    def _provider(self, tmp_path, use_fl_token=False):
+        p = ConcreteGazelleProvider(
+            api_key="test",
+            base_url="https://test.example",
+            cache_subdir="test",
+            use_fl_token=use_fl_token,
+        )
+        p.cache_dir = tmp_path
+        return p
+
+    def _resp(self, status=200, content=None, content_type="application/x-bittorrent", json_body=None):
+        resp = MagicMock()
+        resp.status_code = status
+        resp.headers = {"Content-Type": content_type}
+        resp.content = self.TORRENT if content is None else content
+        if json_body is not None:
+            resp.json.return_value = json_body
+        else:
+            resp.json.side_effect = ValueError("not json")
+        resp.text = ""
+        return resp
+
+    def _read_timeout(self):
+        import requests
+        return requests.exceptions.ReadTimeout("Read timed out. (read timeout=60)")
+
+    def test_successful_fetch_recorded_and_cached(self, tmp_path):
+        p = self._provider(tmp_path)
+        p.session.get = MagicMock(return_value=self._resp())
+
+        assert p.fetch_artifact_by_id("42") == self.TORRENT
+        assert p.downloads_used("42") == 1
+        assert (tmp_path / "42.torrent").read_bytes() == self.TORRENT
+        assert p.session.get.call_args.kwargs["timeout"] == p.DOWNLOAD_TIMEOUT
+
+    def test_timeout_counts_and_blocks_retries_during_cooldown(self, tmp_path):
+        p = self._provider(tmp_path)
+        p.session.get = MagicMock(side_effect=self._read_timeout())
+
+        assert p.fetch_artifact_by_id("42") is None
+        assert p.downloads_used("42") == 1
+        # gen's auto-retries 40s later must not touch the tracker.
+        assert p.fetch_artifact_by_id("42") is None
+        assert p.fetch_artifact_by_id("42") is None
+        assert p.session.get.call_count == 1
+        assert "did not answer" in p.fetch_errors["42"]
+
+    def test_retry_allowed_after_cooldown(self, tmp_path):
+        p = self._provider(tmp_path)
+        p.session.get = MagicMock(side_effect=[self._read_timeout(), self._resp()])
+        p.fetch_artifact_by_id("42")
+
+        p._download_ledgers["42"]["requests"][-1]["t"] -= p.UNANSWERED_COOLDOWN_SECONDS + 1
+        assert p.fetch_artifact_by_id("42") == self.TORRENT
+        assert p.session.get.call_count == 2
+        assert "42" not in p.fetch_errors
+
+    def test_incident_replay_one_tracker_request(self, tmp_path):
+        """Token refused, then RED stalls: only ONE countable request goes out."""
+        p = self._provider(tmp_path, use_fl_token=True)
+        refused = self._resp(400, content=b"{}", content_type="application/json", json_body={"status": "failure"})
+        p.session.get = MagicMock(side_effect=[refused, self._read_timeout()])
+
+        for _ in range(3):  # first attempt + gen's two auto-retries
+            assert p.fetch_artifact_by_id("2319570") is None
+
+        urls = [c.args[0] for c in p.session.get.call_args_list]
+        assert len(urls) == 2
+        assert "usetoken=1" in urls[0] and "usetoken" not in urls[1]
+        assert p.downloads_used("2319570") == 1
+
+    def test_budget_stops_before_tracker_limit(self, tmp_path):
+        p = self._provider(tmp_path)
+        p.session.get = MagicMock(return_value=self._resp())
+        for _ in range(p.TORRENT_DOWNLOAD_BUDGET):
+            assert p.fetch_artifact_by_id("42") == self.TORRENT
+            (tmp_path / "42.torrent").unlink()  # cache lost each time
+
+        assert p.fetch_artifact_by_id("42") is None
+        assert p.session.get.call_count == p.TORRENT_DOWNLOAD_BUDGET
+        assert "budget used up" in p.fetch_errors["42"]
+        assert str(tmp_path / "42.torrent") in p.fetch_errors["42"]
+
+    def test_ledger_survives_restart(self, tmp_path):
+        p = self._provider(tmp_path)
+        p.session.get = MagicMock(side_effect=self._read_timeout())
+        p.fetch_artifact_by_id("42")
+
+        restarted = self._provider(tmp_path)
+        restarted.session.get = MagicMock(side_effect=AssertionError("network"))
+        assert restarted.fetch_artifact_by_id("42") is None
+        assert restarted.downloads_used("42") == 1
+
+    def test_tracker_limit_error_blocks_until_torrent_supplied(self, tmp_path):
+        p = self._provider(tmp_path)
+        body = {"status": "failure", "error": "You have already downloaded this torrent file four times."}
+        p.session.get = MagicMock(return_value=self._resp(403, content=b"{}", content_type="application/json", json_body=body))
+
+        assert p.fetch_artifact_by_id("42") is None
+        assert p.fetch_artifact_by_id("42") is None
+        assert p.session.get.call_count == 1
+        assert self._provider(tmp_path)._download_blocked_reason("42")
+
+        # A browser-downloaded .torrent dropped into the cache is served.
+        (tmp_path / "42.torrent").write_bytes(self.TORRENT)
+        assert p.fetch_artifact_by_id("42") == self.TORRENT
+        assert p.session.get.call_count == 1
+
+    def test_explicit_refusals_not_counted(self, tmp_path):
+        p = self._provider(tmp_path)
+        p.session.get = MagicMock(return_value=self._resp(400, content=b"{}", content_type="application/json", json_body={}))
+        for _ in range(5):
+            p.fetch_artifact_by_id("42")
+        assert p.downloads_used("42") == 0
+        assert p.session.get.call_count == 5
+
+    def test_server_error_counts_with_cooldown(self, tmp_path):
+        p = self._provider(tmp_path)
+        p.session.get = MagicMock(return_value=self._resp(502, content=b"bad gateway"))
+        assert p.fetch_artifact_by_id("42") is None
+        assert p.fetch_artifact_by_id("42") is None
+        assert p.session.get.call_count == 1
+        assert p.downloads_used("42") == 1
+
+    def test_connect_timeout_not_counted(self, tmp_path):
+        import requests
+        p = self._provider(tmp_path)
+        p.session.get = MagicMock(side_effect=[requests.exceptions.ConnectTimeout("no route"), self._resp()])
+        assert p.fetch_artifact_by_id("42") is None
+        assert p.fetch_artifact_by_id("42") == self.TORRENT
+        assert p.downloads_used("42") == 1
+
+    def test_unreadable_ledger_blocks(self, tmp_path):
+        (tmp_path / "42.downloads.json").write_text("{not json")
+        p = self._provider(tmp_path)
+        p.session.get = MagicMock(side_effect=AssertionError("network"))
+        assert p.fetch_artifact_by_id("42") is None
+
+    def test_token_skipped_on_cached_torrent_when_budget_tight(self, tmp_path):
+        p = self._provider(tmp_path, use_fl_token=True)
+        (tmp_path / "42.torrent").write_bytes(self.TORRENT)
+        for _ in range(p.TORRENT_DOWNLOAD_BUDGET - 1):
+            p._record_download_request("42", "normal", "ok")
+        p.session.get = MagicMock(side_effect=AssertionError("network"))
+
+        assert p.fetch_artifact_by_id("42") == self.TORRENT
+
+    def test_token_still_spent_on_cached_torrent_with_room(self, tmp_path):
+        p = self._provider(tmp_path, use_fl_token=True)
+        (tmp_path / "42.torrent").write_bytes(self.TORRENT)
+        p.session.get = MagicMock(return_value=self._resp())
+
+        assert p.fetch_artifact_by_id("42") == self.TORRENT
+        assert "usetoken=1" in p.session.get.call_args.args[0]
+        assert p.downloads_used("42") == 1
+
+    def test_token_spend_counts_against_budget(self, tmp_path):
+        p = self._provider(tmp_path, use_fl_token=True)
+        p.session.get = MagicMock(return_value=self._resp())
+        p.fetch_artifact_by_id("42")
+        ledger = p._load_download_ledger("42")
+        assert [r["kind"] for r in ledger["requests"]] == ["token"]
