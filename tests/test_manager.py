@@ -589,6 +589,31 @@ class TestDownloadById:
         assert release.source_name == "RED"
         assert release.target_file == "01 - Track.flac"
 
+    def test_download_by_id_red_failure_includes_provider_reason(self):
+        """The provider's reason (e.g. budget used up) reaches the job error."""
+        mgr = FetchManager()
+        mock_dl = Mock(spec=Downloader)
+
+        class MockREDProvider(Provider):
+            fetch_errors = {"12345": "RED .torrent download budget used up for torrent 12345"}
+
+            @property
+            def name(self):
+                return "RED"
+
+            def search(self, q):
+                return []
+
+            def fetch_artifact_by_id(self, torrent_id):
+                return None
+
+        mgr.add_provider(MockREDProvider())
+        mgr.register_downloader("RED", mock_dl)
+
+        with pytest.raises(ValueError, match="Failed to fetch torrent file for RED ID: 12345: RED .torrent download budget used up"):
+            mgr.download_by_id(source_name="RED", source_id="12345", output_path="/output")
+        mock_dl.download.assert_not_called()
+
     def test_download_by_id_ops_torrent(self):
         """Test download_by_id for OPS creates Release with correct quality"""
         mgr = FetchManager()

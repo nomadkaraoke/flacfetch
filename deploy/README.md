@@ -18,6 +18,7 @@ the migration cutover.
 | `_sm_get.py` | Fetch a Secret Manager secret via the SA key (no gcloud needed). |
 | `_gcs_get.py` | Download one GCS object via the SA key (librespot binary). |
 | `flacfetch.env.example` | Template for the static secrets. |
+| `backfill_torrent_cache.py` | Copy .torrent files Transmission holds into flacfetch's torrent cache (see below). |
 
 ## Usage
 
@@ -113,3 +114,32 @@ The API unit sets `StateDirectory=flacfetch-api`, so systemd creates
 ledger (`spotify_ledger.sqlite`, `FLACFETCH_SPOTIFY_LEDGER`); see
 `../docs/SPOTIFY_PROVIDER.md`. Hosts provisioned before v0.35.0 must re-run
 `sudo bash deploy/provision.sh` (idempotent) to add it, then restart `flacfetch-api`.
+
+## Tracker .torrent download limit (RED: four per torrent, ever)
+
+RED serves each .torrent through the API only four times per user; after that it
+must come from a browser. flacfetch guards this per torrent (v0.36.0):
+
+- **Cache first.** `/opt/flacfetch/.flacfetch/cache/<red|ops>/<id>.torrent` is used
+  before any tracker request.
+- **Ledger.** `<id>.downloads.json` beside it records every download request (re-read on each check: delete it to reset a torrent, no restart needed).
+  Served torrents, timeouts, dropped connections and 5xx count (RED may count a
+  request we never got an answer to); explicit refusals and 429s don't. flacfetch
+  stops at 3, keeping one for a manual browser download.
+- **Cooldown.** After an unanswered request, the torrent isn't requested again for
+  5 minutes, so a stalled tracker can't drain the limit through gen's auto-retries.
+  The job error says so; retry later.
+
+When a job fails with "download budget used up": download the .torrent in a
+browser, save it as `<cache>/red/<id>.torrent` (owner `flacfetch`), and retry the
+job. **Never curl the tracker's `ajax.php?action=download` by hand** (that's how
+2319570 lost its last two downloads on 2026-10-23). Check tracker health with the
+homepage or a search instead.
+
+If the cache was lost or a host was migrated, refill it from Transmission (never
+contacts the tracker, never overwrites):
+
+```bash
+sudo /opt/flacfetch/venv/bin/python deploy/backfill_torrent_cache.py --dry-run
+sudo /opt/flacfetch/venv/bin/python deploy/backfill_torrent_cache.py
+```

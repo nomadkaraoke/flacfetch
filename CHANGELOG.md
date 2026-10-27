@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-10-27
+
+### Added
+- **Per-torrent .torrent download budget.** RED allows four API downloads of each
+  .torrent, ever. An on-disk ledger (`<cache>/<id>.downloads.json`) records every
+  download request and flacfetch stops at 3, keeping one for a browser download.
+  Timeouts, dropped connections and 5xx count, since the tracker may have counted
+  them; explicit refusals and 429s don't. After an unanswered request the torrent
+  cools down for 5 minutes, so auto-retries during a tracker stall send nothing.
+  Job errors now say why a fetch failed and how to recover.
+- `deploy/backfill_torrent_cache.py`: copy .torrent files Transmission holds into
+  the cache (run once on flacup: 227 torrents were missing).
+
+### Changed
+- .torrent download read timeout 10s → 60s.
+- A Freeleech token is no longer spent on an already-cached torrent when that
+  would leave less than one download in the budget.
+
+### Fixed
+- RED 2319570 (2026-10-23): three 10s timeouts during a RED stall counted
+  server-side but cached nothing, so retries kept re-fetching until the limit hit.
+
 ## [0.35.0] - 2026-10-22
 
 ### Added
