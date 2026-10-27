@@ -895,7 +895,9 @@ class TestDownloadBudget:
         p.session.get = MagicMock(side_effect=[self._read_timeout(), self._resp()])
         p.fetch_artifact_by_id("42")
 
-        p._download_ledgers["42"]["requests"][-1]["t"] -= p.UNANSWERED_COOLDOWN_SECONDS + 1
+        ledger = p._load_download_ledger("42")
+        ledger["requests"][-1]["t"] -= p.UNANSWERED_COOLDOWN_SECONDS + 1
+        p._save_download_ledger("42", ledger)
         assert p.fetch_artifact_by_id("42") == self.TORRENT
         assert p.session.get.call_count == 2
         assert "42" not in p.fetch_errors
@@ -998,6 +1000,21 @@ class TestDownloadBudget:
         assert p.fetch_artifact_by_id("42") == self.TORRENT
         assert "usetoken=1" in p.session.get.call_args.args[0]
         assert p.downloads_used("42") == 1
+
+    def test_ledger_without_cache_dir_kept_in_memory(self, tmp_path):
+        p = self._provider(tmp_path)
+        p.cache_dir = None
+        p.session.get = MagicMock(side_effect=self._read_timeout())
+        p.fetch_artifact_by_id("42")
+        assert p.fetch_artifact_by_id("42") is None
+        assert p.session.get.call_count == 1
+
+    def test_deleting_ledger_file_resets_without_restart(self, tmp_path):
+        p = self._provider(tmp_path)
+        p.session.get = MagicMock(side_effect=[self._read_timeout(), self._resp()])
+        p.fetch_artifact_by_id("42")
+        (tmp_path / "42.downloads.json").unlink()
+        assert p.fetch_artifact_by_id("42") == self.TORRENT
 
     def test_token_spend_counts_against_budget(self, tmp_path):
         p = self._provider(tmp_path, use_fl_token=True)

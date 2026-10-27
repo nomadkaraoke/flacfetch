@@ -109,8 +109,8 @@ class GazelleProvider(Provider):
         # ONE tracker fetch: the first caches the .torrent, the rest hit the cache.
         self._fetch_locks: dict[str, threading.Lock] = {}
         self._fetch_locks_guard = threading.Lock()
-        # In-memory mirror of the per-torrent download ledger (see
-        # TORRENT_DOWNLOAD_BUDGET), used as-is when there is no cache dir.
+        # Per-torrent download ledgers (see TORRENT_DOWNLOAD_BUDGET), kept in
+        # memory only when there is no cache dir to persist them in.
         self._download_ledgers: dict[str, dict] = {}
         # {torrent_id: reason} for the last failed fetch, surfaced in job errors.
         self.fetch_errors: dict[str, str] = {}
@@ -417,21 +417,22 @@ class GazelleProvider(Provider):
         return self.cache_dir / f"{torrent_id}.downloads.json"
 
     def _load_download_ledger(self, torrent_id: str) -> dict:
-        """The torrent's ledger: ``{"requests": [{t, kind, outcome}], "limit_reached": bool}``."""
-        ledger = self._download_ledgers.get(torrent_id)
-        if ledger is not None:
-            return ledger
-        ledger = {"requests": [], "limit_reached": False}
+        """The torrent's ledger: ``{"requests": [{t, kind, outcome}], "limit_reached": bool}``.
+
+        Re-read from disk each time (when there is a cache dir) so an operator can
+        inspect or reset a torrent's ledger file without restarting the service.
+        """
         path = self._download_ledger_path(torrent_id)
-        if path and path.exists():
-            try:
-                ledger = json.loads(path.read_text())
-            except (OSError, ValueError) as e:
-                # An unreadable ledger must not unlock fresh downloads.
-                logger.warning(f"{self.name}: unreadable download ledger for {torrent_id} ({e}); treating as used up")
-                ledger = {"requests": [], "limit_reached": True}
-        self._download_ledgers[torrent_id] = ledger
-        return ledger
+        if not path:
+            return self._download_ledgers.setdefault(torrent_id, {"requests": [], "limit_reached": False})
+        if not path.exists():
+            return {"requests": [], "limit_reached": False}
+        try:
+            return json.loads(path.read_text())
+        except (OSError, ValueError) as e:
+            # An unreadable ledger must not unlock fresh downloads.
+            logger.warning(f"{self.name}: unreadable download ledger for {torrent_id} ({e}); treating as used up")
+            return {"requests": [], "limit_reached": True}
 
     def _record_download_request(self, torrent_id: Optional[str], kind: str, outcome: str) -> None:
         """Record one download-endpoint request.

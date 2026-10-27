@@ -122,7 +122,7 @@ must come from a browser. flacfetch guards this per torrent (v0.36.0):
 
 - **Cache first.** `/opt/flacfetch/.flacfetch/cache/<red|ops>/<id>.torrent` is used
   before any tracker request.
-- **Ledger.** `<id>.downloads.json` beside it records every download request.
+- **Ledger.** `<id>.downloads.json` beside it records every download request (re-read on each check: delete it to reset a torrent, no restart needed).
   Served torrents, timeouts, dropped connections and 5xx count (RED may count a
   request we never got an answer to); explicit refusals and 429s don't. flacfetch
   stops at 3, keeping one for a manual browser download.
