@@ -953,6 +953,23 @@ class TestDownloadBudget:
         assert p.fetch_artifact_by_id("42") == self.TORRENT
         assert p.session.get.call_count == 1
 
+    def test_tracker_limit_error_with_http_200(self, tmp_path):
+        p = self._provider(tmp_path)
+        body = {"status": "failure", "error": "You have already downloaded this torrent file four times."}
+        p.session.get = MagicMock(return_value=self._resp(200, content=b"{}", content_type="application/json", json_body=body))
+
+        assert p.fetch_artifact_by_id("42") is None
+        assert p.fetch_artifact_by_id("42") is None
+        assert p.session.get.call_count == 1
+        assert "budget used up" in p.fetch_errors["42"]
+
+    def test_json_refusal_reason_surfaced(self, tmp_path):
+        p = self._provider(tmp_path)
+        body = {"status": "failure", "error": "bad id"}
+        p.session.get = MagicMock(return_value=self._resp(200, content=b"{}", content_type="application/json", json_body=body))
+        assert p.fetch_artifact_by_id("42") is None
+        assert "bad id" in p.fetch_errors["42"]
+
     def test_explicit_refusals_not_counted(self, tmp_path):
         p = self._provider(tmp_path)
         p.session.get = MagicMock(return_value=self._resp(400, content=b"{}", content_type="application/json", json_body={}))

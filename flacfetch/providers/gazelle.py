@@ -328,10 +328,8 @@ class GazelleProvider(Provider):
                     try:
                         content = resp.json()
                         logger.debug(f"Response Body (JSON): {content}")
-                        if content.get("status") == "failure" and "already downloaded" in content.get("error", ""):
-                            logger.error(f"{self.name} Limit Reached: {content.get('error')}")
-                            self._mark_download_limit_reached(torrent_id)
-                            self.fetch_errors[torrent_id] = self._limit_reached_message(torrent_id)
+                        if self._is_limit_error(content):
+                            self._handle_limit_error(torrent_id, content)
                             return None
                     except Exception:
                         logger.debug(f"Response Body (Text/Raw): {resp.text[:500]}")
@@ -356,7 +354,12 @@ class GazelleProvider(Provider):
                         self._record_download_request(torrent_id, kind, "refused")
                         try:
                             err = resp.json()
+                            if self._is_limit_error(err):
+                                self._handle_limit_error(torrent_id, err)
+                                return None
                             logger.warning(f"{self.name} download returned an error instead of a torrent: {err.get('error', err)}")
+                            if torrent_id:
+                                self.fetch_errors[torrent_id] = f"{self.name} refused the .torrent download: {err.get('error', err)}"
                         except ValueError:
                             logger.warning(f"{self.name} download returned non-torrent content ({len(resp.content)} bytes): {resp.content[:100]}")
                         return None
@@ -408,6 +411,17 @@ class GazelleProvider(Provider):
                 return None
 
         return None
+
+    @staticmethod
+    def _is_limit_error(body) -> bool:
+        return isinstance(body, dict) and body.get("status") == "failure" and "already downloaded" in str(body.get("error", ""))
+
+    def _handle_limit_error(self, torrent_id: Optional[str], body: dict) -> None:
+        """The tracker says this torrent's download limit is used up."""
+        logger.error(f"{self.name} Limit Reached: {body.get('error')}")
+        if torrent_id:
+            self._mark_download_limit_reached(torrent_id)
+            self.fetch_errors[torrent_id] = self._limit_reached_message(torrent_id)
 
     # ---- per-torrent download ledger --------------------------------------
 

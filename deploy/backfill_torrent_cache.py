@@ -62,7 +62,7 @@ def main():
     client = transmission_rpc.Client(host=args.host, port=args.port)
     torrents = client.get_torrents(arguments=["id", "name", "comment", "torrentFile"])
 
-    copied = present = skipped = 0
+    copied = present = skipped = failed = 0
     for t in torrents:
         comment = t.comment or ""
         match = TORRENT_ID_RE.search(comment)
@@ -81,14 +81,26 @@ def main():
             continue
         print(f"{'would copy' if args.dry_run else 'copy'} {source.name} -> {dest}  ({t.name})")
         if not args.dry_run:
-            shutil.copyfile(source, dest)
-            stat = cache_dir.stat()
-            os.chown(dest, stat.st_uid, stat.st_gid)
-            os.chmod(dest, 0o664)
+            # Copy under a temp name and rename, so flacfetch never reads a partial file.
+            tmp = dest.with_suffix(".torrent.tmp")
+            try:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                stat = cache_dir.stat()
+                shutil.copyfile(source, tmp)
+                os.chown(tmp, stat.st_uid, stat.st_gid)
+                os.chmod(tmp, 0o664)
+                os.replace(tmp, dest)
+            except OSError as e:
+                print(f"failed to copy {source} -> {dest}: {e}")
+                tmp.unlink(missing_ok=True)
+                failed += 1
+                continue
         copied += 1
 
     verb = "would copy" if args.dry_run else "copied"
-    print(f"{verb} {copied}, already cached {present}, not a known tracker {skipped}")
+    print(f"{verb} {copied}, already cached {present}, not a known tracker {skipped}, failed {failed}")
+    if failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
