@@ -824,3 +824,44 @@ class TestSeededTorrentReuse:
         provider.fetch_artifact.assert_not_called()
         dl.has_completed_target.assert_called_once_with(b"d4:infod1:ai1eee", "04 - dog.flac")
         assert written == b"d4:infod1:ai1eee"
+
+
+class TestSearchErrors:
+    """FetchManager reports which providers failed during the latest sweep."""
+
+    def _provider(self, name, results=None, error=None, raises=None):
+        provider = MagicMock()
+        provider.name = name
+        provider.last_search_error = error
+        if raises:
+            provider.search.side_effect = raises
+        else:
+            provider.search.return_value = results or []
+        return provider
+
+    def test_clean_sweep_has_no_errors(self):
+        manager = FetchManager()
+        manager.add_provider(self._provider("YouTube"))
+        manager.search(TrackQuery(artist="A", title="T"))
+        assert manager.last_search_errors == {}
+
+    def test_provider_reported_error_is_recorded(self):
+        manager = FetchManager()
+        manager.add_provider(self._provider("YouTube", error="not a bot"))
+        manager.search(TrackQuery(artist="A", title="T"))
+        assert manager.last_search_errors == {"YouTube": "not a bot"}
+
+    def test_provider_exception_is_recorded(self):
+        manager = FetchManager()
+        manager.add_provider(self._provider("Spotify", raises=RuntimeError("boom")))
+        manager.search(TrackQuery(artist="A", title="T"))
+        assert manager.last_search_errors == {"Spotify": "boom"}
+
+    def test_errors_reset_between_sweeps(self):
+        manager = FetchManager()
+        provider = self._provider("YouTube", error="not a bot")
+        manager.add_provider(provider)
+        manager.search(TrackQuery(artist="A", title="T"))
+        provider.last_search_error = None
+        manager.search(TrackQuery(artist="A", title="T"))
+        assert manager.last_search_errors == {}

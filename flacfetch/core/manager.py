@@ -21,6 +21,8 @@ class FetchManager:
         self._default_downloader: Optional[Downloader] = None
         self._provider_priority: Optional[list[str]] = None
         self._use_fallback_search: bool = True  # Search lower priority providers if higher ones fail
+        # Providers that failed during the latest search(): {name: reason}.
+        self.last_search_errors: dict[str, str] = {}
 
     def add_provider(self, provider: Provider):
         self.providers.append(provider)
@@ -51,6 +53,7 @@ class FetchManager:
 
     def search(self, query: TrackQuery) -> list[Release]:
         all_releases = []
+        self.last_search_errors = {}
 
         # Get providers in priority order
         providers = self._get_ordered_providers()
@@ -60,6 +63,8 @@ class FetchManager:
                 logger.info(f"Searching {provider.name} for '{query.artist} - {query.title}'...")
                 results = provider.search(query)
                 logger.info(f"Found {len(results)} results from {provider.name}")
+                if provider.last_search_error:
+                    self.last_search_errors[provider.name] = provider.last_search_error
 
                 if results:
                     all_releases.extend(results)
@@ -78,6 +83,7 @@ class FetchManager:
 
             except Exception as e:
                 logger.error(f"Error searching {provider.name}: {e}")
+                self.last_search_errors[provider.name] = str(e)
                 # Continue to next provider on error if fallback enabled
                 if self._use_fallback_search:
                     logger.info(f"Provider {provider.name} failed, trying next provider...")

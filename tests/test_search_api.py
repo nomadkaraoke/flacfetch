@@ -93,6 +93,7 @@ class TestSearchEndpoint:
     async def test_search_success_runs_sweep_off_loop(self):
         """Uncached search runs the sweep in the executor and returns results."""
         fetch_manager = Mock()
+        fetch_manager.last_search_errors = {}
         fetch_manager.providers = []
         sweep_thread_names = []
 
@@ -115,6 +116,7 @@ class TestSearchEndpoint:
     async def test_identical_concurrent_searches_coalesce(self):
         """Two identical searches in flight → one provider sweep, same results."""
         fetch_manager = Mock()
+        fetch_manager.last_search_errors = {}
         fetch_manager.providers = []
         release_gate = threading.Event()
         call_count = 0
@@ -150,6 +152,7 @@ class TestSearchEndpoint:
     async def test_different_searches_do_not_coalesce(self):
         """Different songs each get their own sweep."""
         fetch_manager = Mock()
+        fetch_manager.last_search_errors = {}
         fetch_manager.providers = []
         fetch_manager.search.return_value = [make_release()]
 
@@ -165,6 +168,7 @@ class TestSearchEndpoint:
         """The event loop stays responsive: a cache-hit search completes while
         a slow sweep for a different song is still running."""
         fetch_manager = Mock()
+        fetch_manager.last_search_errors = {}
         fetch_manager.providers = []
         release_gate = threading.Event()
         fetch_manager.search.side_effect = lambda q: (
@@ -196,6 +200,8 @@ class TestSearchEndpoint:
         from fastapi import HTTPException
 
         fetch_manager = Mock()
+
+        fetch_manager.last_search_errors = {}
         fetch_manager.providers = []
         fetch_manager.search.side_effect = RuntimeError("provider exploded")
 
@@ -220,6 +226,8 @@ class TestSearchEndpoint:
         from fastapi import HTTPException
 
         fetch_manager = Mock()
+
+        fetch_manager.last_search_errors = {}
         fetch_manager.providers = []
         fetch_manager.search.return_value = []
 
@@ -239,6 +247,7 @@ class TestSearchEndpoint:
         provider.search_limit = 10
         provider.name = "RED"
         fetch_manager = Mock()
+        fetch_manager.last_search_errors = {}
         fetch_manager.providers = [provider]
         fetch_manager.search.return_value = [make_release()]
 
@@ -257,6 +266,7 @@ class TestSearchEndpoint:
         provider.search_limit = 10
         provider.name = "RED"
         fetch_manager = Mock()
+        fetch_manager.last_search_errors = {}
         fetch_manager.providers = [provider]
         fetch_manager.search.return_value = [make_release()]
 
@@ -268,3 +278,30 @@ class TestSearchEndpoint:
 
         assert provider.search_limit == 10
         assert provider.early_termination is True
+
+
+class TestSearchCacheSkipsDegradedSweeps:
+    """2026-11-03: a bot-walled YouTube returned 0 results, the sweep's other
+    providers were cached for 30 days, and the customer kept getting a
+    no-YouTube result set from cache after the cookies were healthy again."""
+
+    async def _search(self, errors, releases=None):
+        fetch_manager = Mock()
+        fetch_manager.providers = []
+        fetch_manager.last_search_errors = errors
+        fetch_manager.search.return_value = [make_release()] if releases is None else releases
+        cache = make_cache_service()
+        with patch.object(search_route, "get_download_manager", return_value=make_manager(fetch_manager)), \
+             patch.object(search_route, "get_search_cache_service", return_value=cache):
+            response = await search_audio(SearchRequest(artist="ABBA", title="Waterloo"), api_key="k")
+        await asyncio.sleep(0)  # let the fire-and-forget cache task run
+        return response, cache
+
+    async def test_provider_error_results_returned_but_not_cached(self):
+        response, cache = await self._search({"YouTube": "Sign in to confirm you're not a bot"})
+        assert response.results_count == 1
+        cache.cache_search_results.assert_not_called()
+
+    async def test_clean_sweep_is_cached(self):
+        _, cache = await self._search({})
+        cache.cache_search_results.assert_called_once()

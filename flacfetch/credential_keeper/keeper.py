@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,12 +17,18 @@ from .browser import close_browser, launch_browser
 from .google_login import ensure_google_logged_in
 from .librespot import refresh_librespot_credentials
 from .probe import ProbeOutcome, probe_cookies
+from .refresh_request import COOLDOWN_SECONDS as YOUTUBE_ON_DEMAND_COOLDOWN
+from .refresh_request import consume_refresh_request, refresh_requested
 from .spotify import refresh_spotify_token
 from .youtube import refresh_youtube_cookies
 
 logger = logging.getLogger(__name__)
 
 # Refresh intervals (in seconds)
+# Only applies while probes are inconclusive (for example the cookie file is
+# missing). A passing probe never re-exports: the export is working, and the old
+# unconditional 8h re-export put the browser back on youtube.com, where the new
+# export died within 30 minutes (0 of 41 survived, 2026-10-05 to 11-03).
 YOUTUBE_REFRESH_INTERVAL = int(os.environ.get("KEEPER_YOUTUBE_INTERVAL", 8 * 3600))  # 8 hours
 # How often to validate the exported cookies with a real yt-dlp probe between
 # refreshes. YouTube can kill the exported session server-side within hours of
@@ -38,6 +45,10 @@ YOUTUBE_MAX_REFRESH_ATTEMPTS = int(os.environ.get("KEEPER_YOUTUBE_MAX_ATTEMPTS",
 YOUTUBE_FAILURE_ALERT_INTERVAL = int(
     os.environ.get("KEEPER_YOUTUBE_FAILURE_ALERT_INTERVAL", 4 * 3600)  # 4 hours
 )
+# More dead probes than this in a UTC day sends one notification. Self-heal hides
+# these, but cookies are dead for up to a probe interval each time, and real
+# searches and downloads fail during that gap.
+YOUTUBE_CHURN_ALERT_THRESHOLD = int(os.environ.get("KEEPER_YOUTUBE_CHURN_THRESHOLD", 6))
 SPOTIFY_REFRESH_INTERVAL = int(os.environ.get("KEEPER_SPOTIFY_INTERVAL", 12 * 3600))  # 12 hours
 # librespot stored credentials are long-lived (no ~1h access-token expiry), so
 # this only needs to run occasionally to re-mint if they are ever invalidated.
@@ -85,6 +96,34 @@ def _save_status(status: dict):
             json.dump(status, f, indent=2)
     except Exception as e:
         logger.warning(f"Could not save status file: {e}")
+
+
+def _today() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def _record_youtube_event(status: dict, event: str) -> dict:
+    """Count a probe event in today's stats, logging yesterday's on rollover."""
+    yt_status = status.setdefault("youtube", {})
+    stats = yt_status.get("daily_stats")
+    today = _today()
+    if not stats or stats.get("date") != today:
+        if stats:
+            logger.info(
+                f"YouTube probe summary date={stats['date']} ok={stats['ok_probes']} "
+                f"dead={stats['dead_probes']} rejected={stats['rejected_exports']} "
+                f"on_demand={stats['on_demand_refreshes']}"
+            )
+        stats = yt_status["daily_stats"] = {
+            "date": today,
+            "ok_probes": 0,
+            "dead_probes": 0,
+            "rejected_exports": 0,
+            "on_demand_refreshes": 0,
+            "churn_alerted": False,
+        }
+    stats[event] += 1
+    return stats
 
 
 async def _send_notification(title: str, body: str):
@@ -172,6 +211,7 @@ async def refresh_and_validate_youtube(
 
         if outcome is ProbeOutcome.INVALID_COOKIES:
             failure_reason = msg
+            _record_youtube_event(status, "rejected_exports")
             logger.warning(
                 f"Exported cookies rejected by probe (attempt {attempt}/{max_attempts}): {msg}"
             )
@@ -191,6 +231,143 @@ async def refresh_and_validate_youtube(
         f"YouTube cookies still invalid after {max_attempts} attempts: {failure_reason}"
     )
     return False
+
+
+@dataclass
+class YouTubeTimers:
+    """Event-loop timestamps for maintain_youtube. Defaults mean "never"."""
+
+    last_refresh: float = float("-inf")
+    last_probe: float = float("-inf")
+    last_failure_alert: float = float("-inf")
+    last_on_demand: float = float("-inf")
+
+
+async def maintain_youtube(
+    browser: dict,
+    status: dict,
+    timers: YouTubeTimers,
+    now: float,
+    *,
+    probe=None,
+    refresh=None,
+    notify=None,
+    consume_request=None,
+) -> None:
+    """One keeper-loop pass for YouTube cookies.
+
+    Re-exports only when something says the cookies aren't working: a dead probe, a
+    bot block reported by the API, or (past the max age) an inconclusive probe. The
+    first pass after startup always exports, because restarting the keeper is the
+    documented way to force fresh cookies.
+    """
+    probe = probe or probe_cookies
+    refresh = refresh or refresh_and_validate_youtube
+    notify = notify or _send_notification
+    consume_request = consume_request or consume_refresh_request
+
+    refresh_needed = timers.last_refresh == float("-inf")
+    relaunch_first = False
+
+    # Always consume, so a request dropped by the cooldown can't fire later.
+    if consume_request():
+        if now - timers.last_on_demand >= YOUTUBE_ON_DEMAND_COOLDOWN:
+            logger.warning("Cookie refresh requested by the API after a YouTube bot block")
+            timers.last_on_demand = now
+            _record_youtube_event(status, "on_demand_refreshes")
+            relaunch_first = not refresh_needed
+            refresh_needed = True
+        else:
+            logger.info("Ignoring cookie refresh request: inside the on-demand cooldown")
+
+    if not refresh_needed and now - timers.last_probe >= YOUTUBE_PROBE_INTERVAL:
+        outcome, msg = await probe(get_youtube_cookies_path())
+        status.setdefault("youtube", {}).update({
+            "last_probe": datetime.now(timezone.utc).isoformat(),
+            "last_probe_status": outcome.value,
+            "last_probe_message": msg,
+        })
+        timers.last_probe = now
+        if outcome is ProbeOutcome.INVALID_COOKIES:
+            _record_youtube_event(status, "dead_probes")
+            logger.warning(f"Periodic probe found dead cookies — remediating: {msg}")
+            refresh_needed = True
+            relaunch_first = True
+        else:
+            if outcome is ProbeOutcome.OK:
+                _record_youtube_event(status, "ok_probes")
+            logger.info(f"Periodic cookie probe: {msg}")
+            refresh_needed = (
+                outcome is ProbeOutcome.TRANSIENT
+                and now - timers.last_refresh >= YOUTUBE_REFRESH_INTERVAL
+            )
+        _save_status(status)
+
+    if refresh_needed:
+        logger.info("--- YouTube cookie refresh ---")
+        # relaunch_first: this session's export is known dead, so re-exporting from
+        # it would be a no-op. Start from a fresh browser.
+        success = await refresh(browser, status, relaunch_first=relaunch_first)
+        status.setdefault("youtube", {}).update({
+            "last_refresh": datetime.now(timezone.utc).isoformat(),
+            "last_refresh_status": "ok" if success else "error",
+        })
+        if success:
+            if NOTIFY_ON_SUCCESS:
+                probe_ok = status.get("youtube", {}).get("last_probe_status") == "ok"
+                await notify(
+                    "✅ YouTube Cookies Refreshed",
+                    "YouTube cookies extracted, uploaded, and probe-validated."
+                    if probe_ok
+                    else "YouTube cookies extracted and uploaded (probe inconclusive).",
+                )
+        elif now - timers.last_failure_alert >= YOUTUBE_FAILURE_ALERT_INTERVAL:
+            # Throttled: a persistently-dead export re-remediates every
+            # probe cycle; without a cooldown that's ~48 pushes/day.
+            timers.last_failure_alert = now
+            await notify(
+                "❌ YouTube Cookies Invalid After Self-Heal",
+                "Cookie export still failing the yt-dlp probe after "
+                f"{YOUTUBE_MAX_REFRESH_ATTEMPTS} attempts (with browser "
+                "restarts). Manual intervention needed: "
+                f"{status.get('youtube', {}).get('last_failure_reason', 'unknown')}",
+            )
+
+        timers.last_refresh = now
+        timers.last_probe = now
+        _save_status(status)
+
+    await _alert_on_churn(status, notify)
+
+
+async def _alert_on_churn(status: dict, notify) -> None:
+    """Notify once a UTC day when dead probes pass the threshold."""
+    stats = status.get("youtube", {}).get("daily_stats")
+    if not stats or stats["churn_alerted"]:
+        return
+    dead = stats["dead_probes"] + stats["rejected_exports"]
+    if dead <= YOUTUBE_CHURN_ALERT_THRESHOLD:
+        return
+    stats["churn_alerted"] = True
+    _save_status(status)
+    await notify(
+        "⚠️ YouTube Cookie Churn",
+        f"{dead} dead cookie probes so far today (limit {YOUTUBE_CHURN_ALERT_THRESHOLD}). "
+        "Self-heal is replacing them, but YouTube searches and downloads can fail until "
+        "it does, and searches return no YouTube results. Check "
+        "/var/log/flacfetch-credential-keeper.log on flacup and deploy/README.md "
+        "§ YouTube cookie health.",
+    )
+
+
+async def _idle(seconds: float, poll: float = 2.0) -> None:
+    """Sleep between passes, waking early if the API has requested a refresh."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + seconds
+    while (remaining := deadline - loop.time()) > 0:
+        if refresh_requested():
+            return
+        await asyncio.sleep(min(poll, remaining))
 
 
 async def run_keeper():
@@ -228,80 +405,19 @@ async def run_keeper():
         _save_status(status)
 
         logger.info(
-            f"Keeper running. YouTube every {YOUTUBE_REFRESH_INTERVAL // 3600}h, "
+            f"Keeper running. YouTube probe every {YOUTUBE_PROBE_INTERVAL // 60}m, "
             f"Spotify every {SPOTIFY_REFRESH_INTERVAL // 3600}h"
         )
 
         # Initialize to trigger immediately on first loop iteration
-        last_youtube_refresh = float("-inf")
-        last_youtube_probe = float("-inf")
-        last_youtube_failure_alert = float("-inf")
+        youtube_timers = YouTubeTimers()
         last_spotify_refresh = float("-inf")
         last_librespot_refresh = float("-inf")
 
         while True:
             now = asyncio.get_event_loop().time()
 
-            # Between refreshes, validate the exported cookies with a real
-            # yt-dlp probe — a "logged in" browser is not proof the export
-            # still works. A failed probe forces an immediate refresh cycle.
-            refresh_due = now - last_youtube_refresh >= YOUTUBE_REFRESH_INTERVAL
-            probe_found_dead = False
-            if not refresh_due and now - last_youtube_probe >= YOUTUBE_PROBE_INTERVAL:
-                outcome, msg = await probe_cookies(get_youtube_cookies_path())
-                status.setdefault("youtube", {}).update({
-                    "last_probe": datetime.now(timezone.utc).isoformat(),
-                    "last_probe_status": outcome.value,
-                    "last_probe_message": msg,
-                })
-                last_youtube_probe = now
-                _save_status(status)
-                if outcome is ProbeOutcome.INVALID_COOKIES:
-                    logger.warning(f"Periodic probe found dead cookies — remediating: {msg}")
-                    refresh_due = True
-                    probe_found_dead = True
-                else:
-                    logger.info(f"Periodic cookie probe: {msg}")
-
-            # YouTube cookie refresh (+ probe validation with browser-restart
-            # self-heal — see refresh_and_validate_youtube)
-            if refresh_due:
-                logger.info("--- YouTube cookie refresh ---")
-
-                # If the periodic probe just proved the current session's
-                # export dead, re-exporting from it is a guaranteed no-op —
-                # start from a fresh browser.
-                success = await refresh_and_validate_youtube(
-                    browser, status, relaunch_first=probe_found_dead
-                )
-                status.setdefault("youtube", {}).update({
-                    "last_refresh": datetime.now(timezone.utc).isoformat(),
-                    "last_refresh_status": "ok" if success else "error",
-                })
-                if success:
-                    if NOTIFY_ON_SUCCESS:
-                        probe_ok = status.get("youtube", {}).get("last_probe_status") == "ok"
-                        await _send_notification(
-                            "✅ YouTube Cookies Refreshed",
-                            "YouTube cookies extracted, uploaded, and probe-validated."
-                            if probe_ok
-                            else "YouTube cookies extracted and uploaded (probe inconclusive).",
-                        )
-                elif now - last_youtube_failure_alert >= YOUTUBE_FAILURE_ALERT_INTERVAL:
-                    # Throttled: a persistently-dead export re-remediates every
-                    # probe cycle; without a cooldown that's ~48 pushes/day.
-                    last_youtube_failure_alert = now
-                    await _send_notification(
-                        "❌ YouTube Cookies Invalid After Self-Heal",
-                        "Cookie export still failing the yt-dlp probe after "
-                        f"{YOUTUBE_MAX_REFRESH_ATTEMPTS} attempts (with browser "
-                        "restarts). Manual intervention needed: "
-                        f"{status.get('youtube', {}).get('last_failure_reason', 'unknown')}",
-                    )
-
-                last_youtube_refresh = now
-                last_youtube_probe = now
-                _save_status(status)
+            await maintain_youtube(browser, status, youtube_timers, now)
 
             # Spotify token refresh
             if now - last_spotify_refresh >= SPOTIFY_REFRESH_INTERVAL:
@@ -381,7 +497,7 @@ async def run_keeper():
                 _save_status(status)
 
             # Sleep before next check (1 minute intervals)
-            await asyncio.sleep(60)
+            await _idle(60)
 
     except Exception as e:
         logger.error(f"Credential keeper crashed: {e}", exc_info=True)

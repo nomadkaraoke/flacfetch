@@ -5,6 +5,10 @@ from .models import Release, TrackQuery
 
 
 class Provider(ABC):
+    # Why the latest search() is incomplete, if it swallowed a failure. None means
+    # the results (even if empty) can be trusted and cached.
+    last_search_error: Optional[str] = None
+
     @property
     @abstractmethod
     def name(self) -> str:

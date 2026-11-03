@@ -11,8 +11,25 @@ import yt_dlp  # type: ignore
 
 from ..core.interfaces import Downloader
 from ..core.models import Release
+from ..credential_keeper.refresh_request import (
+    cookies_mtime,
+    request_refresh,
+    wait_for_fresh_cookies,
+)
 
 logger = logging.getLogger(__name__)
+
+# Errors that mean YouTube rejected our session, so fresh cookies may help. Loose
+# ("not a bot" rather than the whole sentence) to survive rewording, and it also
+# avoids the curly vs straight apostrophe in "you're". Don't add generic sign-in
+# wording: this also sees other sites' errors, and age gates say "sign in" too.
+_BOT_BLOCK_MARKERS = ("not a bot", "cookies are no longer valid")
+
+
+def is_bot_block_error(message: Optional[str]) -> bool:
+    """Whether a yt-dlp error means YouTube rejected our session."""
+    lowered = (message or "").lower()
+    return any(marker in lowered for marker in _BOT_BLOCK_MARKERS)
 
 # Abuse / runaway protection for downloads. Both are overridable via env so we
 # can tune without a redeploy.
@@ -330,19 +347,12 @@ def check_youtube_availability(
         # or the server is being throttled. Check this BEFORE age-restriction since
         # both error messages contain "sign in".
         #
-        # yt-dlp uses the Unicode right-single-quotation-mark (U+2019) rather
-        # than the ASCII apostrophe. str.lower() preserves it, so we match
-        # both forms explicitly. ’ escapes keep this unambiguous against
-        # editors that might silently normalize curly quotes.
-        if any(phrase in error_str for phrase in [
-            "not a bot",
-            "you’re not a bot",   # Unicode (yt-dlp's actual output)
-            "you're not a bot",         # ASCII fallback
-            "confirm you’re not",  # Unicode
-            "confirm you're not",       # ASCII fallback
-        ]):
+        if is_bot_block_error(error_str):
             result.is_bot_blocked = True
             result.is_geo_restricted = False
+            # This caller only has seconds, so don't wait, but the next one
+            # should find working cookies.
+            request_refresh()
 
         # Real age-restriction surfaces as "Sign in to confirm your age" or
         # "This video may be inappropriate for some users". Match on the
@@ -393,7 +403,7 @@ class YoutubeDownloader(Downloader):
 
     def download(self, release: Release, output_path: str, output_filename: Optional[str] = None) -> str:
         """
-        Download a YouTube video/audio.
+        Download a YouTube video/audio. A bot wall gets fresh cookies and one retry.
 
         Args:
             release: Release object to download
@@ -403,6 +413,17 @@ class YoutubeDownloader(Downloader):
         Returns:
             Path to the downloaded file
         """
+        cookies_file = self.cookies_file or get_cookies_file()
+        baseline = cookies_mtime(cookies_file)
+        try:
+            return self._download_once(release, output_path, output_filename)
+        except Exception as e:
+            if not is_bot_block_error(str(e)) or not wait_for_fresh_cookies(cookies_file, baseline):
+                raise
+            logger.warning(f"Retrying bot-blocked download with fresh cookies: {release.download_url}")
+        return self._download_once(release, output_path, output_filename)
+
+    def _download_once(self, release: Release, output_path: str, output_filename: Optional[str]) -> str:
         print(f"Downloading from YouTube: {release.title}...")
 
         # Determine output template

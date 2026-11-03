@@ -82,6 +82,11 @@ async def refresh_youtube_cookies(page, context) -> bool:
 
     Assumes the browser is already logged into Google.
     Returns True if cookies were successfully refreshed and uploaded.
+
+    Always leaves youtube.com afterwards. An export kept working when the tab left
+    YouTube within about 15 minutes and died within 30 when it stayed there (see
+    deploy/README.md), consistent with the open tab rotating the session and
+    invalidating the snapshot we just exported.
     """
     try:
         # Visit YouTube to refresh session cookies
@@ -102,3 +107,9 @@ async def refresh_youtube_cookies(page, context) -> bool:
     except Exception as e:
         logger.error(f"YouTube cookie refresh failed: {e}")
         return False
+
+    finally:
+        try:
+            await page.goto("about:blank", timeout=10000)
+        except Exception as e:
+            logger.warning(f"Could not leave YouTube after the cookie export: {e}")

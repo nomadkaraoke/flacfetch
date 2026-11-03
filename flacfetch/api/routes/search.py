@@ -85,15 +85,26 @@ def _configure_and_search(fetch_manager, artist: str, title: str, exhaustive: bo
 
     from flacfetch.core.models import TrackQuery
     query = TrackQuery(artist=artist, title=title)
-    return fetch_manager.search(query)
+    releases = fetch_manager.search(query)
+    # Read here, while no other sweep can overwrite it.
+    return releases, dict(fetch_manager.last_search_errors)
 
 
 async def _search_and_cache(fetch_manager, cache_service, artist: str, title: str, exhaustive: bool):
     """Run a provider sweep off the event loop and cache the results."""
     loop = asyncio.get_running_loop()
-    releases = await loop.run_in_executor(
+    releases, errors = await loop.run_in_executor(
         _search_executor, _configure_and_search, fetch_manager, artist, title, exhaustive
     )
+
+    # A provider failing doesn't mean it has nothing: caching this sweep would hide
+    # that provider's results for the whole TTL, long after it recovers.
+    if errors:
+        logger.warning(
+            f"Not caching search for {artist} - {title}: "
+            f"{', '.join(sorted(errors))} failed"
+        )
+        return releases
 
     # Cache results (fire-and-forget, best-effort)
     # Always cache fresh search results, including exhaustive searches
