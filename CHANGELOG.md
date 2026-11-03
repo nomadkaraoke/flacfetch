@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-11-03
+
+### Fixed
+- **YouTube cookie exports no longer die within 30 minutes.** The keeper now leaves
+  youtube.com right after exporting, and no longer re-exports on an 8h timer while
+  probes pass. Before this, 54% of probes found dead cookies (2026-10-05 to 11-03).
+  See `deploy/README.md` § YouTube cookie health.
+- Search results from a sweep where a provider failed are no longer cached. A
+  bot-walled YouTube used to hide YouTube results for that song for 30 days.
+
+### Added
+- A bot-blocked YouTube search or download now asks the keeper for fresh cookies
+  (usually about 15s) and retries once. `/check-youtube` requests a refresh without
+  waiting. At most one on-demand re-export per 5 minutes.
+- Pushbullet notification when dead probes pass `KEEPER_YOUTUBE_CHURN_THRESHOLD`
+  in a UTC day (default 6), daily probe counts in `keeper-status.json`, and a
+  `YouTube probe summary` log line.
+
 ## [0.36.0] - 2026-10-27
 
 ### Added

@@ -115,6 +115,51 @@ ledger (`spotify_ledger.sqlite`, `FLACFETCH_SPOTIFY_LEDGER`); see
 `../docs/SPOTIFY_PROVIDER.md`. Hosts provisioned before v0.35.0 must re-run
 `sudo bash deploy/provision.sh` (idempotent) to add it, then restart `flacfetch-api`.
 
+## YouTube cookie health
+
+The keeper exports cookies from a logged-in browser, and a yt-dlp probe checks the
+export every 30 minutes. A dead probe, or a bot block reported by the API, triggers a
+browser relaunch and re-export. A passing probe never re-exports.
+
+**Why the keeper leaves youtube.com after exporting.** Over 2026-08-25 to 11-03,
+whether an export passed its next probe depended on how soon the keeper's tab left
+YouTube, which it only did for the Spotify or librespot refresh:
+
+| Tab left YouTube after | Exports | Passed next probe |
+|------------------------|---------|-------------------|
+| under 15 min           | 97      | 96                |
+| 15 to 30 min           | 58      | 4                 |
+| not within 30 min      | 1,700   | 30                |
+
+This is observational, and the mechanism is an inference: the open tab rotates the
+Google session, invalidating the snapshot we exported.
+
+**Settings** (set on `credential-keeper` unless noted):
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `KEEPER_YOUTUBE_PROBE_INTERVAL` | 1800 | Seconds between probes |
+| `KEEPER_YOUTUBE_INTERVAL` | 28800 | Re-export after this long only if probes are inconclusive |
+| `KEEPER_YOUTUBE_CHURN_THRESHOLD` | 6 | Notify above this many dead probes in a UTC day |
+| `KEEPER_YOUTUBE_ON_DEMAND_COOLDOWN` | 300 | Minimum seconds between on-demand re-exports (set on both services if changed) |
+| `FLACFETCH_COOKIE_REFRESH_WAIT` | 30 | Seconds a bot-blocked request waits for new cookies (`flacfetch` service) |
+
+The API requests a refresh by writing `youtube-refresh-request` next to
+`keeper-status.json`.
+
+**Measuring the dead-probe rate** (baseline 54%: 740 dead, 641 passing, 2026-10-05 to
+11-03). `keeper-status.json` has today's counts under `youtube.daily_stats`. For a date range:
+
+```bash
+cat <(zcat /var/log/flacfetch-credential-keeper.log.*.gz) /var/log/flacfetch-credential-keeper.log \
+  | awk -v from=2026-11-04 -v to=2026-11-11 '$1>=from && $1<to' \
+  | awk '/Periodic probe found dead/{d++} /Periodic cookie probe/{o++}
+         END{printf "dead=%d ok=%d rate=%.1f%%\n", d, o, 100*d/(d+o)}'
+```
+
+Don't run manual yt-dlp tests against this account. If the rate stays high, a
+residential proxy is the next option, and that's a cost decision.
+
 ## Tracker .torrent download limit (RED: four per torrent, ever)
 
 RED serves each .torrent through the API only four times per user; after that it

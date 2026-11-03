@@ -598,3 +598,120 @@ class TestYoutubeDownloaderLimits:
             with pytest.raises(ValueError, match="exceeds"):
                 YoutubeDownloader().download(self._release(), "/out")
 
+
+
+class TestYoutubeDownloaderBotBlockRetry:
+    """Fix B: a bot wall asks the keeper for fresh cookies, then retries once."""
+
+    BOT_WALL = "ERROR: [youtube] abc: Sign in to confirm you’re not a bot."
+
+    def _release(self):
+        from flacfetch.core.models import AudioFormat, Quality, Release
+        return Release(
+            title="T", artist="", quality=Quality(AudioFormat.AAC),
+            source_name="YouTube", download_url="https://www.youtube.com/watch?v=abc",
+        )
+
+    def _run(self, outcomes, wait_result=True):
+        from flacfetch.downloaders.youtube import YoutubeDownloader
+
+        outcomes = iter(outcomes)
+        calls = []
+
+        class FakeYDL:
+            def __init__(self, opts):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def extract_info(self, url, download):
+                calls.append(url)
+                outcome = next(outcomes)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return outcome
+
+            def prepare_filename(self, info):
+                return "/out/song.m4a"
+
+        with patch("flacfetch.downloaders.youtube.yt_dlp.YoutubeDL", FakeYDL), \
+             patch("flacfetch.downloaders.youtube.get_cookies_file", return_value="/x/cookies.txt"), \
+             patch("flacfetch.downloaders.youtube.isolated_cookiefile") as isolated, \
+             patch("flacfetch.downloaders.youtube.cookies_mtime", return_value=7), \
+             patch("flacfetch.downloaders.youtube.wait_for_fresh_cookies", return_value=wait_result) as wait:
+            isolated.return_value.__enter__.return_value = "/tmp/copy.txt"
+            isolated.return_value.__exit__.return_value = False
+            try:
+                result = YoutubeDownloader().download(self._release(), "/out")
+            except Exception as e:  # noqa: BLE001
+                result = e
+        return result, calls, wait
+
+    def test_bot_wall_then_success_after_refresh(self):
+        result, calls, wait = self._run([yt_dlp.utils.DownloadError(self.BOT_WALL), {"title": "T"}])
+        assert result == "/out/song.m4a"
+        assert len(calls) == 2
+        wait.assert_called_once_with("/x/cookies.txt", 7)
+
+    def test_retries_only_once(self):
+        result, calls, wait = self._run([
+            yt_dlp.utils.DownloadError(self.BOT_WALL),
+            yt_dlp.utils.DownloadError(self.BOT_WALL),
+            {"title": "T"},
+        ])
+        assert isinstance(result, yt_dlp.utils.DownloadError)
+        assert len(calls) == 2
+        wait.assert_called_once()
+
+    def test_no_fresh_cookies_raises_original_error_without_retry(self):
+        result, calls, _ = self._run([yt_dlp.utils.DownloadError(self.BOT_WALL)], wait_result=False)
+        assert "not a bot" in str(result)
+        assert len(calls) == 1
+
+    def test_other_errors_do_not_trigger_refresh(self):
+        result, calls, wait = self._run([yt_dlp.utils.DownloadError("ERROR: Video unavailable")])
+        assert "unavailable" in str(result)
+        assert len(calls) == 1
+        wait.assert_not_called()
+
+
+class TestAvailabilityCheckRequestsRefresh:
+    def test_bot_blocked_check_requests_refresh_without_waiting(self):
+        from flacfetch.downloaders.youtube import check_youtube_availability
+
+        with patch("flacfetch.downloaders.youtube.yt_dlp.YoutubeDL") as ydl, \
+             patch("flacfetch.downloaders.youtube.request_refresh") as request, \
+             patch("flacfetch.downloaders.youtube.wait_for_fresh_cookies") as wait:
+            ydl.return_value.__enter__.return_value.extract_info.side_effect = (
+                yt_dlp.utils.DownloadError("ERROR: Sign in to confirm you’re not a bot.")
+            )
+            result = check_youtube_availability("abcdefghijk")
+        assert result.is_bot_blocked is True
+        request.assert_called_once()
+        wait.assert_not_called()
+
+    def test_other_failures_do_not_request_refresh(self):
+        from flacfetch.downloaders.youtube import check_youtube_availability
+
+        with patch("flacfetch.downloaders.youtube.yt_dlp.YoutubeDL") as ydl, \
+             patch("flacfetch.downloaders.youtube.request_refresh") as request:
+            ydl.return_value.__enter__.return_value.extract_info.side_effect = (
+                yt_dlp.utils.DownloadError("ERROR: Private video")
+            )
+            check_youtube_availability("abcdefghijk")
+        request.assert_not_called()
+
+
+def test_is_bot_block_error_markers():
+    from flacfetch.downloaders.youtube import is_bot_block_error
+
+    assert is_bot_block_error("Sign in to confirm you’re not a bot")
+    assert is_bot_block_error("Sign in to confirm you're NOT A BOT")
+    assert is_bot_block_error("The provided YouTube account cookies are no longer valid.")
+    assert not is_bot_block_error("Sign in to confirm your age")
+    assert not is_bot_block_error("Please log in on Facebook")
+    assert not is_bot_block_error(None)

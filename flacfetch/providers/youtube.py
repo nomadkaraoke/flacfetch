@@ -1,10 +1,39 @@
+import logging
 from typing import Optional
 
 import yt_dlp  # type: ignore
 
 from ..core.interfaces import Provider
 from ..core.models import AudioFormat, MediaSource, Quality, Release, TrackQuery
-from ..downloaders.youtube import get_ytdlp_base_opts, ytdlp_opts_isolated
+from ..credential_keeper.refresh_request import cookies_mtime, wait_for_fresh_cookies
+from ..downloaders.youtube import (
+    get_cookies_file,
+    get_ytdlp_base_opts,
+    is_bot_block_error,
+    ytdlp_opts_isolated,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class _YtdlpErrorLog:
+    """yt-dlp logger that keeps errors, which ``ignoreerrors`` otherwise only prints."""
+
+    def __init__(self):
+        self.errors: list[str] = []
+
+    def debug(self, msg):
+        pass
+
+    def info(self, msg):
+        pass
+
+    def warning(self, msg):
+        pass
+
+    def error(self, msg):
+        self.errors.append(msg)
+        logger.warning(f"yt-dlp search error: {msg}")
 
 
 class YoutubeProvider(Provider):
@@ -29,6 +58,36 @@ class YoutubeProvider(Provider):
         return "YouTube"
 
     def search(self, query: TrackQuery) -> list[Release]:
+        """Search YouTube. A bot wall gets fresh cookies and one retry.
+
+        Sets ``last_search_error`` when the results can't be trusted as complete.
+        """
+        cookies_file = self.cookies_file or get_cookies_file()
+        baseline = cookies_mtime(cookies_file)
+
+        releases, errors, failed = self._search_once(query)
+        if any(is_bot_block_error(e) for e in errors) and wait_for_fresh_cookies(cookies_file, baseline):
+            logger.info("Retrying YouTube search with fresh cookies")
+            releases, errors, failed = self._search_once(query)
+
+        self.last_search_error = self._search_error(releases, errors, failed)
+        return releases
+
+    @staticmethod
+    def _search_error(releases: list[Release], errors: list[str], failed: Optional[str]) -> Optional[str]:
+        """A bot wall or exception always counts. Other per-video errors count only
+        with no results: a removed video among the top 5 is a normal search."""
+        for error in errors:
+            if is_bot_block_error(error):
+                return error
+        if failed:
+            return failed
+        if errors and not releases:
+            return errors[0]
+        return None
+
+    def _search_once(self, query: TrackQuery) -> tuple[list[Release], list[str], Optional[str]]:
+        """One yt-dlp run. Returns (releases, logged errors, exception text)."""
         # Search for 5 results. Keep the query plain: a " topic" suffix (meant to
         # surface auto-generated Topic channel audio) pushed the actual song out of
         # the top 5 entirely for lesser-known tracks (Playa Fly - N God We Trust).
@@ -39,14 +98,17 @@ class YoutubeProvider(Provider):
         ydl_opts = get_ytdlp_base_opts(self.cookies_file)
 
         # Add search-specific options
+        error_log = _YtdlpErrorLog()
         ydl_opts.update({
             'quiet': True,
             'extract_flat': False,
             'ignoreerrors': True,
             'no_warnings': True,
+            'logger': error_log,
         })
 
         releases = []
+        failed = None
         try:
             with ytdlp_opts_isolated(ydl_opts) as opts, yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(search_query, download=False)
@@ -160,8 +222,8 @@ class YoutubeProvider(Provider):
                             year=year,
                             source_id=vid_id,
                         ))
-        except Exception:
-            # print(f"YouTube search error: {e}")
-            pass
+        except Exception as e:
+            logger.warning(f"YouTube search failed: {e}")
+            failed = str(e)
 
-        return releases
+        return releases, error_log.errors, failed
