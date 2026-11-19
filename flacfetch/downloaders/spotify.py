@@ -162,6 +162,11 @@ class SpotifyDownloader(Downloader):
     def _resolve_duration_secs(
         self, sp: "spotipy.Spotify", track_id: str, release: Release
     ) -> int:
+        return self._resolve_duration(sp, track_id, release)[0]
+
+    def _resolve_duration(
+        self, sp: "spotipy.Spotify", track_id: str, release: Release
+    ) -> tuple[int, bool]:
         """Resolve track duration in seconds.
 
         The PCM capture loop compares captured bytes against an expected size
@@ -173,18 +178,20 @@ class SpotifyDownloader(Downloader):
         Prefer the duration already on the release (from search). Otherwise
         look it up via the Web API, which is reliable and cheap. Only fall
         back to the 300s default if both fail.
+
+        Returns ``(seconds, known)``; ``known`` is False for the default guess.
         """
         if release.duration_seconds:
-            return release.duration_seconds
+            return release.duration_seconds, True
         try:
             duration_ms = sp.track(track_id).get("duration_ms")
             if duration_ms:
                 secs = duration_ms // 1000
                 logger.debug(f"Resolved duration from Spotify API: {secs}s")
-                return secs
+                return secs, True
         except Exception as e:
             logger.warning(f"Failed to look up track duration, using default: {e}")
-        return DEFAULT_DURATION_SECS
+        return DEFAULT_DURATION_SECS, False
 
     def download(
         self,
@@ -255,7 +262,7 @@ class SpotifyDownloader(Downloader):
         except Exception as e:
             raise SpotifyDownloadError(f"Authentication failed: {e}") from e
 
-        duration_secs = self._resolve_duration_secs(sp, track_id, release)
+        duration_secs, duration_known = self._resolve_duration(sp, track_id, release)
 
         # Unique device name per capture. A single Spotify account can register
         # several Connect devices at once, so if a previous librespot has not
@@ -402,7 +409,7 @@ class SpotifyDownloader(Downloader):
             # audio is a different song. Skipped when the duration is only the
             # default guess.
             if (
-                duration_secs != DEFAULT_DURATION_SECS
+                duration_known
                 and captured_s > duration_secs + MAX_CAPTURE_OVERRUN_SECS
             ):
                 raise SpotifyDownloadError(

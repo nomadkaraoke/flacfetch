@@ -533,8 +533,8 @@ LIBRESPOT_TAG="${LIBRESPOT_VERSION}${LIBRESPOT_BUILD:+-$LIBRESPOT_BUILD}"
 librespot_installed() {
   local v; v="$("$LIBRESPOT_BIN" --version 2>&1 | head -1)" || return 1
   [ "$(grep -oP 'librespot \K[0-9.]+' <<<"$v")" = "$LIBRESPOT_VERSION" ] || return 1
-  # A patched build prints its commit after the version; the stock release doesn't.
-  if [ -n "$LIBRESPOT_BUILD" ]; then grep -q " $LIBRESPOT_BUILD " <<<"$v"; else ! grep -qP 'librespot [0-9.]+ [0-9a-f]{7}' <<<"$v"; fi
+  # A patched build prints its commit after the version.
+  [ -z "$LIBRESPOT_BUILD" ] || grep -q " $LIBRESPOT_BUILD " <<<"$v"
 }
 if [ -x "$LIBRESPOT_BIN" ] && librespot_installed; then
   log "librespot $LIBRESPOT_TAG already installed"

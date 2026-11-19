@@ -345,7 +345,9 @@ playable.) Fix: run the patched librespot below. To confirm, run librespot with
 flacfetch passes `--autoplay off`: a librespot that handles these plays would
 otherwise autoplay a similar track afterwards, and since it decodes faster than
 real time, that track lands in the capture. As a backstop, a capture more than
-5 s longer than the track is refused.
+5 s longer than the track is refused. The check is skipped when the track's
+duration couldn't be resolved (neither search nor the Web API gave one, so the
+300 s default is used); `--autoplay off` is then the only protection.
 
 ### Patched librespot
 
@@ -362,9 +364,10 @@ needed because flacfetch uses the `pipe` backend):
 ```bash
 B=/mnt/flacfetch-data/librespot-build; export RUSTUP_HOME=$B/rustup CARGO_HOME=$B/cargo CARGO_TARGET_DIR=$B/target
 [ -x $CARGO_HOME/bin/cargo ] || curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path
-cd $B/src && git fetch origin pull/1870/head:pr1870 && git checkout pr1870
-$CARGO_HOME/bin/cargo build --release --locked --no-default-features --features native-tls
-sudo install -m 755 $B/target/release/librespot /usr/local/bin/librespot
+[ -d $B/src ] || git clone https://github.com/librespot-org/librespot.git $B/src
+cd $B/src && git fetch origin pull/1870/head && git checkout --detach afb2e6a  # or FETCH_HEAD for the PR's latest
+$CARGO_HOME/bin/cargo build --release --locked --no-default-features --features native-tls \
+  && sudo install -m 755 $B/target/release/librespot /usr/local/bin/librespot
 ```
 
 Once a release with the fix is out, set `LIBRESPOT_VERSION` to it and

@@ -1001,11 +1001,13 @@ class TestSpotifyCaptureStopsAtTrackEnd:
     faster than real time, a test capture of a 191 s track came back 378 s long.
     """
 
-    def _run(self, tmp_path, captured_secs, duration_secs=200):
+    def _run(self, tmp_path, captured_secs, duration_secs=200, api_duration_ms=None):
         creds_dir = tmp_path / "librespot"
         creds_dir.mkdir()
         (creds_dir / "credentials.json").write_text("{}")
-        downloader = SpotifyDownloader(provider=MagicMock())
+        provider = MagicMock()
+        provider._get_client.return_value.track.return_value = {"duration_ms": api_duration_ms}
+        downloader = SpotifyDownloader(provider=provider)
         downloader._librespot_path = "/fake/librespot"
         release = Release(
             title="Test",
@@ -1062,9 +1064,11 @@ class TestSpotifyCaptureStopsAtTrackEnd:
         assert not list((tmp_path / "out").glob("*.flac"))
 
     def test_overrun_check_skipped_when_duration_is_only_the_default(self, tmp_path):
-        from flacfetch.downloaders.spotify import DEFAULT_DURATION_SECS
-
-        _cmd, err, _result = self._run(
-            tmp_path, captured_secs=420, duration_secs=DEFAULT_DURATION_SECS
-        )
+        # No duration on the release and none from the API -> 300 s guess.
+        _cmd, err, _result = self._run(tmp_path, captured_secs=420, duration_secs=None)
         assert err is None
+
+    def test_overrun_check_applies_to_a_real_300s_track(self, tmp_path):
+        _cmd, err, result = self._run(tmp_path, captured_secs=420, duration_secs=300)
+        assert result is None
+        assert "played past the track" in str(err)
