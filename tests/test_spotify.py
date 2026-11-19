@@ -989,3 +989,86 @@ class TestAudioFormatOutput:
         vorbis_320 = Quality(format=AudioFormat.VORBIS, bitrate=320)
 
         assert vorbis_320 < flac
+
+
+class TestSpotifyCaptureStopsAtTrackEnd:
+    """A capture must contain only the requested track.
+
+    2026-11-19: Spotify began sending Web API plays to Connect devices as a
+    ``spotify:webapi:<id>`` context. librespot 0.8.0 fails those plays (the
+    Web API reports "403 Restriction violated"); a librespot that handles them
+    also autoplays a similar track afterwards, and because librespot decodes
+    faster than real time, a test capture of a 191 s track came back 378 s long.
+    """
+
+    def _run(self, tmp_path, captured_secs, duration_secs=200, api_duration_ms=None):
+        creds_dir = tmp_path / "librespot"
+        creds_dir.mkdir()
+        (creds_dir / "credentials.json").write_text("{}")
+        provider = MagicMock()
+        provider._get_client.return_value.track.return_value = {"duration_ms": api_duration_ms}
+        downloader = SpotifyDownloader(provider=provider)
+        downloader._librespot_path = "/fake/librespot"
+        release = Release(
+            title="Test",
+            artist="Test",
+            quality=Quality(AudioFormat.FLAC),
+            source_name="Spotify",
+            download_url="spotify:track:4PTG3Z6ehGkBFwjybzWkR8",
+            duration_seconds=duration_secs,
+        )
+
+        def fake_wait_for_download(pcm_path, *_args, **_kwargs):
+            pcm_path.write_bytes(b"\x00" * int(captured_secs * 44100 * 4))
+
+        def _convert(pcm_path, flac_tmp_path):
+            flac_tmp_path.write_bytes(b"")
+            return True
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+        with patch(
+            "flacfetch.downloaders.spotify.get_librespot_credentials_dir",
+            return_value=str(creds_dir),
+        ), patch(
+            "flacfetch.downloaders.spotify.subprocess.Popen", return_value=proc
+        ) as mock_popen, patch.object(
+            downloader, "_wait_for_device", return_value={"id": "dev"}
+        ), patch.object(
+            downloader, "_wait_for_track_load", return_value=True
+        ), patch.object(
+            downloader, "_wait_for_download", side_effect=fake_wait_for_download
+        ), patch.object(downloader, "_stop_librespot"), patch.object(
+            downloader, "_convert_pcm_to_flac", side_effect=_convert
+        ):
+            try:
+                result = downloader.download(release, str(tmp_path / "out"))
+            except SpotifyDownloadError as e:
+                return mock_popen.call_args.args[0], e, None
+        return mock_popen.call_args.args[0], None, result
+
+    def test_librespot_runs_with_autoplay_off(self, tmp_path):
+        cmd, _err, _result = self._run(tmp_path, captured_secs=200)
+        i = cmd.index("--autoplay")
+        assert cmd[i + 1] == "off"
+
+    def test_capture_matching_track_length_succeeds(self, tmp_path):
+        _cmd, err, result = self._run(tmp_path, captured_secs=200.9)
+        assert err is None
+        assert result.captured_s == pytest.approx(200.9, abs=0.01)
+
+    def test_capture_running_past_track_is_refused(self, tmp_path):
+        _cmd, err, result = self._run(tmp_path, captured_secs=378)
+        assert result is None
+        assert "played past the track" in str(err)
+        assert not list((tmp_path / "out").glob("*.flac"))
+
+    def test_overrun_check_skipped_when_duration_is_only_the_default(self, tmp_path):
+        # No duration on the release and none from the API -> 300 s guess.
+        _cmd, err, _result = self._run(tmp_path, captured_secs=420, duration_secs=None)
+        assert err is None
+
+    def test_overrun_check_applies_to_a_real_300s_track(self, tmp_path):
+        _cmd, err, result = self._run(tmp_path, captured_secs=420, duration_secs=300)
+        assert result is None
+        assert "played past the track" in str(err)

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.1] - 2026-11-19
+
+### Fixed
+- **Spotify downloads work again.** From 2026-11-14 every one failed with "403 Player
+  command failed: Restriction violated". Spotify now sends Web API plays as a
+  `spotify:webapi:<id>` context, which librespot 0.8.0 can't play. flacup now runs
+  librespot 0.8.0 plus upstream PR #1870 (`deploy/provision.sh` installs it). See
+  `docs/SPOTIFY_PROVIDER.md` § Patched librespot.
+- librespot now runs with `--autoplay off`, and a capture more than 5 s longer than
+  the track is refused (unless the duration is unknown and the 300 s default is in
+  use). With the patched librespot, autoplay put a second song into
+  a test capture (378 s captured for a 191 s track).
+
 ## [0.37.0] - 2026-11-03
 
 ### Fixed

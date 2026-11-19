@@ -331,6 +331,49 @@ rm ~/.cache-spotipy
 flacfetch "test query"  # Will prompt for OAuth
 ```
 
+### "403 Player command failed: Restriction violated, reason: UNKNOWN"
+
+Every Spotify download fails with this when librespot can't handle the play
+command Spotify sends it. Since 2026-11-14, a Web API play with `uris` reaches
+the device as a `spotify:webapi:<id>` context. Stock librespot 0.8.0 tries to
+resolve that context, gets a 400 and fails the play; the Web API reports that as
+this 403. (Account and track are fine: `/me` says `premium`, the track is
+playable.) Fix: run the patched librespot below. To confirm, run librespot with
+`-v`: the log shows `context-resolve ... 400 Bad Request` and
+`context is not available. type: Default`.
+
+flacfetch passes `--autoplay off`: a librespot that handles these plays would
+otherwise autoplay a similar track afterwards, and since it decodes faster than
+real time, that track lands in the capture. As a backstop, a capture more than
+5 s longer than the track is refused. The check is skipped when the track's
+duration couldn't be resolved (neither search nor the Web API gave one, so the
+300 s default is used); `--autoplay off` is then the only protection.
+
+### Patched librespot
+
+Until a librespot release includes upstream PR #1870 (librespot-org/librespot),
+flacup runs 0.8.0 built from that PR (commit `afb2e6a`, prints
+`librespot 0.8.0 afb2e6a`). The binary is at
+`gs://karaoke-gen-storage-nomadkaraoke/binaries/librespot-0.8.0-afb2e6a-linux-x86_64`
+and `deploy/provision.sh` installs it (`LIBRESPOT_BUILD`). The stock 0.8.0
+binary is kept on flacup as `/usr/local/bin/librespot.0.8.0` for rollback.
+
+To rebuild on flacup (about 2 minutes; toolchain on the data disk, no ALSA
+needed because flacfetch uses the `pipe` backend):
+
+```bash
+B=/mnt/flacfetch-data/librespot-build; export RUSTUP_HOME=$B/rustup CARGO_HOME=$B/cargo CARGO_TARGET_DIR=$B/target
+[ -x $CARGO_HOME/bin/cargo ] || curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path
+[ -d $B/src ] || git clone https://github.com/librespot-org/librespot.git $B/src
+cd $B/src && git fetch origin pull/1870/head && git checkout --detach afb2e6a  # or FETCH_HEAD for the PR's latest
+$CARGO_HOME/bin/cargo build --release --locked --no-default-features --features native-tls \
+  && sudo install -m 755 $B/target/release/librespot /usr/local/bin/librespot
+```
+
+Once a release with the fix is out, set `LIBRESPOT_VERSION` to it and
+`LIBRESPOT_BUILD=""` in `deploy/provision.sh`, and upload the binary as
+`binaries/librespot-<version>-linux-x86_64`.
+
 ### "403 Forbidden" errors
 
 This may indicate:

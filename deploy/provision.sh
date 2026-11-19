@@ -40,6 +40,11 @@ FF_GCP_PROJECT="${FF_GCP_PROJECT:-nomadkaraoke}"
 FF_GCS_BUCKET="${FF_GCS_BUCKET:-karaoke-gen-storage-nomadkaraoke}"
 FF_MIN_DATA_GB="${FF_MIN_DATA_GB:-50}"
 LIBRESPOT_VERSION="${LIBRESPOT_VERSION:-0.8.0}"
+# librespot 0.8.0 fails every Web API play since Spotify's 2026-11 change
+# ("403 Restriction violated"). We run 0.8.0 plus upstream PR #1870 (commit
+# afb2e6a) until a release includes it. Build recipe: docs/SPOTIFY_PROVIDER.md
+# § Patched librespot. Set LIBRESPOT_BUILD="" to go back to the stock release.
+LIBRESPOT_BUILD="${LIBRESPOT_BUILD-afb2e6a}"
 SPOTIPY_REDIRECT_URI="${SPOTIPY_REDIRECT_URI:-http://127.0.0.1:8888/callback}"
 # Staging guard: keep the credential keeper + cred-check timer STOPPED so this
 # box does not fight the live box for the shared Google session / the rotating
@@ -524,12 +529,19 @@ chmod 600 "$RUNTIME_ENV"
 log "Stage 7 — librespot (Spotify capture)"
 # =============================================================================
 sm_get() { "$VENV/bin/python" "$HERE/_sm_get.py" "$1" 2>/dev/null || true; }
-if [ -x "$LIBRESPOT_BIN" ] && [ "$("$LIBRESPOT_BIN" --version 2>&1 | grep -oP 'librespot \K[0-9.]+' || echo x)" = "$LIBRESPOT_VERSION" ]; then
-  log "librespot $LIBRESPOT_VERSION already installed"
+LIBRESPOT_TAG="${LIBRESPOT_VERSION}${LIBRESPOT_BUILD:+-$LIBRESPOT_BUILD}"
+librespot_installed() {
+  local v; v="$("$LIBRESPOT_BIN" --version 2>&1 | head -1)" || return 1
+  [ "$(grep -oP 'librespot \K[0-9.]+' <<<"$v")" = "$LIBRESPOT_VERSION" ] || return 1
+  # A patched build prints its commit after the version.
+  [ -z "$LIBRESPOT_BUILD" ] || grep -q " $LIBRESPOT_BUILD " <<<"$v"
+}
+if [ -x "$LIBRESPOT_BIN" ] && librespot_installed; then
+  log "librespot $LIBRESPOT_TAG already installed"
 elif [ "$HAVE_GCP" = true ]; then
-  log "downloading librespot $LIBRESPOT_VERSION from GCS"
+  log "downloading librespot $LIBRESPOT_TAG from GCS"
   if "$VENV/bin/python" "$HERE/_gcs_get.py" \
-        "$GCS_BUCKET" "binaries/librespot-${LIBRESPOT_VERSION}-linux-x86_64" "$LIBRESPOT_BIN"; then
+        "$GCS_BUCKET" "binaries/librespot-${LIBRESPOT_TAG}-linux-x86_64" "$LIBRESPOT_BIN"; then
     chmod +x "$LIBRESPOT_BIN"; log "installed: $("$LIBRESPOT_BIN" --version 2>&1 | head -1)"
   else
     warn "librespot download failed"

@@ -37,6 +37,15 @@ SAMPLE_RATE = 44100
 CHANNELS = 2
 BIT_DEPTH = 16
 
+# Used when a track's duration can't be resolved (see _resolve_duration_secs).
+DEFAULT_DURATION_SECS = 300
+
+# A capture longer than the track by more than this is refused: it means
+# librespot played on past the requested track (e.g. Spotify autoplay queued a
+# "similar" track), so the PCM contains someone else's audio. Durations are
+# floored to whole seconds, so allow a small margin.
+MAX_CAPTURE_OVERRUN_SECS = 5
+
 # Serialize all Spotify captures across the process.
 #
 # A Spotify download works by registering a librespot Spotify Connect device on
@@ -153,6 +162,11 @@ class SpotifyDownloader(Downloader):
     def _resolve_duration_secs(
         self, sp: "spotipy.Spotify", track_id: str, release: Release
     ) -> int:
+        return self._resolve_duration(sp, track_id, release)[0]
+
+    def _resolve_duration(
+        self, sp: "spotipy.Spotify", track_id: str, release: Release
+    ) -> tuple[int, bool]:
         """Resolve track duration in seconds.
 
         The PCM capture loop compares captured bytes against an expected size
@@ -164,18 +178,20 @@ class SpotifyDownloader(Downloader):
         Prefer the duration already on the release (from search). Otherwise
         look it up via the Web API, which is reliable and cheap. Only fall
         back to the 300s default if both fail.
+
+        Returns ``(seconds, known)``; ``known`` is False for the default guess.
         """
         if release.duration_seconds:
-            return release.duration_seconds
+            return release.duration_seconds, True
         try:
             duration_ms = sp.track(track_id).get("duration_ms")
             if duration_ms:
                 secs = duration_ms // 1000
                 logger.debug(f"Resolved duration from Spotify API: {secs}s")
-                return secs
+                return secs, True
         except Exception as e:
             logger.warning(f"Failed to look up track duration, using default: {e}")
-        return 300
+        return DEFAULT_DURATION_SECS, False
 
     def download(
         self,
@@ -246,7 +262,7 @@ class SpotifyDownloader(Downloader):
         except Exception as e:
             raise SpotifyDownloadError(f"Authentication failed: {e}") from e
 
-        duration_secs = self._resolve_duration_secs(sp, track_id, release)
+        duration_secs, duration_known = self._resolve_duration(sp, track_id, release)
 
         # Unique device name per capture. A single Spotify account can register
         # several Connect devices at once, so if a previous librespot has not
@@ -267,6 +283,12 @@ class SpotifyDownloader(Downloader):
             "--backend", "pipe",
             "--bitrate", "320",
             "--disable-discovery",
+            # Never play past the requested track. librespot decodes faster than
+            # real time, so anything autoplay queues after our track would be
+            # piped straight into this capture. Since Spotify started sending
+            # Web API plays as a "spotify:webapi:<id>" context (2026-11), a
+            # librespot that handles that context also autoplays after it.
+            "--autoplay", "off",
             # Volume settings for full-quality recording:
             "--initial-volume", "100",  # Start at max volume
             "--volume-ctrl", "fixed",  # No dynamic volume adjustments
@@ -382,6 +404,19 @@ class SpotifyDownloader(Downloader):
             pcm_size = pcm_path.stat().st_size
             captured_s = pcm_size / (SAMPLE_RATE * 4)
             logger.debug(f"Captured {pcm_size / (1024*1024):.2f} MB PCM")
+
+            # Refuse a capture that ran on past the requested track: the extra
+            # audio is a different song. Skipped when the duration is only the
+            # default guess.
+            if (
+                duration_known
+                and captured_s > duration_secs + MAX_CAPTURE_OVERRUN_SECS
+            ):
+                raise SpotifyDownloadError(
+                    f"Captured {captured_s:.1f}s of audio but {track_uri} is "
+                    f"{duration_secs}s long; librespot played past the track, "
+                    "refusing to save audio that includes another song"
+                )
 
             # Convert PCM to a per-download temp FLAC, then atomically move it
             # into place. The atomic rename guarantees the returned path is
