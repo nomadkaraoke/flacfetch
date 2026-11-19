@@ -37,6 +37,15 @@ SAMPLE_RATE = 44100
 CHANNELS = 2
 BIT_DEPTH = 16
 
+# Used when a track's duration can't be resolved (see _resolve_duration_secs).
+DEFAULT_DURATION_SECS = 300
+
+# A capture longer than the track by more than this is refused: it means
+# librespot played on past the requested track (e.g. Spotify autoplay queued a
+# "similar" track), so the PCM contains someone else's audio. Durations are
+# floored to whole seconds, so allow a small margin.
+MAX_CAPTURE_OVERRUN_SECS = 5
+
 # Serialize all Spotify captures across the process.
 #
 # A Spotify download works by registering a librespot Spotify Connect device on
@@ -175,7 +184,7 @@ class SpotifyDownloader(Downloader):
                 return secs
         except Exception as e:
             logger.warning(f"Failed to look up track duration, using default: {e}")
-        return 300
+        return DEFAULT_DURATION_SECS
 
     def download(
         self,
@@ -267,6 +276,12 @@ class SpotifyDownloader(Downloader):
             "--backend", "pipe",
             "--bitrate", "320",
             "--disable-discovery",
+            # Never play past the requested track. librespot decodes faster than
+            # real time, so anything autoplay queues after our track would be
+            # piped straight into this capture. Since Spotify started sending
+            # Web API plays as a "spotify:webapi:<id>" context (2026-11), a
+            # librespot that handles that context also autoplays after it.
+            "--autoplay", "off",
             # Volume settings for full-quality recording:
             "--initial-volume", "100",  # Start at max volume
             "--volume-ctrl", "fixed",  # No dynamic volume adjustments
@@ -382,6 +397,19 @@ class SpotifyDownloader(Downloader):
             pcm_size = pcm_path.stat().st_size
             captured_s = pcm_size / (SAMPLE_RATE * 4)
             logger.debug(f"Captured {pcm_size / (1024*1024):.2f} MB PCM")
+
+            # Refuse a capture that ran on past the requested track: the extra
+            # audio is a different song. Skipped when the duration is only the
+            # default guess.
+            if (
+                duration_secs != DEFAULT_DURATION_SECS
+                and captured_s > duration_secs + MAX_CAPTURE_OVERRUN_SECS
+            ):
+                raise SpotifyDownloadError(
+                    f"Captured {captured_s:.1f}s of audio but {track_uri} is "
+                    f"{duration_secs}s long; librespot played past the track, "
+                    "refusing to save audio that includes another song"
+                )
 
             # Convert PCM to a per-download temp FLAC, then atomically move it
             # into place. The atomic rename guarantees the returned path is
