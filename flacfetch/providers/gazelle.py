@@ -1105,7 +1105,13 @@ class GazelleProvider(Provider):
             if expanded:
                 logger.info(f"{self.name}: also searching contraction form '{expanded}'")
                 seen = {r.source_id for r in releases}
-                for r in self._search_browse_filelist(query, expanded):
+                try:
+                    extra = self._search_browse_filelist(query, expanded)
+                except Exception as e:
+                    # Never lose the first search's matches to the extra one.
+                    logger.warning(f"{self.name}: contraction search failed, keeping first results: {e}")
+                    extra = []
+                for r in extra:
                     if r.source_id not in seen:
                         seen.add(r.source_id)
                         releases.append(r)

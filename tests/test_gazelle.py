@@ -1116,6 +1116,20 @@ class TestContractionFallback:
         assert calls == ["lets get retarded", "let s get retarded"]
         assert result == [comp, album]
 
+    def test_expanded_search_failure_keeps_first_results(self, provider, monkeypatch):
+        import requests
+
+        from flacfetch.core.models import TrackQuery
+        comp = MagicMock(source_id="1")
+
+        def fake(query, filelist):
+            if filelist == "let s get retarded":
+                raise requests.Timeout("slow tracker")
+            return [comp]
+
+        monkeypatch.setattr(provider, "_search_browse_filelist", fake)
+        assert provider._search_browse(TrackQuery(artist="x", title="lets get retarded")) == [comp]
+
     def test_no_retry_without_contractions(self, provider, monkeypatch):
         from flacfetch.core.models import TrackQuery
         calls = []
