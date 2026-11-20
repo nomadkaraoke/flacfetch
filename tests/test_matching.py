@@ -27,3 +27,15 @@ def test_no_match():
     score = calculate_match_score("Tonight", "Tomorrow.flac")
     assert score < 0.5
 
+
+
+def test_apostrophe_less_title_matches_contraction():
+    # Typed "lets", the file says "Let's" (straight or curly)
+    assert calculate_match_score("lets get retarded", "05 - Let's Get Retarded.flac") == 1.0
+    assert calculate_match_score("lets get retarded", "05 - Let’s Get Retarded.flac") == 1.0
+    assert calculate_match_score("Let's Get Retarded", "05 - Lets Get Retarded.flac") == 1.0
+
+
+def test_underscored_scene_filename_matches():
+    score = calculate_match_score("lets get retarded", "306-black_eyed_peas-lets_get_retarded.flac")
+    assert score > 0.6

@@ -1080,3 +1080,59 @@ class TestDownloadBudget:
         p.fetch_artifact_by_id("42")
         ledger = p._load_download_ledger("42")
         assert [r["kind"] for r in ledger["requests"]] == ["token"]
+
+
+class TestContractionFallback:
+    """Apostrophe-less contractions ("lets") miss the tracker index, which stores "let s"."""
+
+    @pytest.fixture
+    def provider(self):
+        return ConcreteGazelleProvider(api_key="test", base_url="https://test.example", cache_subdir="test")
+
+    @pytest.mark.parametrize("title,expected", [
+        ("lets get retarded", "let s get retarded"),
+        ("Dont Stop Believin", "don t Stop Believin"),
+        ("Im Yours", "i m Yours"),
+        ("Hello", None),
+        ("well ill be there", None),
+    ])
+    def test_expand_contractions(self, provider, title, expected):
+        assert provider._expand_contractions(title) == expected
+
+    def test_curly_apostrophe_sanitized(self, provider):
+        assert provider._sanitize_filelist_query("Let’s Get It Started") == "Let s Get It Started"
+
+    def test_also_searches_expanded_title_and_merges(self, provider, monkeypatch):
+        from flacfetch.core.models import TrackQuery
+        comp, album, dup = MagicMock(source_id="1"), MagicMock(source_id="2"), MagicMock(source_id="1")
+        calls = []
+
+        def fake(query, filelist):
+            calls.append(filelist)
+            return [comp] if filelist == "lets get retarded" else [album, dup]
+
+        monkeypatch.setattr(provider, "_search_browse_filelist", fake)
+        result = provider._search_browse(TrackQuery(artist="black eyed peas", title="lets get retarded"))
+        assert calls == ["lets get retarded", "let s get retarded"]
+        assert result == [comp, album]
+
+    def test_expanded_search_failure_keeps_first_results(self, provider, monkeypatch):
+        import requests
+
+        from flacfetch.core.models import TrackQuery
+        comp = MagicMock(source_id="1")
+
+        def fake(query, filelist):
+            if filelist == "let s get retarded":
+                raise requests.Timeout("slow tracker")
+            return [comp]
+
+        monkeypatch.setattr(provider, "_search_browse_filelist", fake)
+        assert provider._search_browse(TrackQuery(artist="x", title="lets get retarded")) == [comp]
+
+    def test_no_retry_without_contractions(self, provider, monkeypatch):
+        from flacfetch.core.models import TrackQuery
+        calls = []
+        monkeypatch.setattr(provider, "_search_browse_filelist", lambda q, f: calls.append(f) or [])
+        assert provider._search_browse(TrackQuery(artist="x", title="Hello")) == []
+        assert calls == ["Hello"]

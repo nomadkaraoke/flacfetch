@@ -1,6 +1,14 @@
 import re
 from difflib import SequenceMatcher
 
+# Straight, curly and backtick apostrophes. People type "lets" / "dont" without
+# them while release files say "Let's" / "Don’t", so matching ignores them.
+_APOSTROPHES = re.compile(r"['\u2018\u2019`]")
+
+
+def _strip_apostrophes(text: str) -> str:
+    return _APOSTROPHES.sub("", text)
+
 
 def clean_filename(filename: str) -> str:
     # Remove file extension
@@ -9,6 +17,8 @@ def clean_filename(filename: str) -> str:
     # Remove track numbers like "01 - ", "01. ", "1-", "A1 "
     filename = re.sub(r'^(\d{1,3}[ .-]+)+', '', filename)
     filename = re.sub(r'^[A-D]\d{1,2}[ .-]+', '', filename)
+    # Scene-style names use underscores for spaces ("lets_get_retarded")
+    filename = filename.replace('_', ' ')
     # Remove " - " separators which might remain
     filename = filename.replace(' - ', ' ')
     return filename.strip()
@@ -18,8 +28,8 @@ def calculate_match_score(track_title: str, filename: str) -> float:
     Returns a score 0.0 - 1.0 indicating how well the filename matches the track title.
     1.0 = Exact match (ignoring case/punctuation)
     """
-    cleaned_name = clean_filename(filename).lower()
-    target = track_title.lower()
+    cleaned_name = _strip_apostrophes(clean_filename(filename).lower())
+    target = _strip_apostrophes(track_title.lower())
 
     # Exact match check
     if cleaned_name == target:
