@@ -34,6 +34,27 @@ ALBUM_SEARCH_MAX_GROUPS = 3
 # Quotes: ' (apostrophe breaks searches like "I'm With You")
 SPHINX_SPECIAL_CHARS = frozenset(r'()|\\-@~&<>!"/*$^=?:[],.;\'')
 
+# Curly apostrophes split words in the tracker index just like straight ones.
+APOSTROPHE_LIKE_CHARS = frozenset('\u2018\u2019`')
+
+# Contractions people type without the apostrophe ("lets get it started").
+# The tracker index splits "Let's" into "let" + "s", so the filelist search for
+# "lets" finds nothing; the fallback search spells these out as "let s".
+# Only words that are not also ordinary words (so no "ill", "well", "were").
+APOSTROPHE_LESS_CONTRACTIONS = {
+    "aint": "ain t", "arent": "aren t", "cant": "can t", "couldnt": "couldn t",
+    "couldve": "could ve", "didnt": "didn t", "doesnt": "doesn t", "dont": "don t",
+    "hadnt": "hadn t", "hasnt": "hasn t", "havent": "haven t", "hes": "he s",
+    "heres": "here s", "im": "i m", "isnt": "isn t", "its": "it s", "ive": "i ve",
+    "lets": "let s", "mustnt": "mustn t", "shes": "she s", "shouldnt": "shouldn t",
+    "shouldve": "should ve", "thats": "that s", "theres": "there s", "theyd": "they d",
+    "theyll": "they ll", "theyre": "they re", "theyve": "they ve", "wasnt": "wasn t",
+    "weve": "we ve", "werent": "weren t", "whats": "what s", "wheres": "where s",
+    "whos": "who s", "wont": "won t", "wouldnt": "wouldn t", "wouldve": "would ve",
+    "yall": "y all", "youd": "you d", "youll": "you ll", "youre": "you re",
+    "youve": "you ve",
+}
+
 
 class GazelleProvider(Provider):
     """Base class for Gazelle-based private music trackers.
@@ -161,7 +182,7 @@ class GazelleProvider(Provider):
         are NOT modified - Sphinx handles these via charset_table and ngram_chars.
         """
         sanitized = query
-        for char in SPHINX_SPECIAL_CHARS:
+        for char in SPHINX_SPECIAL_CHARS | APOSTROPHE_LIKE_CHARS:
             sanitized = sanitized.replace(char, ' ')
 
         # Collapse multiple spaces into one
@@ -169,6 +190,19 @@ class GazelleProvider(Provider):
 
         logger.debug(f"Sanitized filelist query: '{query}' -> '{sanitized}'")
         return sanitized
+
+    @staticmethod
+    def _expand_contractions(sanitized_title: str) -> Optional[str]:
+        """Spell out apostrophe-less contractions the way the index stores them.
+
+        "lets get retarded" -> "let s get retarded". Returns None when the title
+        has none, so the caller knows there is no fallback search to run.
+        """
+        words = sanitized_title.split()
+        expanded = [APOSTROPHE_LESS_CONTRACTIONS.get(w.lower(), w) for w in words]
+        if expanded == words:
+            return None
+        return " ".join(expanded)
 
     def _find_best_target_file(self, file_list_str: str, track_title: str) -> tuple[Optional[str], Optional[int], float]:
         """Find the best matching file in a torrent's file list.
@@ -1062,53 +1096,19 @@ class GazelleProvider(Provider):
         # Sanitize the filelist query to remove Sphinx special operators
         sanitized_title = self._sanitize_filelist_query(query.title) if query.title else ""
 
-        params = {
-            "action": "browse",
-            "artistname": query.artist,
-            "filelist": sanitized_title,
-            "format": "FLAC"
-        }
-
-        logger.debug(f"Searching {self.name} with params: {params}")
-
         try:
-            ordered_group_ids, token_eligibility = self._browse(params)
-            logger.debug(f"Found {len(ordered_group_ids)} groups in {self.name} response")
-
-            limited_group_ids = ordered_group_ids[:self.search_limit]
-
-            if len(ordered_group_ids) > self.search_limit:
-                logger.info(f"Limiting detailed fetch to top {self.search_limit} groups (out of {len(ordered_group_ids)} found)")
-
-            logger.info(f"Fetching details for up to {len(limited_group_ids)} groups to resolve file lists...")
-
-            releases = []
-            excellent_found = False
-            groups_fetched = 0
-
-            for gid in limited_group_ids:
-                # Rate limit: sleep before each request
-                time.sleep(1.1)
-
-                group_releases = self._fetch_group_details(gid, query.title, token_eligibility)
-                releases.extend(group_releases)
-                groups_fetched += 1
-
-                # Check for early termination
-                if self.early_termination and not excellent_found:
-                    for r in group_releases:
-                        if (r.seeders and r.seeders >= self.early_termination_seeders and
-                            r.release_type in self.early_termination_release_types):
-                            excellent_found = True
-                            logger.info(f"Found excellent result: {r.artist} - {r.title} ({r.seeders} seeders, {r.release_type})")
-                            break
-
-                # If we found an excellent result, fetch a few more groups then stop
-                if excellent_found and groups_fetched >= min(5, len(limited_group_ids)):
-                    logger.info(f"Early termination: stopping after {groups_fetched} groups (found excellent result)")
-                    break
-
-            logger.info(f"Total matching tracks parsed from {self.name}: {len(releases)}")
+            releases = self._search_browse_filelist(query, sanitized_title)
+            # "lets" only finds files that also drop the apostrophe (often a
+            # stray compilation), never the album's "Let's", so always search
+            # the spelled-out form too and merge.
+            expanded = self._expand_contractions(sanitized_title)
+            if expanded:
+                logger.info(f"{self.name}: also searching contraction form '{expanded}'")
+                seen = {r.source_id for r in releases}
+                for r in self._search_browse_filelist(query, expanded):
+                    if r.source_id not in seen:
+                        seen.add(r.source_id)
+                        releases.append(r)
             return releases
         except requests.RequestException as e:
             logger.error(f"Connection error to {self.name}: {e}")
@@ -1116,3 +1116,53 @@ class GazelleProvider(Provider):
         except Exception as e:
             logger.exception(f"Unexpected error in {self.name}Provider: {e}")
             return []
+
+    def _search_browse_filelist(self, query: TrackQuery, filelist: str) -> list[Release]:
+        """One browse by artist + filelist words, then file lists for the top groups."""
+        params = {
+            "action": "browse",
+            "artistname": query.artist,
+            "filelist": filelist,
+            "format": "FLAC"
+        }
+
+        logger.debug(f"Searching {self.name} with params: {params}")
+
+        ordered_group_ids, token_eligibility = self._browse(params)
+        logger.debug(f"Found {len(ordered_group_ids)} groups in {self.name} response")
+
+        limited_group_ids = ordered_group_ids[:self.search_limit]
+
+        if len(ordered_group_ids) > self.search_limit:
+            logger.info(f"Limiting detailed fetch to top {self.search_limit} groups (out of {len(ordered_group_ids)} found)")
+
+        logger.info(f"Fetching details for up to {len(limited_group_ids)} groups to resolve file lists...")
+
+        releases = []
+        excellent_found = False
+        groups_fetched = 0
+
+        for gid in limited_group_ids:
+            # Rate limit: sleep before each request
+            time.sleep(1.1)
+
+            group_releases = self._fetch_group_details(gid, query.title, token_eligibility)
+            releases.extend(group_releases)
+            groups_fetched += 1
+
+            # Check for early termination
+            if self.early_termination and not excellent_found:
+                for r in group_releases:
+                    if (r.seeders and r.seeders >= self.early_termination_seeders and
+                        r.release_type in self.early_termination_release_types):
+                        excellent_found = True
+                        logger.info(f"Found excellent result: {r.artist} - {r.title} ({r.seeders} seeders, {r.release_type})")
+                        break
+
+            # If we found an excellent result, fetch a few more groups then stop
+            if excellent_found and groups_fetched >= min(5, len(limited_group_ids)):
+                logger.info(f"Early termination: stopping after {groups_fetched} groups (found excellent result)")
+                break
+
+        logger.info(f"Total matching tracks parsed from {self.name}: {len(releases)}")
+        return releases

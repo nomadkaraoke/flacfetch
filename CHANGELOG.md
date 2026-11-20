@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.37.2] - 2026-11-20
+
+### Fixed
+- **Tracker search finds titles typed without the apostrophe.** "lets get retarded"
+  found no RED/OPS albums, because the tracker index stores "Let's" as `let` + `s`.
+  When a title has an apostrophe-less contraction (lets, dont, im, cant, ...),
+  RED/OPS now also search the spelled-out form ("let s") and merge the results.
+  Curly apostrophes are now stripped from filelist queries too.
+- Matching a title to a filename now ignores apostrophes and treats underscores as
+  spaces, so "lets get retarded" matches `03 - Let's Get Retarded.flac` exactly and
+  `306-black_eyed_peas-lets_get_retarded.flac` too.
+
 ## [0.37.1] - 2026-11-19
 
 ### Fixed
